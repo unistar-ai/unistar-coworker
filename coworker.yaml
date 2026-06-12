@@ -1,6 +1,6 @@
 llm:
   base_url: http://localhost:11434/v1
-  model: gemma4:26b
+  model: gemma4:26b-a4b-it-qat
   context_limit: 64000
 
 mcp:
