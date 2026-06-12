@@ -15,7 +15,6 @@ use async_trait::async_trait;
 #[derive(Debug)]
 pub struct JsonStore {
     root: PathBuf,
-    rollups: HashMap<String, FlakyTestRollup>,
 }
 
 impl JsonStore {
@@ -29,14 +28,7 @@ impl JsonStore {
         fs::create_dir_all(root.join("workflow_runs"))?;
         fs::create_dir_all(root.join("backport_queue"))?;
 
-        let rollups_path = root.join("flaky/tests.json");
-        let rollups = if rollups_path.exists() {
-            read_json(&rollups_path)?
-        } else {
-            HashMap::new()
-        };
-
-        Ok(Self { root, rollups })
+        Ok(Self { root })
     }
 
     fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -61,32 +53,6 @@ impl JsonStore {
 
     fn repo_file(repo: &str) -> String {
         repo.replace('/', "__")
-    }
-
-    fn save_rollups(&self) -> Result<()> {
-        Self::write_json(&self.root.join("flaky/tests.json"), &self.rollups)
-    }
-
-    fn upsert_rollup(&mut self, incident: &FlakyIncident) {
-        let entry = self
-            .rollups
-            .entry(incident.fingerprint.clone())
-            .or_insert_with(|| FlakyTestRollup {
-                fingerprint: incident.fingerprint.clone(),
-                repo: incident.repo.clone(),
-                workflow: incident.workflow.clone(),
-                job: incident.job.clone(),
-                test_name: incident.test_name.clone(),
-                first_seen: incident.ts,
-                last_seen: incident.ts,
-                incident_count: 0,
-                rerun_attempts: 0,
-                rerun_successes: 0,
-                last_error_signature: incident.log_excerpt.chars().take(200).collect(),
-            });
-        entry.last_seen = incident.ts;
-        entry.incident_count += 1;
-        entry.last_error_signature = incident.log_excerpt.chars().take(200).collect();
     }
 }
 
@@ -165,7 +131,7 @@ impl Store for JsonStore {
             let map: HashMap<u32, PrSnapshot> = read_json(&entry.path())?;
             out.extend(map.into_values());
         }
-        out.sort_by(|a, b| b.fetched_at.cmp(&a.fetched_at));
+        out.sort_by_key(|b| std::cmp::Reverse(b.fetched_at));
         Ok(out)
     }
 
@@ -262,7 +228,7 @@ impl Store for JsonStore {
         let mut incidents: Vec<FlakyIncident> = raw
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l))
+            .map(serde_json::from_str)
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let idx = incidents
             .iter()
@@ -301,7 +267,7 @@ impl Store for JsonStore {
             .filter(|t| q.repo.as_ref().is_none_or(|r| &t.repo == r))
             .filter(|t| since.is_none_or(|s| t.last_seen >= s))
             .collect();
-        list.sort_by(|a, b| b.incident_count.cmp(&a.incident_count));
+        list.sort_by_key(|b| std::cmp::Reverse(b.incident_count));
         list.truncate(q.limit);
         Ok(list)
     }
@@ -327,7 +293,7 @@ impl Store for JsonStore {
             .into_values()
             .filter(|i| repo.is_none_or(|r| i.repo == r))
             .collect();
-        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        list.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(list)
     }
 
@@ -366,7 +332,7 @@ impl Store for JsonStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Classification, DigestSummary};
+    use crate::store::DigestSummary;
     use chrono::Utc;
 
     #[tokio::test]

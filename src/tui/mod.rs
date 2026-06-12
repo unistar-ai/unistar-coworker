@@ -59,13 +59,22 @@ async fn apply_event(state: &SharedState, ev: AppEvent) {
             s.engine_busy = true;
             s.status = format!("running {workflow_id}");
         }
-        AppEvent::WorkflowFinished { ok, message, .. } => {
+        AppEvent::WorkflowFinished {
+            workflow_id,
+            ok,
+            message,
+        } => {
             s.engine_busy = false;
-            s.status = if ok {
-                message
+            let status = if ok {
+                message.clone()
             } else {
                 format!("error: {message}")
             };
+            s.status = status;
+            s.push_log(
+                "info",
+                format!("{workflow_id} finished: {message}"),
+            );
         }
         AppEvent::StatusMessage(m) => {
             s.status = m.clone();
@@ -199,7 +208,7 @@ async fn set_tab(state: &SharedState, tab: Tab, list_state: &mut ListState) {
 
 fn list_len(s: &AppState) -> usize {
     match s.tab {
-        Tab::Dashboard => 1,
+        Tab::Dashboard => s.digest_history.len().max(1),
         Tab::Prs => s.prs.len().max(1),
         Tab::Approvals => s.approvals.len().max(1),
         Tab::Logs => s.logs.len().max(1),
@@ -262,13 +271,22 @@ fn draw_hints(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
 fn draw_list(frame: &mut ratatui::Frame, area: Rect, state: &AppState, list_state: &mut ListState) {
     let items: Vec<ListItem> = match state.tab {
         Tab::Dashboard => {
-            if let Some(d) = &state.latest_digest {
-                vec![ListItem::new(format!(
-                    "{} — attention:{} flaky:{}",
-                    d.date, d.summary.needs_attention, d.summary.flaky_candidates
-                ))]
-            } else {
+            if state.digest_history.is_empty() {
                 vec![ListItem::new("No digest — press r")]
+            } else {
+                state
+                    .digest_history
+                    .iter()
+                    .map(|d| {
+                        ListItem::new(format!(
+                            "{} — attention:{} flaky:{} ok:{}",
+                            d.date,
+                            d.summary.needs_attention,
+                            d.summary.flaky_candidates,
+                            d.summary.ignorable
+                        ))
+                    })
+                    .collect()
             }
         }
         Tab::Prs => {
@@ -341,11 +359,25 @@ fn draw_list(frame: &mut ratatui::Frame, area: Rect, state: &AppState, list_stat
 
 fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let text = match state.tab {
-        Tab::Dashboard => state
-            .latest_digest
-            .as_ref()
-            .map(|d| d.body_md.clone())
-            .unwrap_or_else(|| "Press r to run daily-work.".into()),
+        Tab::Dashboard => {
+            if state.selected_index == 0 {
+                state
+                    .latest_digest
+                    .as_ref()
+                    .map(|d| d.body_md.clone())
+                    .unwrap_or_else(|| "Press r to run daily-work.".into())
+            } else if let Some(meta) = state.selected_digest() {
+                format!(
+                    "Digest {}\nattention: {}  flaky: {}  ok: {}\n\n(full body only for latest run)",
+                    meta.date,
+                    meta.summary.needs_attention,
+                    meta.summary.flaky_candidates,
+                    meta.summary.ignorable
+                )
+            } else {
+                "Press r to run daily-work.".into()
+            }
+        }
         Tab::Prs => state
             .selected_pr()
             .map(|p| {

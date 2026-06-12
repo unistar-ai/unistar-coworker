@@ -6,7 +6,6 @@ use crate::error::{CoworkerError, Result};
 #[derive(Debug, Clone)]
 pub struct WorkflowDef {
     pub id: String,
-    pub enabled: bool,
     pub skill: PathBuf,
     pub schedule: Option<String>,
 }
@@ -26,15 +25,6 @@ impl<'a> WorkflowRunner<'a> {
         Self { config }
     }
 
-    pub fn enabled(&self) -> Vec<WorkflowDef> {
-        self.config
-            .workflows
-            .iter()
-            .filter(|(_, w)| w.enabled)
-            .map(|(id, w)| self.to_def(id, w))
-            .collect()
-    }
-
     pub fn get(&self, id: &str) -> Result<WorkflowDef> {
         let w = self
             .config
@@ -52,7 +42,6 @@ impl<'a> WorkflowRunner<'a> {
     fn to_def(&self, id: &str, w: &WorkflowConfig) -> WorkflowDef {
         WorkflowDef {
             id: id.to_string(),
-            enabled: w.enabled,
             skill: PathBuf::from(&w.skill),
             schedule: w.schedule.clone(),
         }

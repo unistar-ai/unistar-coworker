@@ -4,7 +4,7 @@ use tokio::sync::broadcast;
 
 use crate::config::Config;
 use crate::store::{
-    Approval, AuditEntry, Digest, FlakyTestRollup, LogLine, PrSnapshot, Store,
+    Approval, AuditEntry, Digest, DigestMeta, FlakyTestRollup, LogLine, PrSnapshot, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,12 +81,12 @@ pub struct AppState {
     pub config_path: String,
     pub tab: Tab,
     pub latest_digest: Option<Digest>,
+    pub digest_history: Vec<DigestMeta>,
     pub prs: Vec<PrSnapshot>,
     pub approvals: Vec<Approval>,
     pub flaky_tests: Vec<FlakyTestRollup>,
     pub logs: Vec<LogLine>,
     pub selected_index: usize,
-    pub detail_scroll: u16,
     pub status: String,
     pub engine_busy: bool,
     pub mcp_ok: bool,
@@ -100,12 +100,12 @@ impl AppState {
             config_path,
             tab: Tab::Dashboard,
             latest_digest: None,
+            digest_history: vec![],
             prs: vec![],
             approvals: vec![],
             flaky_tests: vec![],
             logs: vec![],
             selected_index: 0,
-            detail_scroll: 0,
             status: "ready".into(),
             engine_busy: false,
             mcp_ok: false,
@@ -129,6 +129,10 @@ impl AppState {
         self.prs.get(self.selected_index)
     }
 
+    pub fn selected_digest(&self) -> Option<&DigestMeta> {
+        self.digest_history.get(self.selected_index)
+    }
+
     pub fn selected_approval(&self) -> Option<&Approval> {
         self.approvals.get(self.selected_index)
     }
@@ -142,6 +146,7 @@ pub fn event_channel() -> (broadcast::Sender<AppEvent>, broadcast::Receiver<AppE
 
 pub async fn hydrate_from_store(state: &SharedState, store: &dyn Store) -> crate::error::Result<()> {
     let digest = store.latest_digest().await?;
+    let digest_history = store.list_digests(20).await?;
     let prs = store.list_pr_snapshots(None).await?;
     let approvals = store.list_pending_approvals().await?;
     let flaky = store
@@ -154,6 +159,7 @@ pub async fn hydrate_from_store(state: &SharedState, store: &dyn Store) -> crate
 
     let mut s = state.write().await;
     s.latest_digest = digest;
+    s.digest_history = digest_history;
     s.prs = prs;
     s.approvals = approvals;
     s.flaky_tests = flaky;

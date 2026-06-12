@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::config::{Config, StorageBackend};
-use crate::error::{CoworkerError, Result};
+#[cfg(not(feature = "sqlite"))]
+use crate::error::CoworkerError;
+use crate::error::Result;
 
 pub mod json;
 pub mod model;

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::error::{CoworkerError, Result};
 use crate::store::{
-    Approval, ApprovalStatus, AuditEntry, BackportQueueItem, Digest, DigestMeta, FlakyIncident,
+    Approval, AuditEntry, BackportQueueItem, Digest, DigestMeta, FlakyIncident,
     FlakyQuery, FlakyTestRollup, PrSnapshot, RerunOutcome, Store, WorkflowRun,
 };
 
@@ -128,7 +128,7 @@ impl Store for SqliteStore {
             let mut stmt = conn.prepare(
                 "SELECT id, date, summary_json, body_md, created_at FROM digests ORDER BY date DESC LIMIT ?1",
             )?;
-            let rows = stmt.query_map([limit as i64], |row| row_to_digest(row))?;
+            let rows = stmt.query_map([limit as i64], row_to_digest)?;
             let mut metas = Vec::new();
             for row in rows {
                 metas.push(row?.meta());
@@ -304,7 +304,7 @@ impl Store for SqliteStore {
                 .filter(|t: &FlakyTestRollup| q.repo.as_ref().is_none_or(|r| &t.repo == r))
                 .filter(|t| since.is_none_or(|s| t.last_seen >= s))
                 .collect();
-            list.sort_by(|a, b| b.incident_count.cmp(&a.incident_count));
+            list.sort_by_key(|b| std::cmp::Reverse(b.incident_count));
             list.truncate(q.limit);
             Ok(list)
         })
@@ -329,9 +329,9 @@ impl Store for SqliteStore {
             let mut list: Vec<BackportQueueItem> = rows
                 .filter_map(|r| r.ok())
                 .filter_map(|j| serde_json::from_str(&j).ok())
-                .filter(|i| repo.as_ref().is_none_or(|r| &i.repo == r))
+                .filter(|i: &BackportQueueItem| repo.as_ref().is_none_or(|r| &i.repo == r))
                 .collect();
-            list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            list.sort_by_key(|b| std::cmp::Reverse(b.created_at));
             Ok(list)
         })
     }

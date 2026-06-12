@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::agent::budget::TokenBudget;
 use crate::agent::parse::{ci_is_failing, needs_review, parse_pr_line};
 use crate::agent::release::run_release_duty;
 use crate::agent::triage::triage_pr;
@@ -64,9 +65,28 @@ impl AgentLoop {
     }
 
     pub async fn run_workflow(&self, workflow_id: &str) -> Result<String> {
+        let budget = TokenBudget::from_config(self.config.llm.context_limit);
         let runner = WorkflowRunner::new(&self.config);
         let wf = runner.get(workflow_id)?;
         let skill = load_skill(wf.skill_path())?;
+
+        self.log(
+            "info",
+            format!(
+                "workflow {} — skill '{}' ({} chars, budget {} tokens){}",
+                wf.id,
+                skill.name,
+                skill.body.len(),
+                budget.input_budget(),
+                wf.schedule
+                    .as_ref()
+                    .map(|s| format!(", cron {s}"))
+                    .unwrap_or_default()
+            ),
+        );
+        if !skill.description.is_empty() {
+            self.log("info", skill.description.clone());
+        }
 
         let run_id = self.store.start_workflow_run(workflow_id).await?;
         let _ = self.events.send(AppEvent::WorkflowStarted {
@@ -136,15 +156,6 @@ impl AgentLoop {
                 "unistar-mcp is required for daily-work".into(),
             ));
         }
-
-        self.log(
-            "info",
-            format!(
-                "loaded skill '{}' ({} chars)",
-                skill.name,
-                skill.body.len()
-            ),
-        );
 
         let mut needs_attention = 0u32;
         let mut ignorable = 0u32;
@@ -320,6 +331,14 @@ Summary: {} need attention, {} flaky, {} ignorable\n\n\
                 outcome.queued, outcome.skipped
             ),
         );
+
+        append_audit(
+            self.store.as_ref(),
+            "info",
+            "release-duty",
+            &outcome.body_md,
+        )
+        .await;
 
         Ok(format!(
             "release-duty: {} backport(s) queued, {} skipped",

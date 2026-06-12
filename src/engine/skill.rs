@@ -62,6 +62,7 @@ mod tests {
         let raw = "---\nname: daily-work\ndescription: triage\n---\n\n# Body\n";
         let s = parse_skill(raw).unwrap();
         assert_eq!(s.name, "daily-work");
+        assert_eq!(s.description, "triage");
         assert!(s.body.contains("# Body"));
     }
 }

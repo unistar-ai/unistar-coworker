@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
@@ -245,5 +243,3 @@ fn ci_needs_attention(ci: &str) -> bool {
     let c = ci.to_ascii_lowercase();
     c.starts_with("failing") || c.contains("fail")
 }
-
-pub type SharedLlm = Arc<LlmClient>;
