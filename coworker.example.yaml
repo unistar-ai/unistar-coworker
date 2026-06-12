@@ -2,6 +2,8 @@ llm:
   base_url: http://localhost:11434/v1
   model: gemma4:26b-a4b-it-qat
   context_limit: 64000
+  concurrency: 2
+  structured_output: true
   log_page_lines: 80
   max_log_pages: 8
 

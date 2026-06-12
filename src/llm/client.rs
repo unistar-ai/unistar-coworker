@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 use crate::config::LlmConfig;
 use crate::error::{CoworkerError, Result};
@@ -39,10 +42,12 @@ pub struct LlmClient {
     cfg: LlmConfig,
     http: reqwest::Client,
     online: bool,
+    concurrency: Arc<Semaphore>,
 }
 
 impl LlmClient {
     pub fn new(cfg: LlmConfig, online: bool) -> Self {
+        let permits = cfg.concurrency.max(1) as usize;
         Self {
             cfg,
             online,
@@ -50,6 +55,7 @@ impl LlmClient {
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .expect("reqwest client"),
+            concurrency: Arc::new(Semaphore::new(permits)),
         }
     }
 
@@ -71,15 +77,6 @@ impl LlmClient {
         page_num: u32,
         max_pages: u32,
     ) -> Result<ClassifyResult> {
-        if let Some(result) = quick_classify(workflow, page_logs) {
-            if result.verdict != ClassifyVerdict::Unknown {
-                return Ok(ClassifyResult {
-                    pages_read: page_num,
-                    ..result
-                });
-            }
-        }
-
         if self.online {
             match self
                 .classify_with_llm(
@@ -99,9 +96,16 @@ impl LlmClient {
                     tracing::warn!("LLM classify page {page_num} failed, using heuristics: {e}");
                 }
             }
+        } else if let Some(result) = quick_classify(page_logs) {
+            if result.verdict != ClassifyVerdict::Unknown {
+                return Ok(ClassifyResult {
+                    pages_read: page_num,
+                    ..result
+                });
+            }
         }
 
-        Ok(heuristic_classify(workflow, combined_logs))
+        Ok(heuristic_classify(combined_logs))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -116,14 +120,18 @@ impl LlmClient {
         page_num: u32,
         max_pages: u32,
     ) -> Result<ClassifyResult> {
+        let _permit = self
+            .concurrency
+            .acquire()
+            .await
+            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm concurrency: {e}")))?;
+
         let system = format!(
             "{skill_body}\n\n\
 You classify CI failures as flaky, real bugs, or policy/check gates. \
 You may receive one page of logs at a time; prior pages are summarized, not repeated. \
-If this page alone is inconclusive, respond verdict unknown and include page_summary \
-(a ≤2 sentence note for the next page). \
-Respond with JSON only, no markdown: \
-{{\"verdict\":\"flaky\"|\"real\"|\"policy\"|\"unknown\",\"reason\":\"...\",\"test_name\":\"optional\",\"page_summary\":\"optional\"}}"
+If this page alone is inconclusive, use verdict unknown and fill page_summary \
+(a ≤2 sentence note for the next page)."
         );
         let prior = if prior_summary.is_empty() {
             "(none)".into()
@@ -136,24 +144,75 @@ log_page: {page_num}/{max_pages}\nprior_pages_summary: {prior}\n\n\
 Failed logs (this page only):\n{logs}"
         );
 
+        let messages = serde_json::json!([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]);
+
+        let content = if let Some(ollama_base) = ollama_api_base(&self.cfg.base_url) {
+            self.chat_ollama_native(&ollama_base, &messages).await?
+        } else {
+            self.chat_openai_compatible(&messages).await?
+        };
+
+        let parsed = parse_classify_response(&content).map_err(|e| {
+            CoworkerError::Other(anyhow::anyhow!("llm parse classify json: {e}; raw={content}"))
+        })?;
+
+        Ok(ClassifyResult {
+            verdict: parsed.verdict,
+            reason: parsed.reason,
+            test_name: parsed.test_name,
+            used_llm: true,
+            pages_read: page_num,
+            page_summary: parsed.page_summary,
+        })
+    }
+
+    /// Ollama native API — schema in `format` is enforced more reliably than on `/v1`.
+    async fn chat_ollama_native(&self, base: &str, messages: &serde_json::Value) -> Result<String> {
+        let url = format!("{base}/api/chat");
+        let mut body = serde_json::json!({
+            "model": self.cfg.model,
+            "messages": messages,
+            "stream": false,
+            "options": { "temperature": 0 },
+        });
+        apply_structured_format(&mut body, self.cfg.structured_output);
+
+        let v = self.post_json(&url, &body).await?;
+        v.pointer("/message/content")
+            .and_then(|c| c.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("ollama missing message.content")))
+    }
+
+    /// OpenAI-compatible `/v1/chat/completions` (OpenAI, vLLM, or Ollama fallback).
+    async fn chat_openai_compatible(&self, messages: &serde_json::Value) -> Result<String> {
         let url = format!(
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
         );
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.cfg.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": messages,
             "stream": false,
-            "format": "json",
+            "temperature": 0,
         });
+        apply_structured_format(&mut body, self.cfg.structured_output);
 
+        let v = self.post_json(&url, &body).await?;
+        v.pointer("/choices/0/message/content")
+            .and_then(|c| c.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm missing content")))
+    }
+
+    async fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         let resp = self
             .http
-            .post(&url)
-            .json(&body)
+            .post(url)
+            .json(body)
             .send()
             .await
             .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm request: {e}")))?;
@@ -166,28 +225,109 @@ Failed logs (this page only):\n{logs}"
             )));
         }
 
-        let v: serde_json::Value = resp
-            .json()
+        resp.json()
             .await
-            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm json: {e}")))?;
+            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm json: {e}")))
+    }
+}
 
-        let content = v
-            .pointer("/choices/0/message/content")
-            .and_then(|c| c.as_str())
-            .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm missing content")))?;
+fn ollama_api_base(base_url: &str) -> Option<String> {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        return Some(trimmed.strip_suffix("/v1")?.to_string());
+    }
+    if trimmed.contains("11434") {
+        return Some(trimmed.to_string());
+    }
+    None
+}
 
-        let parsed: ClassifyResponse = serde_json::from_str(content).map_err(|e| {
-            CoworkerError::Other(anyhow::anyhow!("llm parse classify json: {e}; raw={content}"))
-        })?;
+fn classify_response_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["flaky", "real", "policy", "unknown"]
+            },
+            "reason": { "type": "string" },
+            "test_name": { "type": "string" },
+            "page_summary": { "type": "string" }
+        },
+        "required": ["verdict", "reason"],
+        "additionalProperties": false
+    })
+}
 
-        Ok(ClassifyResult {
-            verdict: parsed.verdict,
-            reason: parsed.reason,
-            test_name: parsed.test_name,
-            used_llm: true,
-            pages_read: page_num,
-            page_summary: parsed.page_summary,
-        })
+/// Attach structured-output constraints for Ollama (`format`) and OpenAI (`response_format`).
+fn apply_structured_format(body: &mut serde_json::Value, structured: bool) {
+    let obj = body.as_object_mut().expect("request body object");
+    if structured {
+        let schema = classify_response_schema();
+        obj.insert("format".into(), schema.clone());
+        obj.insert(
+            "response_format".into(),
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "classify_ci_failure",
+                    "strict": true,
+                    "schema": schema
+                }
+            }),
+        );
+    } else {
+        obj.insert("format".into(), serde_json::Value::String("json".into()));
+        obj.insert(
+            "response_format".into(),
+            serde_json::json!({ "type": "json_object" }),
+        );
+    }
+}
+
+/// Strip markdown fences and parse classify JSON from model output.
+fn parse_classify_response(content: &str) -> std::result::Result<ClassifyResponse, serde_json::Error> {
+    let trimmed = content.trim();
+    if let Ok(v) = serde_json::from_str::<ClassifyResponse>(trimmed) {
+        return Ok(v);
+    }
+
+    let unfenced = strip_markdown_fence(trimmed);
+    if unfenced != trimmed {
+        if let Ok(v) = serde_json::from_str::<ClassifyResponse>(&unfenced) {
+            return Ok(v);
+        }
+    }
+
+    if let Some(json) = extract_json_object(trimmed) {
+        return serde_json::from_str(&json);
+    }
+
+    serde_json::from_str(trimmed)
+}
+
+fn strip_markdown_fence(s: &str) -> String {
+    let s = s.trim();
+    let Some(rest) = s.strip_prefix("```") else {
+        return s.to_string();
+    };
+    let rest = rest.trim_start();
+    let rest = rest
+        .strip_prefix("json")
+        .or_else(|| rest.strip_prefix("JSON"))
+        .unwrap_or(rest)
+        .trim_start();
+    let body = rest.strip_suffix("```").unwrap_or(rest).trim();
+    body.to_string()
+}
+
+fn extract_json_object(s: &str) -> Option<String> {
+    let start = s.find('{')?;
+    let end = s.rfind('}')?;
+    if end > start {
+        Some(s[start..=end].to_string())
+    } else {
+        None
     }
 }
 
@@ -225,49 +365,8 @@ pub fn next_prior_summary(prior: &str, page_num: u32, result: &ClassifyResult) -
     next
 }
 
-/// Workflow names that gate merges via labels, approvals, or templates — not test flakes.
-pub fn is_policy_workflow(workflow: &str) -> bool {
-    let w = workflow.to_ascii_lowercase();
-    const NEEDLES: &[&str] = &[
-        "approval checker",
-        "backport pr",
-        "check pr label",
-        "pull request template",
-        "template validation",
-        "protected steps",
-        "enforce protected",
-        "changelog requirement",
-        "required label",
-        "label check",
-        "pr label",
-        "merge gate",
-        "codecov",
-        "danger",
-        "semantic pull",
-        "commitlint",
-        "lint pr title",
-    ];
-    NEEDLES.iter().any(|n| w.contains(n))
-}
-
-fn policy_classify(workflow: &str) -> ClassifyResult {
-    ClassifyResult {
-        verdict: ClassifyVerdict::Policy,
-        reason: format!(
-            "policy check ({workflow}) — labels, approval, or template; not a flaky test"
-        ),
-        test_name: None,
-        used_llm: false,
-        pages_read: 1,
-        page_summary: None,
-    }
-}
-
-/// Fast path before LLM: workflow name or log shape.
-pub fn quick_classify(workflow: &str, logs: &str) -> Option<ClassifyResult> {
-    if is_policy_workflow(workflow) {
-        return Some(policy_classify(workflow));
-    }
+/// Fast path for offline heuristics: log shape only (never workflow name).
+pub fn quick_classify(logs: &str) -> Option<ClassifyResult> {
     let lower = logs.to_ascii_lowercase();
     const POLICY_LOG: &[&str] = &[
         "required label",
@@ -296,8 +395,8 @@ pub fn quick_classify(workflow: &str, logs: &str) -> Option<ClassifyResult> {
     None
 }
 
-pub fn heuristic_classify(workflow: &str, logs: &str) -> ClassifyResult {
-    if let Some(r) = quick_classify(workflow, logs) {
+pub fn heuristic_classify(logs: &str) -> ClassifyResult {
+    if let Some(r) = quick_classify(logs) {
         return r;
     }
 
@@ -383,30 +482,57 @@ mod tests {
 
     #[test]
     fn heuristic_flaky() {
-        let r = heuristic_classify("ci", "Error: connect ETIMEDOUT after 30000ms");
+        let r = heuristic_classify("Error: connect ETIMEDOUT after 30000ms");
         assert_eq!(r.verdict, ClassifyVerdict::Flaky);
     }
 
     #[test]
     fn heuristic_real() {
-        let r = heuristic_classify("ci", "thread 'main' panicked at 'assertion failed'");
+        let r = heuristic_classify("thread 'main' panicked at 'assertion failed'");
         assert_eq!(r.verdict, ClassifyVerdict::Real);
     }
 
     #[test]
-    fn policy_workflow_by_name() {
-        assert!(is_policy_workflow("Backport PR manager approval checker"));
-        let r = quick_classify("Backport PR manager approval checker", "").unwrap();
+    fn quick_classify_ignores_workflow_name() {
+        assert!(quick_classify("").is_none());
+    }
+
+    #[test]
+    fn policy_by_log() {
+        let r = quick_classify("Error: PR is missing required label no-e2e").unwrap();
         assert_eq!(r.verdict, ClassifyVerdict::Policy);
     }
 
     #[test]
-    fn policy_workflow_by_log() {
-        let r = quick_classify(
-            "Some Check",
-            "Error: PR is missing required label no-e2e",
-        )
-        .unwrap();
+    fn ollama_api_base_from_v1_url() {
+        assert_eq!(
+            ollama_api_base("http://localhost:11434/v1").as_deref(),
+            Some("http://localhost:11434")
+        );
+    }
+
+    #[test]
+    fn structured_format_uses_schema() {
+        let mut body = serde_json::json!({"model": "m"});
+        apply_structured_format(&mut body, true);
+        assert!(body.get("format").unwrap().get("properties").is_some());
+        assert_eq!(
+            body.pointer("/response_format/type").and_then(|v| v.as_str()),
+            Some("json_schema")
+        );
+    }
+
+    #[test]
+    fn parse_classify_from_markdown_fence() {
+        let raw = "```json\n{\"verdict\":\"policy\",\"reason\":\"needs approval\"}\n```";
+        let r = parse_classify_response(raw).unwrap();
         assert_eq!(r.verdict, ClassifyVerdict::Policy);
+    }
+
+    #[test]
+    fn parse_classify_from_plain_json() {
+        let raw = "{\"verdict\":\"real\",\"reason\":\"compile error\"}";
+        let r = parse_classify_response(raw).unwrap();
+        assert_eq!(r.verdict, ClassifyVerdict::Real);
     }
 }

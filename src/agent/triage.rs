@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::engine::Skill;
 use crate::error::Result;
 use crate::llm::{
-    append_log_chunk, is_policy_workflow, next_prior_summary, ClassifyVerdict, LlmClient,
+    append_log_chunk, next_prior_summary, ClassifyVerdict, LlmClient,
 };
 use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
@@ -101,15 +101,6 @@ pub async fn triage_pr(
         if run.conclusion == "action_required" {
             notes.push(format!(
                 "Run {} ({}) needs approval — not a code failure.",
-                run.run_id, run.workflow
-            ));
-            continue;
-        }
-
-        if is_policy_workflow(&run.workflow) {
-            real = true;
-            notes.push(format!(
-                "- run {} {} → policy: label/approval/template check (not flaky)",
                 run.run_id, run.workflow
             ));
             continue;
@@ -286,12 +277,13 @@ pub async fn triage_pr(
         }
 
         notes.push(format!(
-            "- run {} {} → {:?}: {} ({} page(s))",
+            "- run {} {} → {:?}: {} ({} page(s), {})",
             run.run_id,
             run.workflow,
             classify.verdict,
             classify.reason,
-            classify.pages_read
+            classify.pages_read,
+            if classify.used_llm { "llm" } else { "heuristic" }
         ));
     }
 

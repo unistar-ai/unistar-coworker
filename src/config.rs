@@ -36,6 +36,20 @@ pub struct LlmConfig {
     /// Max log pages to fetch + analyze per failing run before giving up.
     #[serde(default = "default_max_log_pages")]
     pub max_log_pages: u32,
+    /// Max concurrent in-flight requests to the LLM (Ollama typically handles ~2).
+    #[serde(default = "default_llm_concurrency")]
+    pub concurrency: u32,
+    /// Constrain LLM replies to a JSON schema (Ollama structured outputs / OpenAI json_schema).
+    #[serde(default = "default_structured_output")]
+    pub structured_output: bool,
+}
+
+fn default_structured_output() -> bool {
+    true
+}
+
+fn default_llm_concurrency() -> u32 {
+    2
 }
 
 fn default_log_page_lines() -> u32 {
