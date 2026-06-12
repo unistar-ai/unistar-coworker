@@ -44,6 +44,9 @@ mod tests {
             max_log_pages: 8,
             concurrency: 2,
             structured_output: true,
+            max_output_tokens: 4096,
+            think: true,
+            max_thinking_tokens: 512,
         };
         let base = cfg.base_url.trim_end_matches('/');
         assert_eq!(format!("{base}/models"), "http://localhost:11434/v1/models");

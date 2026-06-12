@@ -4,6 +4,9 @@ llm:
   context_limit: 64000
   concurrency: 2
   structured_output: true
+  max_output_tokens: 4096   # total budget (thinking + JSON) for gemma4 etc.
+  think: true               # Ollama reasoning; set false to skip thinking
+  max_thinking_tokens: 512  # soft cap via prompt (~128 words)
   log_page_lines: 80
   max_log_pages: 8
 

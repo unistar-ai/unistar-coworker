@@ -51,8 +51,16 @@ async fn apply_event(state: &SharedState, ev: AppEvent) {
     match ev {
         AppEvent::StoreUpdated => s.status = "store updated".into(),
         AppEvent::DigestReady(d) => {
-            s.latest_digest = Some(d);
-            s.status = "digest ready".into();
+            s.latest_digest = Some(d.clone());
+            s.status = if d.summary.complete {
+                "digest ready".into()
+            } else {
+                format!(
+                    "digest updating ({} PRs, {} attention)",
+                    d.summary.needs_attention + d.summary.ignorable + d.summary.flaky_candidates,
+                    d.summary.needs_attention
+                )
+            };
         }
         AppEvent::LogLine(l) => s.push_log(&l.level, l.message),
         AppEvent::WorkflowStarted { workflow_id } => {
@@ -279,10 +287,11 @@ fn draw_list(frame: &mut ratatui::Frame, area: Rect, state: &AppState, list_stat
                     .iter()
                     .map(|d| {
                         ListItem::new(format!(
-                            "{} — attention:{} flaky:{} ok:{} ({})",
+                            "{} — attention:{} flaky:{} policy:{} ok:{} ({})",
                             d.date,
                             d.summary.needs_attention,
                             d.summary.flaky_candidates,
+                            d.summary.policy_gates,
                             d.summary.ignorable,
                             d.summary.duration_label()
                         ))
@@ -369,10 +378,11 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
                     .unwrap_or_else(|| "Press r to run daily-work.".into())
             } else if let Some(meta) = state.selected_digest() {
                 format!(
-                    "Digest {}\nattention: {}  flaky: {}  ok: {}\nrun time: {}\n\n(full body only for latest run)",
+                    "Digest {}\nattention: {}  flaky: {}  policy: {}  ok: {}\nrun time: {}\n\n(full body only for latest run)",
                     meta.date,
                     meta.summary.needs_attention,
                     meta.summary.flaky_candidates,
+                    meta.summary.policy_gates,
                     meta.summary.ignorable,
                     meta.summary.duration_label()
                 )

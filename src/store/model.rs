@@ -41,9 +41,19 @@ pub struct DigestSummary {
     pub needs_attention: u32,
     pub ignorable: u32,
     pub flaky_candidates: u32,
+    /// PRs with at least one LLM `policy` verdict run.
+    #[serde(default)]
+    pub policy_gates: u32,
     /// Wall-clock seconds for the workflow run that produced this digest.
     #[serde(default)]
     pub duration_secs: f64,
+    /// False while daily-work is still publishing partial digests.
+    #[serde(default = "default_digest_complete")]
+    pub complete: bool,
+}
+
+fn default_digest_complete() -> bool {
+    true
 }
 
 /// Human-readable duration for digest headers and CLI output.

@@ -1,8 +1,6 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::sync::broadcast;
-use uuid::Uuid;
 
 use crate::agent::budget::TokenBudget;
 use crate::agent::parse::{ci_is_failing, needs_review, parse_pr_line};
@@ -17,8 +15,8 @@ use crate::error::Result;
 use crate::llm::LlmClient;
 use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
-use crate::output::export::maybe_export_digest;
-use crate::store::{Digest, DigestSummary, PrSnapshot, Store, format_duration};
+use crate::output::digest::{publish_digest, IncrementalDigest};
+use crate::store::{PrSnapshot, Store};
 
 pub struct AgentLoop {
     config: Config,
@@ -160,21 +158,21 @@ impl AgentLoop {
     }
 
     async fn run_daily_work(&self, skill: &Skill) -> Result<String> {
-        let started = Instant::now();
-
         if !self.mcp.is_available() {
             return Err(crate::error::CoworkerError::Workflow(
                 "unistar-mcp is required for daily-work".into(),
             ));
         }
 
-        let mut needs_attention = 0u32;
-        let mut ignorable = 0u32;
-        let mut flaky_candidates = 0u32;
-
-        let mut attention_section = String::from("## Needs attention\n\n");
-        let mut flaky_section = String::from("## Flaky candidates\n\n");
-        let mut ok_section = String::from("## OK / ignorable\n\n");
+        let mut digest = IncrementalDigest::begin(skill);
+        publish_digest(
+            &self.config,
+            self.store.as_ref(),
+            &self.events,
+            &digest.to_digest(),
+        )
+        .await?;
+        self.log("info", "digest export started (in progress)");
 
         for repo in self.config.repos.clone() {
             self.log("info", format!("listing open PRs for {repo}"));
@@ -188,9 +186,14 @@ impl AgentLoop {
             )
             .await?;
 
-            attention_section.push_str(&format!("### {repo}\n\n"));
-            flaky_section.push_str(&format!("### {repo}\n\n"));
-            ok_section.push_str(&format!("### {repo}\n\n"));
+            digest.begin_repo(&repo);
+            publish_digest(
+                &self.config,
+                self.store.as_ref(),
+                &self.events,
+                &digest.to_digest(),
+            )
+            .await?;
 
             for line in list_text.lines() {
                 let Some(pr) = parse_pr_line(line) else {
@@ -198,12 +201,15 @@ impl AgentLoop {
                 };
 
                 if pr.is_draft {
-                    ignorable += 1;
-                    ok_section.push_str(&format!(
-                        "- #{} {} (draft)\n",
-                        pr.number, pr.title
-                    ));
+                    digest.push_draft(pr.number, &pr.title);
                     self.save_pr_snapshot(&repo, &pr, None).await?;
+                    publish_digest(
+                        &self.config,
+                        self.store.as_ref(),
+                        &self.events,
+                        &digest.to_digest(),
+                    )
+                    .await?;
                     continue;
                 }
 
@@ -222,105 +228,55 @@ impl AgentLoop {
                     )
                     .await?;
 
-                    if outcome.flaky {
-                        flaky_candidates += 1;
-                        flaky_section.push_str(&format!(
-                            "- #{} {} — flaky\n  {}\n",
-                            pr.number,
-                            pr.title,
-                            outcome.note.replace('\n', "\n  ")
-                        ));
-                    }
-                    if outcome.real {
-                        needs_attention += 1;
-                        attention_section.push_str(&format!(
-                            "- #{} {} — CI failure\n  {}\n",
-                            pr.number,
-                            pr.title,
-                            outcome.note.replace('\n', "\n  ")
-                        ));
-                    }
-                    if !outcome.flaky && !outcome.real {
-                        needs_attention += 1;
-                        attention_section.push_str(&format!(
-                            "- #{} {} — CI unclear\n  {}\n",
-                            pr.number,
-                            pr.title,
-                            outcome.note.replace('\n', "\n  ")
-                        ));
-                    }
+                    digest.push_triage(pr.number, &pr.title, &outcome);
                     handled = true;
                 } else if needs_review(&pr.review) && pr.review != "approved" {
-                    needs_attention += 1;
-                    attention_section.push_str(&format!(
-                        "- #{} {} — waiting for review (CI: {})\n",
-                        pr.number, pr.title, pr.ci
-                    ));
+                    digest.push_waiting_review(pr.number, &pr.title, &pr.ci);
                     self.save_pr_snapshot(&repo, &pr, Some("review blocked".into()))
                         .await?;
                     handled = true;
                 }
 
                 if !handled {
-                    ignorable += 1;
-                    ok_section.push_str(&format!(
-                        "- #{} {} CI:{} review:{}\n",
-                        pr.number, pr.title, pr.ci, pr.review
-                    ));
+                    digest.push_ok(pr.number, &pr.title, &pr.ci, &pr.review);
                     self.save_pr_snapshot(&repo, &pr, None).await?;
                 }
+
+                publish_digest(
+                    &self.config,
+                    self.store.as_ref(),
+                    &self.events,
+                    &digest.to_digest(),
+                )
+                .await?;
             }
         }
 
-        let duration_secs = started.elapsed().as_secs_f64();
-        let duration_label = format_duration(duration_secs);
+        let final_digest = digest.finish();
+        let needs_attention = final_digest.summary.needs_attention;
+        let ignorable = final_digest.summary.ignorable;
+        let flaky_candidates = final_digest.summary.flaky_candidates;
+        let policy_gates = final_digest.summary.policy_gates;
+        let duration_label = final_digest.summary.duration_label();
 
-        let body = format!(
-            "# Daily Digest\n\n\
-Skill: {}\n\n\
-Summary: {} need attention, {} flaky, {} ignorable\n\
-Run time: {duration_label}\n\n\
-{attention_section}\n\
-{flaky_section}\n\
-{ok_section}"
-        ,
-            if skill.name.is_empty() {
-                "daily-work"
-            } else {
-                &skill.name
-            },
-            needs_attention,
-            flaky_candidates,
-            ignorable,
-        );
-
-        let digest = Digest {
-            id: Uuid::new_v4(),
-            date: chrono::Utc::now().date_naive(),
-            summary: DigestSummary {
-                needs_attention,
-                ignorable,
-                flaky_candidates,
-                duration_secs,
-            },
-            body_md: body,
-            created_at: chrono::Utc::now(),
-        };
-
-        self.store.save_digest(&digest).await?;
-        maybe_export_digest(&self.config, &digest)?;
-        let _ = self.events.send(AppEvent::DigestReady(digest));
+        publish_digest(
+            &self.config,
+            self.store.as_ref(),
+            &self.events,
+            &final_digest,
+        )
+        .await?;
 
         append_audit(
             self.store.as_ref(),
             "info",
             "daily-work",
-            &format!("digest: {needs_attention} attention, {flaky_candidates} flaky"),
+            &format!("digest: {needs_attention} attention, {flaky_candidates} flaky, {policy_gates} policy"),
         )
         .await;
 
         Ok(format!(
-            "digest saved ({needs_attention} need attention, {flaky_candidates} flaky, {ignorable} ok) in {duration_label}"
+            "digest saved ({needs_attention} attention, {flaky_candidates} flaky, {policy_gates} policy, {ignorable} ok) in {duration_label}"
         ))
     }
 

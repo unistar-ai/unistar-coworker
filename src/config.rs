@@ -42,6 +42,28 @@ pub struct LlmConfig {
     /// Constrain LLM replies to a JSON schema (Ollama structured outputs / OpenAI json_schema).
     #[serde(default = "default_structured_output")]
     pub structured_output: bool,
+    /// Max tokens for classify output (Ollama `num_predict` / OpenAI `max_tokens`).
+    /// Includes both reasoning trace and final JSON on thinking models.
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u32,
+    /// Enable model reasoning (Ollama top-level `think`). Default on for gemma4/qwen3.
+    #[serde(default = "default_llm_think")]
+    pub think: bool,
+    /// Soft cap on reasoning length — enforced via prompt; logged when exceeded.
+    #[serde(default = "default_max_thinking_tokens")]
+    pub max_thinking_tokens: u32,
+}
+
+fn default_max_output_tokens() -> u32 {
+    4096
+}
+
+fn default_llm_think() -> bool {
+    true
+}
+
+fn default_max_thinking_tokens() -> u32 {
+    512
 }
 
 fn default_structured_output() -> bool {

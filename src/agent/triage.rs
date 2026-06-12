@@ -8,8 +8,8 @@ use crate::config::Config;
 use crate::engine::Skill;
 use crate::error::Result;
 use crate::llm::{
-    append_log_chunk, format_classify_digest_lines, llm_reason_text, next_prior_summary,
-    ClassifyVerdict, LlmClient,
+    append_log_chunk, format_policy_digest_line, format_policy_digest_line_from_classify,
+    llm_reason_text, next_prior_summary, ClassifyVerdict, LlmClient,
 };
 use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
@@ -19,10 +19,29 @@ use crate::store::{
 };
 
 #[derive(Debug, Clone)]
+pub struct TriageRunEntry {
+    pub verdict: ClassifyVerdict,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct TriageOutcome {
-    pub note: String,
-    pub flaky: bool,
-    pub real: bool,
+    /// PR status / analyze preamble (shown once in the first digest bucket).
+    pub preamble: Vec<String>,
+    /// Classified failing runs, bucketed by verdict in the digest.
+    pub runs: Vec<TriageRunEntry>,
+    /// Analyze/parse failed — treat whole PR as needs attention (no run split).
+    pub fallback_attention: bool,
+}
+
+impl TriageOutcome {
+    pub fn full_note(&self) -> String {
+        let mut parts = self.preamble.clone();
+        for run in &self.runs {
+            parts.extend(run.lines.clone());
+        }
+        parts.join("\n")
+    }
 }
 
 pub async fn triage_pr(
@@ -43,6 +62,11 @@ pub async fn triage_pr(
     )
     .await?;
 
+    let mut outcome = TriageOutcome {
+        preamble: vec![status.lines().next().unwrap_or("PR status").to_string()],
+        ..Default::default()
+    };
+
     let analyze = lazy_tool(
         mcp,
         "ci_analyze_pr_failures",
@@ -50,60 +74,59 @@ pub async fn triage_pr(
     )
     .await;
 
-    let mut notes = vec![status.lines().next().unwrap_or("PR status").to_string()];
-    let mut flaky = false;
-    let mut real = false;
-
     let analyze_text = match analyze {
         Ok(t) => t,
         Err(e) => {
-            notes.push(format!("CI analyze skipped: {e}"));
-            let note = notes.join("\n");
-            save_snapshot(store, repo, pr, &note).await?;
-            return Ok(TriageOutcome {
-                note,
-                flaky: false,
-                real: ci_needs_attention(&pr.ci),
-            });
+            outcome
+                .preamble
+                .push(format!("CI analyze skipped: {e}"));
+            outcome.fallback_attention = ci_needs_attention(&pr.ci);
+            save_snapshot(store, repo, pr, &outcome.full_note()).await?;
+            return Ok(outcome);
         }
     };
 
     if analyze_text.to_ascii_lowercase().contains("no failing github actions") {
-        notes.push(analyze_text.lines().next().unwrap_or("").to_string());
-        notes.push("External CI may still be failing — check the PR page.".into());
-        let note = notes.join("\n");
-        save_snapshot(store, repo, pr, &note).await?;
-        return Ok(TriageOutcome {
-            note,
-            flaky: false,
-            real: true,
-        });
+        outcome
+            .preamble
+            .push(analyze_text.lines().next().unwrap_or("").to_string());
+        outcome
+            .preamble
+            .push("External CI may still be failing — check the PR page.".into());
+        outcome.fallback_attention = true;
+        save_snapshot(store, repo, pr, &outcome.full_note()).await?;
+        return Ok(outcome);
     }
 
     let runs = parse_failing_runs(&analyze_text);
     if runs.is_empty() {
-        notes.push("Could not parse failing runs from analyze output.".into());
-        let note = notes.join("\n");
-        save_snapshot(store, repo, pr, &note).await?;
-        return Ok(TriageOutcome {
-            note,
-            flaky: false,
-            real: true,
-        });
+        outcome
+            .preamble
+            .push("Could not parse failing runs from analyze output.".into());
+        outcome.fallback_attention = true;
+        save_snapshot(store, repo, pr, &outcome.full_note()).await?;
+        return Ok(outcome);
     }
 
     let mut tool_calls = 0u32;
     for run in runs {
         if tool_calls >= config.policy.max_tool_calls_per_pr {
-            notes.push("(tool call budget exhausted for this PR)".into());
+            outcome
+                .preamble
+                .push("(tool call budget exhausted for this PR)".into());
             break;
         }
 
         if run.conclusion == "action_required" {
-            notes.push(format!(
-                "Run {} ({}) needs approval — not a code failure.",
-                run.run_id, run.workflow
-            ));
+            outcome.runs.push(TriageRunEntry {
+                verdict: ClassifyVerdict::Policy,
+                lines: vec![format_policy_digest_line(
+                    repo,
+                    run.run_id,
+                    &run.workflow,
+                    "needs approval",
+                )],
+            });
             continue;
         }
 
@@ -121,7 +144,9 @@ pub async fn triage_pr(
 
         for page_num in 1..=max_pages {
             if tool_calls >= config.policy.max_tool_calls_per_pr {
-                notes.push("(tool call budget exhausted for this PR)".into());
+                outcome
+                    .preamble
+                    .push("(tool call budget exhausted for this PR)".into());
                 break;
             }
 
@@ -172,10 +197,13 @@ pub async fn triage_pr(
         let classify = match classify {
             Some(c) => c,
             None => {
-                notes.push(format!(
-                    "- run {} {} → skipped (no log pages fetched)",
-                    run.run_id, run.workflow
-                ));
+                outcome.runs.push(TriageRunEntry {
+                    verdict: ClassifyVerdict::Unknown,
+                    lines: vec![format!(
+                        "- run {} {} → skipped (no log pages fetched)",
+                        run.run_id, run.workflow
+                    )],
+                });
                 continue;
             }
         };
@@ -202,25 +230,21 @@ pub async fn triage_pr(
         );
 
         let classification = match classify.verdict {
-            ClassifyVerdict::Flaky => {
-                flaky = true;
-                Classification::LlmFlaky
-            }
-            ClassifyVerdict::Real => {
-                real = true;
-                Classification::LlmReal
-            }
+            ClassifyVerdict::Flaky => Classification::LlmFlaky,
+            ClassifyVerdict::Real => Classification::LlmReal,
             ClassifyVerdict::Policy => {
-                real = true;
-                notes.extend(format_classify_digest_lines(
-                    run.run_id,
-                    &run.workflow,
-                    &classify,
-                ));
+                outcome.runs.push(TriageRunEntry {
+                    verdict: ClassifyVerdict::Policy,
+                    lines: vec![format_policy_digest_line_from_classify(
+                        repo,
+                        run.run_id,
+                        &run.workflow,
+                        &classify,
+                    )],
+                });
                 continue;
             }
             ClassifyVerdict::Unknown => {
-                real = true;
                 if config.flaky.record_real_bugs {
                     Classification::LlmReal
                 } else {
@@ -274,21 +298,19 @@ pub async fn triage_pr(
             }
         }
 
-        notes.extend(format_classify_digest_lines(
-            run.run_id,
-            &run.workflow,
-            &classify,
-        ));
+        outcome.runs.push(TriageRunEntry {
+            verdict: classify.verdict,
+            lines: crate::llm::format_classify_digest_lines(
+                repo,
+                run.run_id,
+                &run.workflow,
+                &classify,
+            ),
+        });
     }
 
-    let note = notes.join("\n");
-    save_snapshot(store, repo, pr, &note).await?;
-
-    Ok(TriageOutcome {
-        note,
-        flaky,
-        real,
-    })
+    save_snapshot(store, repo, pr, &outcome.full_note()).await?;
+    Ok(outcome)
 }
 
 async fn save_snapshot(

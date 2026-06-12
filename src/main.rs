@@ -93,8 +93,13 @@ async fn run_headless(config: Config, store: Arc<dyn store::Store>, workflow: &s
                     eprintln!("→ {workflow_id} {status}: {message}");
                 }
                 AppEvent::DigestReady(d) => {
+                    let label = if d.summary.complete {
+                        "digest ready"
+                    } else {
+                        "digest updated"
+                    };
                     eprintln!(
-                        "→ digest ready (attention:{} flaky:{} in {})",
+                        "→ {label} (attention:{} flaky:{} in {})",
                         d.summary.needs_attention,
                         d.summary.flaky_candidates,
                         d.summary.duration_label()

@@ -34,6 +34,47 @@ struct ClassifyResponse {
     page_summary: Option<String>,
 }
 
+impl ClassifyResponse {
+    fn sanitized(mut self) -> Self {
+        self.reason = sanitize_llm_field(&self.reason);
+        self.diagnosis = self.diagnosis.as_deref().map(sanitize_llm_field).filter(|s| !s.is_empty());
+        self.recommended_action = self
+            .recommended_action
+            .as_deref()
+            .map(sanitize_llm_field)
+            .filter(|s| !s.is_empty());
+        self.test_name = self
+            .test_name
+            .as_deref()
+            .map(sanitize_llm_field)
+            .filter(|s| !s.is_empty());
+        self.page_summary = self
+            .page_summary
+            .as_deref()
+            .map(sanitize_llm_field)
+            .filter(|s| !s.is_empty());
+        self
+    }
+
+    fn into_classify_result(self, pages_read: u32, truncated: bool) -> ClassifyResult {
+        let reason = if truncated {
+            mark_partial_llm_output(self.reason)
+        } else {
+            self.reason
+        };
+        ClassifyResult {
+            verdict: self.verdict,
+            reason,
+            diagnosis: self.diagnosis,
+            recommended_action: self.recommended_action,
+            test_name: self.test_name,
+            used_llm: true,
+            pages_read,
+            page_summary: self.page_summary,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ClassifyResult {
     pub verdict: ClassifyVerdict,
@@ -141,18 +182,23 @@ You triage CI failures for a daily digest. Classify each failure and explain it 
 Verdicts:\n\
 - flaky: transient infra/network/timeouts; rerun may pass\n\
 - real: code/test/build bug in the PR\n\
-- policy: labels, approvals, changelog, or template gates — not a test flake\n\
+- policy: labels, approvals, changelog, or template gates — **not** engineering attention; use when the author needs a person/label/approval, not a code fix\n\
 - unknown: logs insufficient on this page\n\
 \n\
-Always fill ALL fields with specific, actionable content from the logs:\n\
-- reason: one-line summary (not vague phrases like \"not flaky\" alone)\n\
-- diagnosis: 2–4 sentences — what check failed, quote or paraphrase log evidence, impact on merge\n\
-- recommended_action: concrete next step for the PR author (fix code, add label, get approval, rerun, etc.)\n\
+Policy examples: manager approval checker, changelog requirement, PR template regex, missing labels.\n\
+Do NOT use verdict real for those — they belong in policy.\n\
+\n\
+Always fill ALL fields with specific, actionable content from the logs. Keep responses concise:\n\
+- reason: one line, ≤120 characters\n\
+- diagnosis: max 2 sentences, ≤320 characters — what failed, log evidence, merge impact\n\
+- recommended_action: one sentence, ≤160 characters — concrete next step\n\
 - test_name: failing test if identifiable\n\
 \n\
 You may receive one page of logs at a time; prior pages are summarized, not repeated. \
-If inconclusive on this page, use verdict unknown and fill page_summary for the next page."
+If inconclusive on this page, use verdict unknown and fill page_summary for the next page.{}",
+            thinking_prompt_suffix(&self.cfg)
         );
+        let concise_suffix = "\n\nIMPORTANT: Keep JSON compact. Do not exceed field length limits or the response will be truncated.";
         let prior = if prior_summary.is_empty() {
             "(none)".into()
         } else {
@@ -169,44 +215,125 @@ Failed logs (this page only):\n{logs}"
             {"role": "user", "content": user},
         ]);
 
-        let content = if let Some(ollama_base) = ollama_api_base(&self.cfg.base_url) {
-            self.chat_ollama_native(&ollama_base, &messages).await?
-        } else {
-            self.chat_openai_compatible(&messages).await?
-        };
+        let mut retried_without_think = false;
+        let mut retried_concise = false;
 
-        let parsed = parse_classify_response(&content).map_err(|e| {
-            CoworkerError::Other(anyhow::anyhow!("llm parse classify json: {e}; raw={content}"))
-        })?;
+        loop {
+            let msgs = if retried_concise {
+                serde_json::json!([
+                    {"role": "system", "content": format!("{system}{concise_suffix}")},
+                    {"role": "user", "content": user},
+                ])
+            } else {
+                messages.clone()
+            };
 
-        Ok(ClassifyResult {
-            verdict: parsed.verdict,
-            reason: parsed.reason,
-            diagnosis: parsed.diagnosis,
-            recommended_action: parsed.recommended_action,
-            test_name: parsed.test_name,
-            used_llm: true,
-            pages_read: page_num,
-            page_summary: parsed.page_summary,
-        })
+            let think_override = if retried_without_think || !self.cfg.think {
+                Some(false)
+            } else {
+                None
+            };
+
+            let content = if let Some(ollama_base) = ollama_api_base(&self.cfg.base_url) {
+                match self
+                    .chat_ollama_native(&ollama_base, &msgs, think_override)
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(e) if self.cfg.think && !retried_without_think => {
+                        tracing::warn!(
+                            "LLM classify page {page_num}: {e}, retrying with think=false"
+                        );
+                        retried_without_think = true;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(CoworkerError::Other(anyhow::anyhow!("llm chat: {e}")));
+                    }
+                }
+            } else {
+                self.chat_openai_compatible(&msgs).await?
+            };
+
+            if content.trim().is_empty() {
+                if self.cfg.think && !retried_without_think {
+                    tracing::warn!(
+                        "LLM classify page {page_num}: empty LLM output, retrying with think=false"
+                    );
+                    retried_without_think = true;
+                    continue;
+                }
+                return Err(CoworkerError::Other(anyhow::anyhow!(
+                    "llm empty classify output; raw={content}"
+                )));
+            }
+
+            match parse_classify_response(&content) {
+                Ok(parsed) => {
+                    if retried_without_think && self.cfg.think {
+                        tracing::info!(
+                            "LLM classify page {page_num}: succeeded after think=false retry"
+                        );
+                    }
+                    return Ok(parsed.into_classify_result(page_num, false));
+                }
+                Err(e) => {
+                    if let Some(parsed) = salvage_truncated_classify(&content) {
+                        tracing::info!(
+                            "LLM classify page {page_num}: recovered partial JSON after parse error: {e}"
+                        );
+                        return Ok(parsed.into_classify_result(page_num, true));
+                    }
+                    if self.cfg.think && !retried_without_think {
+                        tracing::warn!(
+                            "LLM classify page {page_num} parse failed, retrying with think=false: {e}"
+                        );
+                        retried_without_think = true;
+                        continue;
+                    }
+                    if !retried_concise {
+                        tracing::warn!(
+                            "LLM classify page {page_num} parse failed, retrying with concise prompt: {e}"
+                        );
+                        retried_concise = true;
+                        continue;
+                    }
+                    return Err(CoworkerError::Other(anyhow::anyhow!(
+                        "llm parse classify json: {e}; raw={content}"
+                    )));
+                }
+            }
+        }
+    }
+
+    fn llm_output_limit(&self) -> u32 {
+        self.cfg.max_output_tokens.max(256)
     }
 
     /// Ollama native API — schema in `format` is enforced more reliably than on `/v1`.
-    async fn chat_ollama_native(&self, base: &str, messages: &serde_json::Value) -> Result<String> {
+    async fn chat_ollama_native(
+        &self,
+        base: &str,
+        messages: &serde_json::Value,
+        think_override: Option<bool>,
+    ) -> Result<String> {
         let url = format!("{base}/api/chat");
+        let think = think_override.unwrap_or(self.cfg.think);
         let mut body = serde_json::json!({
             "model": self.cfg.model,
             "messages": messages,
             "stream": false,
-            "options": { "temperature": 0 },
+            "think": think,
+            "options": {
+                "temperature": 0,
+                "num_predict": self.llm_output_limit(),
+            },
         });
         apply_structured_format(&mut body, self.cfg.structured_output);
 
         let v = self.post_json(&url, &body).await?;
-        v.pointer("/message/content")
-            .and_then(|c| c.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("ollama missing message.content")))
+        log_ollama_thinking_budget(&v, self.cfg.max_thinking_tokens, think);
+        extract_ollama_chat_content(&v)
     }
 
     /// OpenAI-compatible `/v1/chat/completions` (OpenAI, vLLM, or Ollama fallback).
@@ -220,14 +347,12 @@ Failed logs (this page only):\n{logs}"
             "messages": messages,
             "stream": false,
             "temperature": 0,
+            "max_tokens": self.llm_output_limit(),
         });
         apply_structured_format(&mut body, self.cfg.structured_output);
 
         let v = self.post_json(&url, &body).await?;
-        v.pointer("/choices/0/message/content")
-            .and_then(|c| c.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm missing content")))
+        extract_openai_chat_content(&v)
     }
 
     async fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
@@ -253,12 +378,112 @@ Failed logs (this page only):\n{logs}"
     }
 }
 
+fn thinking_prompt_suffix(cfg: &LlmConfig) -> String {
+    if !cfg.think {
+        return String::new();
+    }
+    let word_budget = (cfg.max_thinking_tokens / 4).max(32);
+    format!(
+        "\n\n\
+Before answering, reason step-by-step internally, but keep reasoning under ~{} tokens (~{} words). \
+Focus on log evidence and verdict choice; do not restate the reasoning in the JSON fields.\n",
+        cfg.max_thinking_tokens, word_budget
+    )
+}
+
+fn estimate_tokens(text: &str) -> u32 {
+    // Rough heuristic for Latin/mixed log text (~4 chars per token).
+    (text.len() as u32 / 4).max(1)
+}
+
+fn log_ollama_thinking_budget(v: &serde_json::Value, max_thinking_tokens: u32, think: bool) {
+    if !think {
+        return;
+    }
+    let Some(thinking) = v.pointer("/message/thinking").and_then(|t| t.as_str()) else {
+        return;
+    };
+    let est = estimate_tokens(thinking);
+    if est > max_thinking_tokens {
+        tracing::info!(
+            "ollama thinking ~{est} tokens (soft budget {max_thinking_tokens})"
+        );
+    } else {
+        tracing::debug!("ollama thinking ~{est} tokens");
+    }
+}
+
 fn ollama_api_base(base_url: &str) -> Option<String> {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/v1") {
         return Some(trimmed.strip_suffix("/v1")?.to_string());
     }
     if trimmed.contains("11434") {
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
+fn extract_ollama_chat_content(v: &serde_json::Value) -> Result<String> {
+    if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_str()) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Ok(content.to_string());
+        }
+    }
+
+    if let Some(thinking) = v.pointer("/message/thinking").and_then(|t| t.as_str()) {
+        if let Some(text) = non_empty_chat_fallback(thinking, "message.thinking") {
+            return Ok(text);
+        }
+    }
+
+    let done = v
+        .get("done_reason")
+        .and_then(|d| d.as_str())
+        .unwrap_or("unknown");
+    Err(CoworkerError::Other(anyhow::anyhow!(
+        "ollama empty message.content (done_reason={done})"
+    )))
+}
+
+fn extract_openai_chat_content(v: &serde_json::Value) -> Result<String> {
+    let msg = v.pointer("/choices/0/message").ok_or_else(|| {
+        CoworkerError::Other(anyhow::anyhow!("llm missing choices[0].message"))
+    })?;
+
+    if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Ok(content.to_string());
+        }
+    }
+
+    for key in ["reasoning", "reasoning_content"] {
+        if let Some(reasoning) = msg.get(key).and_then(|c| c.as_str()) {
+            if let Some(text) = non_empty_chat_fallback(reasoning, key) {
+                return Ok(text);
+            }
+        }
+    }
+
+    Err(CoworkerError::Other(anyhow::anyhow!(
+        "llm empty message content"
+    )))
+}
+
+/// When thinking models exhaust `num_predict`, JSON may only appear in thinking/reasoning.
+fn non_empty_chat_fallback(text: &str, field: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(json) = extract_json_object(trimmed) {
+        tracing::warn!("llm message.content empty; recovered JSON from {field}");
+        return Some(json);
+    }
+    if trimmed.contains('{') {
+        tracing::warn!("llm message.content empty; using {field} as fallback");
         return Some(trimmed.to_string());
     }
     None
@@ -274,15 +499,18 @@ fn classify_response_schema() -> serde_json::Value {
             },
             "reason": {
                 "type": "string",
+                "maxLength": 120,
                 "description": "One-line summary"
             },
             "diagnosis": {
                 "type": "string",
-                "description": "2-4 sentences: what failed, log evidence, merge impact"
+                "maxLength": 320,
+                "description": "Max 2 sentences: what failed, log evidence, merge impact"
             },
             "recommended_action": {
                 "type": "string",
-                "description": "Concrete next step for the PR author"
+                "maxLength": 160,
+                "description": "One sentence: concrete next step"
             },
             "test_name": { "type": "string" },
             "page_summary": { "type": "string" }
@@ -318,25 +546,235 @@ fn apply_structured_format(body: &mut serde_json::Value, structured: bool) {
     }
 }
 
+/// Strip thinking-mode leaks and mid-field JSON fragments from LLM string fields.
+fn sanitize_llm_field(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let mut cut_at = text.len();
+
+    const FENCE_MARKERS: &[&str] = &["```json", "```JSON", "```"];
+    const THINKING_MARKERS: &[&str] = &[
+        "thought_process:",
+        "thoughtful_analysis:",
+        "thoughtful_thought",
+        "thethought",
+        "thoughtly:",
+        "orthought:",
+        "thought:",
+    ];
+    const JSON_LEAK_MARKERS: &[&str] = &[" waypoints:", " \"verdict\"", "\n{"];
+
+    for marker in FENCE_MARKERS {
+        if let Some(idx) = text.find(marker) {
+            cut_at = cut_at.min(idx);
+        }
+    }
+    for marker in THINKING_MARKERS {
+        if let Some(idx) = lower.find(marker) {
+            cut_at = cut_at.min(idx);
+        }
+    }
+    for marker in JSON_LEAK_MARKERS {
+        if let Some(idx) = text.find(marker) {
+            cut_at = cut_at.min(idx);
+        }
+    }
+
+    let mut s = text[..cut_at].trim().to_string();
+    s = s
+        .trim_end_matches(['\'', '"', '`', ',', ' ', ':', '.'])
+        .to_string();
+    if s.ends_with(" because it") {
+        s.truncate(s.len().saturating_sub(" because it".len()));
+    }
+    s.trim().to_string()
+}
+
 /// Strip markdown fences and parse classify JSON from model output.
 fn parse_classify_response(content: &str) -> std::result::Result<ClassifyResponse, serde_json::Error> {
+    if let Ok(v) = try_parse_classify_json(content) {
+        return Ok(v.sanitized());
+    }
+
+    let unfenced = strip_markdown_fence(content.trim());
+    if let Ok(v) = try_parse_classify_json(&unfenced) {
+        return Ok(v.sanitized());
+    }
+
+    if let Some(salvaged) = salvage_truncated_classify(content) {
+        return Ok(salvaged.sanitized());
+    }
+
+    if let Some(salvaged) = salvage_truncated_classify(&unfenced) {
+        return Ok(salvaged.sanitized());
+    }
+
+    try_parse_classify_json(content).map(ClassifyResponse::sanitized)
+}
+
+fn try_parse_classify_json(content: &str) -> std::result::Result<ClassifyResponse, serde_json::Error> {
     let trimmed = content.trim();
     if let Ok(v) = serde_json::from_str::<ClassifyResponse>(trimmed) {
         return Ok(v);
     }
 
-    let unfenced = strip_markdown_fence(trimmed);
-    if unfenced != trimmed {
-        if let Ok(v) = serde_json::from_str::<ClassifyResponse>(&unfenced) {
+    if let Some(json) = extract_json_object(trimmed) {
+        if let Ok(v) = serde_json::from_str::<ClassifyResponse>(&json) {
+            return Ok(v);
+        }
+        let repaired = repair_truncated_json_object(&json);
+        if let Ok(v) = serde_json::from_str::<ClassifyResponse>(&repaired) {
             return Ok(v);
         }
     }
 
-    if let Some(json) = extract_json_object(trimmed) {
-        return serde_json::from_str(&json);
+    let repaired = repair_truncated_json_object(trimmed);
+    serde_json::from_str(&repaired)
+}
+
+/// Best-effort recovery when the model truncates mid-JSON.
+fn salvage_truncated_classify(content: &str) -> Option<ClassifyResponse> {
+    let text = extract_json_object(content).unwrap_or_else(|| content.trim().to_string());
+    let reason = extract_json_string_field(&text, "reason");
+    let diagnosis = extract_json_string_field(&text, "diagnosis");
+    let recommended_action = extract_json_string_field(&text, "recommended_action");
+    let test_name = extract_json_string_field(&text, "test_name");
+    let page_summary = extract_json_string_field(&text, "page_summary");
+
+    if reason.is_none() && diagnosis.is_none() && recommended_action.is_none() {
+        return None;
     }
 
-    serde_json::from_str(trimmed)
+    let verdict = extract_json_string_field(&text, "verdict")
+        .as_deref()
+        .and_then(parse_verdict_str)
+        .unwrap_or(ClassifyVerdict::Unknown);
+
+    Some(ClassifyResponse {
+        verdict,
+        reason: mark_partial_llm_output(reason
+            .or(diagnosis.clone())
+            .unwrap_or_else(|| "truncated LLM response (partial JSON recovered)".into())),
+        diagnosis,
+        recommended_action,
+        test_name,
+        page_summary,
+    })
+}
+
+fn mark_partial_llm_output(reason: String) -> String {
+    if reason.contains("(partial LLM output)") {
+        reason
+    } else {
+        format!("{reason} (partial LLM output)")
+    }
+}
+
+fn repair_truncated_json_object(s: &str) -> String {
+    let Some(start) = s.find('{') else {
+        return s.to_string();
+    };
+    let mut body = s[start..].trim_end().to_string();
+
+    if unescaped_quote_count(&body) % 2 == 1 {
+        body.push('"');
+    }
+
+    if !body.contains("\"verdict\"") {
+        if body.ends_with('}') {
+            body.pop();
+            body = body.trim_end().trim_end_matches(',').to_string();
+            body.push_str(r#","verdict":"unknown"}"#);
+        } else {
+            body.push_str(r#","verdict":"unknown"}"#);
+        }
+    } else {
+        let open = body.chars().filter(|&c| c == '{').count();
+        let close = body.chars().filter(|&c| c == '}').count();
+        for _ in 0..open.saturating_sub(close) {
+            body.push('}');
+        }
+    }
+
+    body
+}
+
+fn unescaped_quote_count(s: &str) -> usize {
+    let mut count = 0usize;
+    let mut escaped = false;
+    for ch in s.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn extract_json_string_field(s: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{key}\"");
+    let key_pos = s.find(&marker)?;
+    let mut rest = s[key_pos + marker.len()..].trim_start();
+    if !rest.starts_with(':') {
+        return None;
+    }
+    rest = rest[1..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+
+    let mut out = String::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                match next {
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    'r' => out.push('\r'),
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    other => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                }
+            } else {
+                out.push('\\');
+            }
+            continue;
+        }
+        if ch == '"' {
+            break;
+        }
+        out.push(ch);
+    }
+
+    if out.is_empty() {
+        out = rest.chars().take(400).collect();
+    }
+
+    let out = out.trim().to_string();
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn parse_verdict_str(s: &str) -> Option<ClassifyVerdict> {
+    match s.trim().trim_matches('"') {
+        "flaky" => Some(ClassifyVerdict::Flaky),
+        "real" => Some(ClassifyVerdict::Real),
+        "policy" => Some(ClassifyVerdict::Policy),
+        "unknown" => Some(ClassifyVerdict::Unknown),
+        _ => None,
+    }
 }
 
 fn strip_markdown_fence(s: &str) -> String {
@@ -356,12 +794,13 @@ fn strip_markdown_fence(s: &str) -> String {
 
 fn extract_json_object(s: &str) -> Option<String> {
     let start = s.find('{')?;
-    let end = s.rfind('}')?;
-    if end > start {
-        Some(s[start..=end].to_string())
-    } else {
-        None
+    if let Some(end) = s.rfind('}') {
+        if end > start {
+            return Some(s[start..=end].to_string());
+        }
     }
+    // Truncated JSON — no closing brace; use everything from `{` onward.
+    Some(s[start..].to_string())
 }
 
 pub fn append_log_chunk(combined: &mut String, chunk: &str) {
@@ -400,14 +839,17 @@ pub fn next_prior_summary(prior: &str, page_num: u32, result: &ClassifyResult) -
 
 /// Digest lines for a classified CI run (multi-line: header + diagnosis + action).
 pub fn format_classify_digest_lines(
+    repo: &str,
     run_id: i64,
     workflow: &str,
     classify: &ClassifyResult,
 ) -> Vec<String> {
     let verdict = verdict_label(classify.verdict);
     let source = if classify.used_llm { "llm" } else { "heuristic" };
+    let run_url = github_actions_run_url(repo, run_id);
+    let run_ref = format!("[{run_id}]({run_url})");
     let mut lines = vec![format!(
-        "- run {run_id} {workflow} → {verdict} ({} page(s), {source})",
+        "- run {run_ref} {workflow} → {verdict} ({} page(s), {source})",
         classify.pages_read
     )];
 
@@ -435,6 +877,42 @@ pub fn format_classify_digest_lines(
     }
 
     lines
+}
+
+/// One-line policy entry for the digest (no Diagnosis/Action blocks).
+pub fn format_policy_digest_line(
+    repo: &str,
+    run_id: i64,
+    workflow: &str,
+    hint: &str,
+) -> String {
+    let hint = sanitize_llm_field(hint);
+    let hint = if hint.is_empty() {
+        "resolve policy gate".to_string()
+    } else {
+        hint.chars().take(100).collect()
+    };
+    let url = github_actions_run_url(repo, run_id);
+    format!("  - [{run_id}]({url}) {workflow} — {hint}")
+}
+
+pub fn format_policy_digest_line_from_classify(
+    repo: &str,
+    run_id: i64,
+    workflow: &str,
+    classify: &ClassifyResult,
+) -> String {
+    let hint = classify
+        .recommended_action
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or(classify.diagnosis.as_deref())
+        .unwrap_or(classify.reason.trim());
+    format_policy_digest_line(repo, run_id, workflow, hint)
+}
+
+fn github_actions_run_url(repo: &str, run_id: i64) -> String {
+    format!("https://github.com/{repo}/actions/runs/{run_id}")
 }
 
 fn verdict_label(v: ClassifyVerdict) -> &'static str {
@@ -659,6 +1137,52 @@ mod tests {
     }
 
     #[test]
+    fn thinking_prompt_suffix_when_enabled() {
+        let cfg = LlmConfig {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "gemma4".into(),
+            context_limit: 64000,
+            log_page_lines: 80,
+            max_log_pages: 8,
+            concurrency: 2,
+            structured_output: true,
+            max_output_tokens: 4096,
+            think: true,
+            max_thinking_tokens: 512,
+        };
+        let s = thinking_prompt_suffix(&cfg);
+        assert!(s.contains("512"));
+        assert!(s.contains("128"));
+    }
+
+    #[test]
+    fn extract_ollama_content_from_thinking_fallback() {
+        let v = serde_json::json!({
+            "message": {
+                "content": "",
+                "thinking": "analysis...\n{\"verdict\":\"policy\",\"reason\":\"missing label\",\"diagnosis\":\"x\",\"recommended_action\":\"add label\"}"
+            },
+            "done_reason": "length"
+        });
+        let text = extract_ollama_chat_content(&v).unwrap();
+        assert!(text.contains("\"verdict\":\"policy\""));
+    }
+
+    #[test]
+    fn extract_openai_content_from_reasoning_fallback() {
+        let v = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "reasoning": "{\"verdict\":\"real\",\"reason\":\"compile error\",\"diagnosis\":\"x\",\"recommended_action\":\"fix\"}"
+                }
+            }]
+        });
+        let text = extract_openai_chat_content(&v).unwrap();
+        assert!(text.contains("compile error"));
+    }
+
+    #[test]
     fn structured_format_uses_schema() {
         let mut body = serde_json::json!({"model": "m"});
         apply_structured_format(&mut body, true);
@@ -685,6 +1209,67 @@ mod tests {
     }
 
     #[test]
+    fn extract_json_object_handles_truncated() {
+        let raw = r#"{"reason":"x","action":"y"#;
+        let obj = extract_json_object(raw).unwrap();
+        assert_eq!(obj, raw);
+    }
+
+    #[test]
+    fn sanitize_llm_field_strips_thinking_json_leaks() {
+        let raw = "The PR requires manager approval. The workflow failed because it'```json waypoints: [] { ";
+        let clean = sanitize_llm_field(raw);
+        assert!(!clean.contains("```json"));
+        assert!(!clean.contains("waypoints"));
+        assert!(clean.contains("manager approval"));
+    }
+
+    #[test]
+    fn sanitize_llm_field_strips_thought_process_leak() {
+        let raw = "Missing approval for this PR, or thethought_process: The user wants me to triage";
+        let clean = sanitize_llm_field(raw);
+        assert!(!clean.contains("thought_process"));
+        assert!(clean.starts_with("Missing approval"));
+    }
+
+    #[test]
+    fn parse_classify_salvages_truncated_json() {
+        let raw = r#"{
+  "diagnosis": "The backport checker failed because the PR lacks required manager approval.",
+  "reason": "Backport approval missing",
+  "recommended_action": "The author should either add the approval label or apply the
+"#;
+        let r = parse_classify_response(raw).unwrap();
+        assert_eq!(r.verdict, ClassifyVerdict::Unknown);
+        assert!(r.diagnosis.as_ref().is_some_and(|d| d.contains("backport checker")));
+        assert!(r.recommended_action.as_ref().is_some_and(|a| a.contains("author should")));
+        assert!(r.reason.contains("Backport approval missing"));
+    }
+
+    #[test]
+    fn format_policy_digest_line_is_compact() {
+        let c = ClassifyResult {
+            verdict: ClassifyVerdict::Policy,
+            reason: "approval missing".into(),
+            diagnosis: Some("Long diagnosis that should not appear as separate block.".into()),
+            recommended_action: Some("Obtain manager approval.".into()),
+            test_name: Some("N/A".into()),
+            used_llm: true,
+            pages_read: 1,
+            page_summary: None,
+        };
+        let line = format_policy_digest_line_from_classify(
+            "Kong/kong-ee",
+            27400805815,
+            "Backport PR manager approval checker",
+            &c,
+        );
+        assert!(line.contains("[27400805815](https://github.com/Kong/kong-ee/actions/runs/27400805815)"));
+        assert!(line.contains("Obtain manager approval"));
+        assert!(!line.contains("Diagnosis:"));
+    }
+
+    #[test]
     fn digest_lines_include_diagnosis() {
         let c = ClassifyResult {
             verdict: ClassifyVerdict::Policy,
@@ -696,8 +1281,39 @@ mod tests {
             pages_read: 1,
             page_summary: None,
         };
-        let lines = format_classify_digest_lines(123, "Backport checker", &c);
+        let lines = format_classify_digest_lines("org/repo", 123, "Backport checker", &c);
+        assert!(lines[0].contains("[123](https://github.com/org/repo/actions/runs/123)"));
         assert!(lines.iter().any(|l| l.contains("Diagnosis:")));
         assert!(lines.iter().any(|l| l.contains("Action:")));
+    }
+
+    #[test]
+    fn digest_run_link_for_all_verdicts() {
+        let c = ClassifyResult {
+            verdict: ClassifyVerdict::Flaky,
+            reason: "network timeout".into(),
+            diagnosis: Some("Bazel fetch timed out.".into()),
+            recommended_action: Some("Rerun workflow.".into()),
+            test_name: None,
+            used_llm: true,
+            pages_read: 1,
+            page_summary: None,
+        };
+        let lines = format_classify_digest_lines("Kong/kong-ee", 27400326361, "Package & Release", &c);
+        assert!(lines[0].contains("[27400326361](https://github.com/Kong/kong-ee/actions/runs/27400326361)"));
+
+        let policy = ClassifyResult {
+            verdict: ClassifyVerdict::Policy,
+            reason: "approval".into(),
+            diagnosis: None,
+            recommended_action: None,
+            test_name: None,
+            used_llm: true,
+            pages_read: 1,
+            page_summary: None,
+        };
+        let policy_lines =
+            format_classify_digest_lines("Kong/kong-ee", 27400805815, "Backport checker", &policy);
+        assert!(policy_lines[0].contains("[27400805815](https://github.com/Kong/kong-ee/actions/runs/27400805815)"));
     }
 }
