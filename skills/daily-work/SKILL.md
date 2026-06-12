@@ -22,8 +22,8 @@ Use unistar-mcp tools (lazy mode: `tool_list` → `tool_describe` → `tool_call
 
 1. `pr_list_open` for each configured repo (respect `limit`).
 2. For PRs with failing CI: `pr_get_status` → `ci_analyze_pr_failures` → `ci_get_failed_logs` (paged) → **LLM classify every failing run** (workflow name does not matter).
-3. Classify **flaky vs real vs policy** page-by-page; carry a short summary forward, not full log history.
-4. Emit a ≤500 token summary per PR; reduce into the daily digest.
+3. Classify **flaky vs real vs policy** page-by-page; each run needs `diagnosis` + `recommended_action` grounded in logs.
+4. Emit a detailed per-PR summary (what failed, why, next step); reduce into the daily digest.
 
 ## Rules
 

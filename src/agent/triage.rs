@@ -8,7 +8,8 @@ use crate::config::Config;
 use crate::engine::Skill;
 use crate::error::Result;
 use crate::llm::{
-    append_log_chunk, next_prior_summary, ClassifyVerdict, LlmClient,
+    append_log_chunk, format_classify_digest_lines, llm_reason_text, next_prior_summary,
+    ClassifyVerdict, LlmClient,
 };
 use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
@@ -211,9 +212,10 @@ pub async fn triage_pr(
             }
             ClassifyVerdict::Policy => {
                 real = true;
-                notes.push(format!(
-                    "- run {} {} → policy: {}",
-                    run.run_id, run.workflow, classify.reason
+                notes.extend(format_classify_digest_lines(
+                    run.run_id,
+                    &run.workflow,
+                    &classify,
                 ));
                 continue;
             }
@@ -243,11 +245,7 @@ pub async fn triage_pr(
                 fingerprint,
                 classification,
                 log_excerpt: logs.chars().take(2000).collect(),
-                llm_reason: Some(format!(
-                    "{} ({})",
-                    classify.reason,
-                    if classify.used_llm { "llm" } else { "heuristic" }
-                )),
+                llm_reason: Some(llm_reason_text(&classify)),
                 rerun_outcome: None,
             };
             let incident_id = incident.id;
@@ -276,14 +274,10 @@ pub async fn triage_pr(
             }
         }
 
-        notes.push(format!(
-            "- run {} {} → {:?}: {} ({} page(s), {})",
+        notes.extend(format_classify_digest_lines(
             run.run_id,
-            run.workflow,
-            classify.verdict,
-            classify.reason,
-            classify.pages_read,
-            if classify.used_llm { "llm" } else { "heuristic" }
+            &run.workflow,
+            &classify,
         ));
     }
 
