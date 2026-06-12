@@ -4,3 +4,5 @@
 *.db
 *.db-*
 .coworker/
+coworker.yaml
+.coworker/coworker.yaml

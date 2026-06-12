@@ -2,11 +2,14 @@ use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::agent::log_pages::parse_log_page;
 use crate::agent::parse::{parse_failing_runs, ParsedPrLine};
 use crate::config::Config;
 use crate::engine::Skill;
 use crate::error::Result;
-use crate::llm::{ClassifyVerdict, LlmClient};
+use crate::llm::{
+    append_log_chunk, is_policy_workflow, next_prior_summary, ClassifyVerdict, LlmClient,
+};
 use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
 use crate::store::{
@@ -103,17 +106,89 @@ pub async fn triage_pr(
             continue;
         }
 
-        let logs = lazy_tool(
-            mcp,
-            "ci_get_failed_logs",
-            json!({ "repo": repo, "run_id": run.run_id }),
-        )
-        .await?;
-        tool_calls += 1;
+        if is_policy_workflow(&run.workflow) {
+            real = true;
+            notes.push(format!(
+                "- run {} {} → policy: label/approval/template check (not flaky)",
+                run.run_id, run.workflow
+            ));
+            continue;
+        }
 
-        let classify = llm
-            .classify_ci_failure(&skill.body, repo, pr_number, &run.workflow, &logs)
+        let page_lines = config.llm.log_page_lines.max(1);
+        let max_pages = config
+            .llm
+            .max_log_pages
+            .max(1)
+            .min(config.policy.max_tool_calls_per_pr.saturating_sub(tool_calls));
+
+        let mut offset = 0u32;
+        let mut combined_logs = String::new();
+        let mut prior_summary = String::new();
+        let mut classify = None;
+
+        for page_num in 1..=max_pages {
+            if tool_calls >= config.policy.max_tool_calls_per_pr {
+                notes.push("(tool call budget exhausted for this PR)".into());
+                break;
+            }
+
+            let resp = lazy_tool(
+                mcp,
+                "ci_get_failed_logs",
+                json!({
+                    "repo": repo,
+                    "run_id": run.run_id,
+                    "offset_lines": offset,
+                    "max_lines": page_lines,
+                }),
+            )
             .await?;
+            tool_calls += 1;
+
+            let page = parse_log_page(&resp);
+            append_log_chunk(&mut combined_logs, &page.body);
+
+            let result = llm
+                .classify_log_page(
+                    &skill.body,
+                    repo,
+                    pr_number,
+                    &run.workflow,
+                    &page.body,
+                    &combined_logs,
+                    &prior_summary,
+                    page_num,
+                    max_pages,
+                )
+                .await?;
+
+            if result.verdict != ClassifyVerdict::Unknown {
+                classify = Some(result);
+                break;
+            }
+
+            prior_summary = next_prior_summary(&prior_summary, page_num, &result);
+
+            if !page.has_more {
+                classify = Some(result);
+                break;
+            }
+            offset = page.next_offset_lines;
+        }
+
+        let classify = match classify {
+            Some(c) => c,
+            None => {
+                notes.push(format!(
+                    "- run {} {} → skipped (no log pages fetched)",
+                    run.run_id, run.workflow
+                ));
+                continue;
+            }
+        };
+
+        let logs = combined_logs;
 
         let error_sig = logs
             .lines()
@@ -142,6 +217,14 @@ pub async fn triage_pr(
             ClassifyVerdict::Real => {
                 real = true;
                 Classification::LlmReal
+            }
+            ClassifyVerdict::Policy => {
+                real = true;
+                notes.push(format!(
+                    "- run {} {} → policy: {}",
+                    run.run_id, run.workflow, classify.reason
+                ));
+                continue;
             }
             ClassifyVerdict::Unknown => {
                 real = true;
@@ -203,8 +286,12 @@ pub async fn triage_pr(
         }
 
         notes.push(format!(
-            "- run {} {} → {:?}: {}",
-            run.run_id, run.workflow, classify.verdict, classify.reason
+            "- run {} {} → {:?}: {} ({} page(s))",
+            run.run_id,
+            run.workflow,
+            classify.verdict,
+            classify.reason,
+            classify.pages_read
         ));
     }
 

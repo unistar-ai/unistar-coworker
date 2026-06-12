@@ -8,6 +8,8 @@ use crate::error::{CoworkerError, Result};
 pub enum ClassifyVerdict {
     Flaky,
     Real,
+    /// Label, approval, template, or other repo policy — not a test flake.
+    Policy,
     Unknown,
 }
 
@@ -17,6 +19,9 @@ struct ClassifyResponse {
     reason: String,
     #[serde(default)]
     test_name: Option<String>,
+    /// Short summary of this page for the next page (when verdict is unknown).
+    #[serde(default)]
+    page_summary: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,17 +30,22 @@ pub struct ClassifyResult {
     pub reason: String,
     pub test_name: Option<String>,
     pub used_llm: bool,
+    pub pages_read: u32,
+    /// LLM-provided note for the next page when verdict is unknown.
+    pub page_summary: Option<String>,
 }
 
 pub struct LlmClient {
     cfg: LlmConfig,
     http: reqwest::Client,
+    online: bool,
 }
 
 impl LlmClient {
-    pub fn new(cfg: LlmConfig) -> Self {
+    pub fn new(cfg: LlmConfig, online: bool) -> Self {
         Self {
             cfg,
+            online,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
@@ -43,32 +53,58 @@ impl LlmClient {
         }
     }
 
-    pub async fn available(&self) -> bool {
-        crate::llm::ollama::probe(&self.cfg).await
+    pub fn is_online(&self) -> bool {
+        self.online
     }
 
-    pub async fn classify_ci_failure(
+    /// Classify one page of CI logs. Each LLM call only sees this page plus `prior_summary`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn classify_log_page(
         &self,
         skill_body: &str,
         repo: &str,
         pr_number: u32,
         workflow: &str,
-        logs: &str,
+        page_logs: &str,
+        combined_logs: &str,
+        prior_summary: &str,
+        page_num: u32,
+        max_pages: u32,
     ) -> Result<ClassifyResult> {
-        if self.available().await {
+        if let Some(result) = quick_classify(workflow, page_logs) {
+            if result.verdict != ClassifyVerdict::Unknown {
+                return Ok(ClassifyResult {
+                    pages_read: page_num,
+                    ..result
+                });
+            }
+        }
+
+        if self.online {
             match self
-                .classify_with_llm(skill_body, repo, pr_number, workflow, logs)
+                .classify_with_llm(
+                    skill_body,
+                    repo,
+                    pr_number,
+                    workflow,
+                    page_logs,
+                    prior_summary,
+                    page_num,
+                    max_pages,
+                )
                 .await
             {
                 Ok(r) => return Ok(r),
                 Err(e) => {
-                    tracing::warn!("LLM classify failed, using heuristics: {e}");
+                    tracing::warn!("LLM classify page {page_num} failed, using heuristics: {e}");
                 }
             }
         }
-        Ok(heuristic_classify(logs))
+
+        Ok(heuristic_classify(workflow, combined_logs))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn classify_with_llm(
         &self,
         skill_body: &str,
@@ -76,15 +112,28 @@ impl LlmClient {
         pr_number: u32,
         workflow: &str,
         logs: &str,
+        prior_summary: &str,
+        page_num: u32,
+        max_pages: u32,
     ) -> Result<ClassifyResult> {
         let system = format!(
             "{skill_body}\n\n\
-You classify CI failures as flaky or real bugs. \
+You classify CI failures as flaky, real bugs, or policy/check gates. \
+You may receive one page of logs at a time; prior pages are summarized, not repeated. \
+If this page alone is inconclusive, respond verdict unknown and include page_summary \
+(a ≤2 sentence note for the next page). \
 Respond with JSON only, no markdown: \
-{{\"verdict\":\"flaky\"|\"real\"|\"unknown\",\"reason\":\"...\",\"test_name\":\"optional\"}}"
+{{\"verdict\":\"flaky\"|\"real\"|\"policy\"|\"unknown\",\"reason\":\"...\",\"test_name\":\"optional\",\"page_summary\":\"optional\"}}"
         );
+        let prior = if prior_summary.is_empty() {
+            "(none)".into()
+        } else {
+            prior_summary.to_string()
+        };
         let user = format!(
-            "repo: {repo}\npr: #{pr_number}\nworkflow: {workflow}\n\nFailed logs:\n{logs}"
+            "repo: {repo}\npr: #{pr_number}\nworkflow: {workflow}\n\
+log_page: {page_num}/{max_pages}\nprior_pages_summary: {prior}\n\n\
+Failed logs (this page only):\n{logs}"
         );
 
         let url = format!(
@@ -136,11 +185,122 @@ Respond with JSON only, no markdown: \
             reason: parsed.reason,
             test_name: parsed.test_name,
             used_llm: true,
+            pages_read: page_num,
+            page_summary: parsed.page_summary,
         })
     }
 }
 
-pub fn heuristic_classify(logs: &str) -> ClassifyResult {
+pub fn append_log_chunk(combined: &mut String, chunk: &str) {
+    if !combined.is_empty() {
+        combined.push('\n');
+    }
+    combined.push_str(chunk);
+    const MAX_COMBINED: usize = 24_000;
+    if combined.len() > MAX_COMBINED {
+        let keep = &combined[combined.len() - MAX_COMBINED..];
+        *combined = format!("…[earlier log pages truncated]…\n{keep}");
+    }
+}
+
+/// Rolling summary across pages — bounded so later LLM calls stay within context.
+pub fn next_prior_summary(prior: &str, page_num: u32, result: &ClassifyResult) -> String {
+    let page_note = result
+        .page_summary
+        .as_deref()
+        .unwrap_or(&result.reason)
+        .chars()
+        .take(240)
+        .collect::<String>();
+    let mut next = if prior.is_empty() {
+        format!("Page {page_num}: {page_note}")
+    } else {
+        format!("{prior} | Page {page_num}: {page_note}")
+    };
+    const MAX: usize = 800;
+    if next.len() > MAX {
+        next = next.chars().take(MAX).collect();
+        next.push('…');
+    }
+    next
+}
+
+/// Workflow names that gate merges via labels, approvals, or templates — not test flakes.
+pub fn is_policy_workflow(workflow: &str) -> bool {
+    let w = workflow.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "approval checker",
+        "backport pr",
+        "check pr label",
+        "pull request template",
+        "template validation",
+        "protected steps",
+        "enforce protected",
+        "changelog requirement",
+        "required label",
+        "label check",
+        "pr label",
+        "merge gate",
+        "codecov",
+        "danger",
+        "semantic pull",
+        "commitlint",
+        "lint pr title",
+    ];
+    NEEDLES.iter().any(|n| w.contains(n))
+}
+
+fn policy_classify(workflow: &str) -> ClassifyResult {
+    ClassifyResult {
+        verdict: ClassifyVerdict::Policy,
+        reason: format!(
+            "policy check ({workflow}) — labels, approval, or template; not a flaky test"
+        ),
+        test_name: None,
+        used_llm: false,
+        pages_read: 1,
+        page_summary: None,
+    }
+}
+
+/// Fast path before LLM: workflow name or log shape.
+pub fn quick_classify(workflow: &str, logs: &str) -> Option<ClassifyResult> {
+    if is_policy_workflow(workflow) {
+        return Some(policy_classify(workflow));
+    }
+    let lower = logs.to_ascii_lowercase();
+    const POLICY_LOG: &[&str] = &[
+        "required label",
+        "missing label",
+        "label is required",
+        "does not have label",
+        "approval required",
+        "waiting for approval",
+        "template validation",
+        "pull_request_template",
+        "changelog",
+        "missing section",
+        "not allowed to merge",
+        "merge requirements",
+    ];
+    if POLICY_LOG.iter().any(|s| lower.contains(s)) {
+        return Some(ClassifyResult {
+            verdict: ClassifyVerdict::Policy,
+            reason: "heuristic: policy/label/template signals in logs".into(),
+            test_name: None,
+            used_llm: false,
+            pages_read: 1,
+            page_summary: None,
+        });
+    }
+    None
+}
+
+pub fn heuristic_classify(workflow: &str, logs: &str) -> ClassifyResult {
+    if let Some(r) = quick_classify(workflow, logs) {
+        return r;
+    }
+
     let lower = logs.to_ascii_lowercase();
     let flaky_signals = [
         "timeout",
@@ -168,6 +328,8 @@ pub fn heuristic_classify(logs: &str) -> ClassifyResult {
         "undefined reference",
         "test failed",
         "failures:",
+        "exit code 1",
+        "process completed with exit code",
     ];
 
     let flaky = flaky_signals.iter().any(|s| lower.contains(s));
@@ -197,6 +359,8 @@ pub fn heuristic_classify(logs: &str) -> ClassifyResult {
         reason,
         test_name: extract_test_name(logs),
         used_llm: false,
+        pages_read: 1,
+        page_summary: None,
     }
 }
 
@@ -219,13 +383,30 @@ mod tests {
 
     #[test]
     fn heuristic_flaky() {
-        let r = heuristic_classify("Error: connect ETIMEDOUT after 30000ms");
+        let r = heuristic_classify("ci", "Error: connect ETIMEDOUT after 30000ms");
         assert_eq!(r.verdict, ClassifyVerdict::Flaky);
     }
 
     #[test]
     fn heuristic_real() {
-        let r = heuristic_classify("thread 'main' panicked at 'assertion failed'");
+        let r = heuristic_classify("ci", "thread 'main' panicked at 'assertion failed'");
         assert_eq!(r.verdict, ClassifyVerdict::Real);
+    }
+
+    #[test]
+    fn policy_workflow_by_name() {
+        assert!(is_policy_workflow("Backport PR manager approval checker"));
+        let r = quick_classify("Backport PR manager approval checker", "").unwrap();
+        assert_eq!(r.verdict, ClassifyVerdict::Policy);
+    }
+
+    #[test]
+    fn policy_workflow_by_log() {
+        let r = quick_classify(
+            "Some Check",
+            "Error: PR is missing required label no-e2e",
+        )
+        .unwrap();
+        assert_eq!(r.verdict, ClassifyVerdict::Policy);
     }
 }

@@ -346,6 +346,7 @@ mod tests {
                 needs_attention: 1,
                 ignorable: 2,
                 flaky_candidates: 0,
+                duration_secs: 1.5,
             },
             body_md: "# Daily".into(),
             created_at: Utc::now(),
@@ -353,5 +354,6 @@ mod tests {
         store.save_digest(&digest).await.unwrap();
         let loaded = store.latest_digest().await.unwrap().unwrap();
         assert_eq!(loaded.id, digest.id);
+        assert_eq!(loaded.summary.duration_secs, 1.5);
     }
 }

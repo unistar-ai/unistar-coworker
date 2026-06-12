@@ -41,6 +41,32 @@ pub struct DigestSummary {
     pub needs_attention: u32,
     pub ignorable: u32,
     pub flaky_candidates: u32,
+    /// Wall-clock seconds for the workflow run that produced this digest.
+    #[serde(default)]
+    pub duration_secs: f64,
+}
+
+/// Human-readable duration for digest headers and CLI output.
+pub fn format_duration(secs: f64) -> String {
+    if secs <= 0.0 {
+        return "—".into();
+    }
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    let mins = (secs / 60.0).floor() as u32;
+    let rem = secs - f64::from(mins * 60);
+    if rem < 0.05 {
+        format!("{mins}m")
+    } else {
+        format!("{mins}m {rem:.0}s")
+    }
+}
+
+impl DigestSummary {
+    pub fn duration_label(&self) -> String {
+        format_duration(self.duration_secs)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,4 +230,24 @@ pub fn compute_fingerprint(
     let payload = format!("{repo}|{workflow}|{job}|{fallback}");
     let hash = Sha256::digest(payload.as_bytes());
     format!("{:x}", hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_duration_subminute() {
+        assert_eq!(format_duration(2.84), "2.8s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(83.0), "1m 23s");
+    }
+
+    #[test]
+    fn format_duration_zero() {
+        assert_eq!(format_duration(0.0), "—");
+    }
 }

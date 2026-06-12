@@ -34,11 +34,12 @@ impl Engine {
         state: SharedState,
     ) -> Self {
         let mcp = spawn_mcp(&config).await;
-        let llm = Arc::new(LlmClient::new(config.llm.clone()));
+        let llm_online = crate::llm::ollama::probe(&config.llm).await;
+        let llm = Arc::new(LlmClient::new(config.llm.clone(), llm_online));
         {
             let mut s = state.write().await;
             s.mcp_ok = mcp.is_available();
-            s.llm_ok = llm.available().await;
+            s.llm_ok = llm_online;
         }
         Self {
             config,

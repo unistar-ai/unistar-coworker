@@ -279,11 +279,12 @@ fn draw_list(frame: &mut ratatui::Frame, area: Rect, state: &AppState, list_stat
                     .iter()
                     .map(|d| {
                         ListItem::new(format!(
-                            "{} — attention:{} flaky:{} ok:{}",
+                            "{} — attention:{} flaky:{} ok:{} ({})",
                             d.date,
                             d.summary.needs_attention,
                             d.summary.flaky_candidates,
-                            d.summary.ignorable
+                            d.summary.ignorable,
+                            d.summary.duration_label()
                         ))
                     })
                     .collect()
@@ -368,11 +369,12 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
                     .unwrap_or_else(|| "Press r to run daily-work.".into())
             } else if let Some(meta) = state.selected_digest() {
                 format!(
-                    "Digest {}\nattention: {}  flaky: {}  ok: {}\n\n(full body only for latest run)",
+                    "Digest {}\nattention: {}  flaky: {}  ok: {}\nrun time: {}\n\n(full body only for latest run)",
                     meta.date,
                     meta.summary.needs_attention,
                     meta.summary.flaky_candidates,
-                    meta.summary.ignorable
+                    meta.summary.ignorable,
+                    meta.summary.duration_label()
                 )
             } else {
                 "Press r to run daily-work.".into()

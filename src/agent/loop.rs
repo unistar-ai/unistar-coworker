@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -17,7 +18,7 @@ use crate::llm::LlmClient;
 use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
 use crate::output::export::maybe_export_digest;
-use crate::store::{Digest, DigestSummary, PrSnapshot, Store};
+use crate::store::{Digest, DigestSummary, PrSnapshot, Store, format_duration};
 
 pub struct AgentLoop {
     config: Config,
@@ -87,6 +88,14 @@ impl AgentLoop {
         if !skill.description.is_empty() {
             self.log("info", skill.description.clone());
         }
+        self.log(
+            "info",
+            format!(
+                "llm: {} ({})",
+                self.config.llm.model,
+                if self.llm.is_online() { "online" } else { "offline/heuristic" }
+            ),
+        );
 
         let run_id = self.store.start_workflow_run(workflow_id).await?;
         let _ = self.events.send(AppEvent::WorkflowStarted {
@@ -151,6 +160,8 @@ impl AgentLoop {
     }
 
     async fn run_daily_work(&self, skill: &Skill) -> Result<String> {
+        let started = Instant::now();
+
         if !self.mcp.is_available() {
             return Err(crate::error::CoworkerError::Workflow(
                 "unistar-mcp is required for daily-work".into(),
@@ -199,7 +210,7 @@ impl AgentLoop {
                 let mut handled = false;
 
                 if ci_is_failing(&pr.ci) {
-                    self.log("info", format!("triaging {repo}#{}", pr.number));
+                    self.log("info", format!("triaging {repo}#{} (CI: {})", pr.number, pr.ci));
                     let outcome = triage_pr(
                         &self.config,
                         self.mcp.as_ref(),
@@ -261,10 +272,14 @@ impl AgentLoop {
             }
         }
 
+        let duration_secs = started.elapsed().as_secs_f64();
+        let duration_label = format_duration(duration_secs);
+
         let body = format!(
             "# Daily Digest\n\n\
 Skill: {}\n\n\
-Summary: {} need attention, {} flaky, {} ignorable\n\n\
+Summary: {} need attention, {} flaky, {} ignorable\n\
+Run time: {duration_label}\n\n\
 {attention_section}\n\
 {flaky_section}\n\
 {ok_section}"
@@ -286,6 +301,7 @@ Summary: {} need attention, {} flaky, {} ignorable\n\n\
                 needs_attention,
                 ignorable,
                 flaky_candidates,
+                duration_secs,
             },
             body_md: body,
             created_at: chrono::Utc::now(),
@@ -304,7 +320,7 @@ Summary: {} need attention, {} flaky, {} ignorable\n\n\
         .await;
 
         Ok(format!(
-            "digest saved ({needs_attention} need attention, {flaky_candidates} flaky, {ignorable} ok)"
+            "digest saved ({needs_attention} need attention, {flaky_candidates} flaky, {ignorable} ok) in {duration_label}"
         ))
     }
 

@@ -33,6 +33,7 @@ export PATH="$PWD:$PATH"
 export GH_TOKEN=...
 
 cd ../unistar-coworker
+cp coworker.example.yaml coworker.yaml   # edit repos, llm, etc.
 cargo run --release                  # TUI + cron
 cargo run --release -- run-once      # daily-work once
 cargo run --release -- run-once --workflow release-duty
@@ -49,7 +50,13 @@ cargo run --release -- run-once --workflow release-duty
 | `y`/`n` | Approve/deny (Approvals — executes MCP on approve) |
 | `q` | Quit |
 
-## Config (`coworker.yaml`)
+## Config
+
+Copy `coworker.example.yaml` to `coworker.yaml` (gitignored) and edit for your environment:
+
+```sh
+cp coworker.example.yaml coworker.yaml
+```
 
 ```yaml
 schedule:

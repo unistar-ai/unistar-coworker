@@ -1,13 +1,17 @@
 use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 use crate::config::McpConfig;
 use crate::error::{CoworkerError, Result};
 use crate::mcp::McpClient;
+
+const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Minimal MCP stdio client for unistar-mcp lazy meta tools (v0.1).
 pub struct SubprocessMcp {
@@ -83,6 +87,21 @@ impl SubprocessMcp {
     }
 
     async fn request(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        timeout(MCP_REQUEST_TIMEOUT, self.request_inner(method, params))
+            .await
+            .map_err(|_| {
+                CoworkerError::Other(anyhow::anyhow!(
+                    "mcp request timed out after {}s ({method})",
+                    MCP_REQUEST_TIMEOUT.as_secs()
+                ))
+            })?
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let id = self.next_id().await;
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -101,7 +120,12 @@ impl SubprocessMcp {
         loop {
             let mut reader = self.reader.lock().await;
             let mut buf = String::new();
-            reader.read_line(&mut buf).await?;
+            let n = reader.read_line(&mut buf).await?;
+            if n == 0 {
+                return Err(CoworkerError::Other(anyhow::anyhow!(
+                    "mcp closed stdout while waiting for {method} response"
+                )));
+            }
             if buf.trim().is_empty() {
                 continue;
             }

@@ -30,6 +30,20 @@ pub struct LlmConfig {
     pub base_url: String,
     pub model: String,
     pub context_limit: u32,
+    /// Lines per page when fetching/analyzing CI logs (`ci_get_failed_logs max_lines`).
+    #[serde(default = "default_log_page_lines")]
+    pub log_page_lines: u32,
+    /// Max log pages to fetch + analyze per failing run before giving up.
+    #[serde(default = "default_max_log_pages")]
+    pub max_log_pages: u32,
+}
+
+fn default_log_page_lines() -> u32 {
+    80
+}
+
+fn default_max_log_pages() -> u32 {
+    8
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -172,7 +186,7 @@ impl Config {
             }
         }
         Err(CoworkerError::Config(
-            "coworker.yaml not found (cwd or .coworker/)".into(),
+            "coworker.yaml not found (cwd or .coworker/) — copy coworker.example.yaml to coworker.yaml".into(),
         ))
     }
 

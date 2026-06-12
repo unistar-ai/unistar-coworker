@@ -2,6 +2,8 @@ llm:
   base_url: http://localhost:11434/v1
   model: gemma4:26b-a4b-it-qat
   context_limit: 64000
+  log_page_lines: 80
+  max_log_pages: 8
 
 mcp:
   command: unistar-mcp
@@ -33,7 +35,7 @@ workflows:
     skill: skills/review-radar/SKILL.md
 
 repos:
-  - STARRY-S/unistar-mcp
+  - owner/repo
 
 release:
   backport_label: needs-backport

@@ -14,15 +14,15 @@ Use unistar-mcp tools (lazy mode: `tool_list` → `tool_describe` → `tool_call
 | `pr_list_open` | Open PRs with compact CI/review lines |
 | `pr_get_status` | Single PR mergeability snapshot |
 | `ci_analyze_pr_failures` | Failing runs + run IDs |
-| `ci_get_failed_logs` | Distilled error lines (~6KB cap) |
+| `ci_get_failed_logs` | Distilled error lines; pass `max_lines` + `offset_lines` to page |
 | `ci_rerun_workflow` | Rerun failed jobs (mutating — needs approval) |
 | `pr_create_backport` | Backport merged PR (mutating — needs approval) |
 
 ## Per-repo workflow
 
 1. `pr_list_open` for each configured repo (respect `limit`).
-2. For PRs with failing CI: `pr_get_status` → `ci_analyze_pr_failures` → `ci_get_failed_logs`.
-3. Classify **flaky vs real bug**. Record flaky incidents to the store.
+2. For PRs with failing CI: `pr_get_status` → `ci_analyze_pr_failures` → `ci_get_failed_logs` (paged).
+3. Classify **flaky vs real bug** page-by-page; carry a short summary forward, not full log history.
 4. Emit a ≤500 token summary per PR; reduce into the daily digest.
 
 ## Rules
