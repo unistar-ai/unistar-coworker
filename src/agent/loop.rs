@@ -5,6 +5,7 @@ use tokio::sync::broadcast;
 use crate::agent::budget::TokenBudget;
 use crate::agent::parse::{ci_is_failing, needs_review, parse_pr_line};
 use crate::agent::release::run_release_duty;
+use crate::agent::review_radar::run_review_radar;
 use crate::agent::triage::triage_pr;
 use crate::app::{append_audit, AppEvent, SharedState};
 use crate::store::LogLine;
@@ -112,6 +113,7 @@ impl AgentLoop {
         let result = match workflow_id {
             "daily-work" => self.run_daily_work(&skill).await,
             "release-duty" => self.run_release_duty(&skill).await,
+            "review-radar" => self.run_review_radar(&skill).await,
             other => {
                 append_audit(
                     self.store.as_ref(),
@@ -231,7 +233,13 @@ impl AgentLoop {
                     digest.push_triage(pr.number, &pr.title, &outcome);
                     handled = true;
                 } else if needs_review(&pr.review) && pr.review != "approved" {
-                    digest.push_waiting_review(pr.number, &pr.title, &pr.ci);
+                    digest.push_waiting_review(
+                        &repo,
+                        pr.number,
+                        &pr.title,
+                        &pr.ci,
+                        Some(&pr.author),
+                    );
                     self.save_pr_snapshot(&repo, &pr, Some("review blocked".into()))
                         .await?;
                     handled = true;
@@ -316,6 +324,31 @@ impl AgentLoop {
             "release-duty: {} backport(s) queued, {} skipped",
             outcome.queued, outcome.skipped
         ))
+    }
+
+    async fn run_review_radar(&self, skill: &Skill) -> Result<String> {
+        let outcome = run_review_radar(
+            &self.config,
+            self.mcp.as_ref(),
+            self.store.as_ref(),
+            skill,
+            &self.events,
+            |level, msg| self.log(level, msg),
+        )
+        .await?;
+
+        let summary = outcome.format_summary();
+        self.log("info", summary.clone());
+
+        append_audit(
+            self.store.as_ref(),
+            "info",
+            "review-radar",
+            &summary,
+        )
+        .await;
+
+        Ok(summary)
     }
 
     async fn save_pr_snapshot(

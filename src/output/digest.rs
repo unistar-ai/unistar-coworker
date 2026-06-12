@@ -19,6 +19,7 @@ pub struct IncrementalDigest {
     date: chrono::NaiveDate,
     started: Instant,
     skill_name: String,
+    title: String,
     needs_attention: u32,
     ignorable: u32,
     flaky_candidates: u32,
@@ -38,11 +39,17 @@ impl IncrementalDigest {
         } else {
             skill.name.clone()
         };
+        let (title, ok_header) = if skill_name == "review-radar" {
+            ("Review Radar", "Waiting for review")
+        } else {
+            ("Daily Digest", "OK / ignorable")
+        };
         Self {
             id: Uuid::new_v4(),
             date: Utc::now().date_naive(),
             started: Instant::now(),
             skill_name,
+            title: title.into(),
             needs_attention: 0,
             ignorable: 0,
             flaky_candidates: 0,
@@ -50,7 +57,7 @@ impl IncrementalDigest {
             attention_section: String::from("## Needs attention\n\n"),
             flaky_section: String::from("## Flaky candidates\n\n"),
             policy_section: String::from("## Policy gates\n\n"),
-            ok_section: String::from("## OK / ignorable\n\n"),
+            ok_section: format!("## {ok_header}\n\n"),
             processed_prs: 0,
             complete: false,
         }
@@ -145,11 +152,22 @@ impl IncrementalDigest {
         let _ = remaining;
     }
 
-    pub fn push_waiting_review(&mut self, number: u32, title: &str, ci: &str) {
+    pub fn push_waiting_review(
+        &mut self,
+        repo: &str,
+        number: u32,
+        title: &str,
+        ci: &str,
+        author: Option<&str>,
+    ) {
         self.ignorable += 1;
         self.processed_prs += 1;
+        let url = format!("https://github.com/{repo}/pull/{number}");
+        let author_suffix = author
+            .map(|a| format!(" (@{a})"))
+            .unwrap_or_default();
         self.ok_section.push_str(&format!(
-            "- #{number} {title} — waiting for review (CI: {ci})\n"
+            "- [#{number} {title}]({url}){author_suffix} — waiting for review (CI: {ci})\n"
         ));
     }
 
@@ -168,10 +186,14 @@ impl IncrementalDigest {
     pub fn to_digest(&self) -> Digest {
         let duration_secs = self.started.elapsed().as_secs_f64();
         let duration_label = format_duration(duration_secs);
-        let summary_counts = format!(
-            "{} need attention, {} flaky, {} policy, {} ignorable",
-            self.needs_attention, self.flaky_candidates, self.policy_gates, self.ignorable
-        );
+        let summary_counts = if self.skill_name == "review-radar" {
+            format!("{} waiting for review", self.ignorable)
+        } else {
+            format!(
+                "{} need attention, {} flaky, {} policy, {} ignorable",
+                self.needs_attention, self.flaky_candidates, self.policy_gates, self.ignorable
+            )
+        };
         let (status_block, summary_line) = if self.complete {
             (
                 format!("Status: **complete**\nRun time: {duration_label}\n"),
@@ -188,7 +210,7 @@ impl IncrementalDigest {
         };
 
         let body_md = format!(
-            "# Daily Digest\n\n\
+            "# {title}\n\n\
 Skill: {skill}\n\n\
 {status_block}\
 {summary_line}\n\n\
@@ -196,6 +218,7 @@ Skill: {skill}\n\n\
 {flaky}\n\
 {policy}\n\
 {ok}",
+            title = self.title,
             skill = self.skill_name,
             attention = self.attention_section,
             flaky = self.flaky_section,
@@ -297,6 +320,23 @@ mod tests {
         let digest = d.to_digest();
         assert!(!digest.summary.complete);
         assert!(digest.body_md.contains("in progress"));
+    }
+
+    #[test]
+    fn waiting_review_includes_pr_link() {
+        let mut d = IncrementalDigest::begin(&test_skill());
+        d.begin_repo("Kong/kong-ee");
+        d.push_waiting_review(
+            "Kong/kong-ee",
+            19194,
+            "docs: example",
+            "passing",
+            Some("alice"),
+        );
+        let digest = d.finish();
+        assert!(digest.body_md.contains(
+            "[#19194 docs: example](https://github.com/Kong/kong-ee/pull/19194) (@alice)"
+        ));
     }
 
     #[test]

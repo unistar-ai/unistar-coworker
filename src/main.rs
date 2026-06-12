@@ -98,12 +98,20 @@ async fn run_headless(config: Config, store: Arc<dyn store::Store>, workflow: &s
                     } else {
                         "digest updated"
                     };
-                    eprintln!(
-                        "→ {label} (attention:{} flaky:{} in {})",
-                        d.summary.needs_attention,
-                        d.summary.flaky_candidates,
-                        d.summary.duration_label()
-                    );
+                    if d.body_md.contains("Skill: review-radar") {
+                        eprintln!(
+                            "→ {label} (waiting:{} in {})",
+                            d.summary.ignorable,
+                            d.summary.duration_label()
+                        );
+                    } else {
+                        eprintln!(
+                            "→ {label} (attention:{} flaky:{} in {})",
+                            d.summary.needs_attention,
+                            d.summary.flaky_candidates,
+                            d.summary.duration_label()
+                        );
+                    }
                 }
                 AppEvent::StoreUpdated | AppEvent::StatusMessage(_) => {}
             }

@@ -71,11 +71,19 @@ pub fn ci_is_failing(ci: &str) -> bool {
     c.starts_with("failing") || c.contains("fail")
 }
 
+pub fn ci_is_passing(ci: &str) -> bool {
+    ci.to_ascii_lowercase().starts_with("passing")
+}
+
 pub fn needs_review(review: &str) -> bool {
     matches!(
         review.to_ascii_lowercase().as_str(),
         "review-required" | "changes-requested"
     )
+}
+
+pub fn is_review_required(review: &str) -> bool {
+    review.eq_ignore_ascii_case("review-required")
 }
 
 #[cfg(test)]
@@ -87,6 +95,17 @@ mod tests {
         let p = parse_pr_line("#42  fix bug  @alice  CI:failing(1)  review:none").unwrap();
         assert_eq!(p.number, 42);
         assert!(ci_is_failing(&p.ci));
+        assert!(!ci_is_passing(&p.ci));
+    }
+
+    #[test]
+    fn review_radar_filter() {
+        let p = parse_pr_line("#1  feat  @bob  CI:passing  review:review-required").unwrap();
+        assert!(ci_is_passing(&p.ci));
+        assert!(is_review_required(&p.review));
+        let pending =
+            parse_pr_line("#2  feat  @bob  CI:pending  review:review-required").unwrap();
+        assert!(!ci_is_passing(&pending.ci));
     }
 
     #[test]
