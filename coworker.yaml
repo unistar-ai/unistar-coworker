@@ -1,0 +1,51 @@
+llm:
+  base_url: http://localhost:11434/v1
+  model: gemma4:26b
+  context_limit: 64000
+
+mcp:
+  command: unistar-mcp
+  args: ["--lazy"]
+  env: {}
+
+storage:
+  backend: json
+  path: ./data
+
+schedule:
+  daily_digest: "0 6 * * *"
+  ci_rescan: "0 */4 * * *"
+  main_guard: "*/30 * * * *"
+
+workflows:
+  daily-work:
+    enabled: true
+    skill: skills/daily-work/SKILL.md
+  release-duty:
+    enabled: false
+    skill: skills/release-duty/SKILL.md
+    schedule: "0 9 * * 1-5"
+  main-guard:
+    enabled: false
+    skill: skills/main-guard/SKILL.md
+  review-radar:
+    enabled: false
+    skill: skills/review-radar/SKILL.md
+
+repos:
+  - STARRY-S/unistar-mcp
+
+policy:
+  auto_rerun_flaky: false
+  auto_backport: false
+  max_prs_per_repo: 20
+  max_agent_turns: 12
+  max_tool_calls_per_pr: 5
+
+flaky:
+  record_real_bugs: true
+  fingerprint_fallback: error
+
+output:
+  export_digest_md: true
+  digest_export_path: ./digests/{date}.md
