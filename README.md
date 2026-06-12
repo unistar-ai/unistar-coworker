@@ -2,27 +2,25 @@
 
 Local **GitHub ops secretary** with a TUI — built on [unistar-mcp](https://github.com/unistar-ai/unistar-mcp) and optional local LLM (Ollama/vLLM).
 
-## v0.2 — first usable release
+## v0.3
 
-- **Skill loading** — parse `skills/<workflow>/SKILL.md` frontmatter + body; inject body into LLM classification
-- **`daily-work` pipeline**:
-  1. `pr_list_open` per repo
-  2. For CI-failing PRs: `pr_get_status` → `ci_analyze_pr_failures` → `ci_get_failed_logs`
-  3. **LLM or heuristic** classify flaky vs real bug
-  4. Record **`flaky_incidents`** + rollup; queue **rerun approvals** in TUI
-  5. Write structured **Daily Digest** (attention / flaky / ok)
-- **TUI** — 6 tabs; `r` runs workflow; `y`/`n` on approvals
-- **Store** — JSON (default) or SQLite (`--features sqlite`)
-- **Headless** — `run-once --workflow daily-work`
+- **Approval → MCP execution** — `y` on Approvals runs `ci_rerun_workflow` or `pr_create_backport`; updates flaky rerun stats
+- **Cron scheduler** — `schedule.*` and per-workflow `schedule` in `coworker.yaml` (TUI mode)
+- **`release-duty`** — scan merged PRs with `needs-backport` label; queue backport approvals per target branch
 
 See [design.md](./design.md) for the roadmap.
+
+## v0.2 recap
+
+- **`daily-work` pipeline** — PR list → CI triage → LLM/heuristic classify → digest + flaky ledger
+- **Skill loading**, JSON/SQLite store, 6-tab TUI, `run-once`
 
 ## Requirements
 
 - Rust 1.75+
 - [unistar-mcp](https://github.com/unistar-ai/unistar-mcp) on `PATH`
-- `GH_TOKEN` or `gh auth login`
-- Optional: [Ollama](https://ollama.com) at `llm.base_url` (falls back to log heuristics if offline)
+- `gh` authenticated (`GH_TOKEN` or `gh auth login`) — used by MCP and release-duty discovery
+- Optional: [Ollama](https://ollama.com) at `llm.base_url`
 
 ## Quick start
 
@@ -30,16 +28,14 @@ See [design.md](./design.md) for the roadmap.
 cd unistar-coworker
 cargo build --release
 
-# build MCP sibling
 cd ../unistar-mcp && go build -o unistar-mcp ./cmd
 export PATH="$PWD:$PATH"
 export GH_TOKEN=...
 
 cd ../unistar-coworker
-# edit repos in coworker.yaml
-
-cargo run --release                  # TUI
+cargo run --release                  # TUI + cron
 cargo run --release -- run-once      # daily-work once
+cargo run --release -- run-once --workflow release-duty
 ```
 
 ### TUI keys
@@ -48,36 +44,36 @@ cargo run --release -- run-once      # daily-work once
 |-----|--------|
 | `1`–`6` | Switch tab |
 | `r` | Run `daily-work` |
+| `R` | Run `release-duty` |
 | `j`/`k` | Move selection |
-| `y`/`n` | Approve/deny rerun (Approvals tab) |
+| `y`/`n` | Approve/deny (Approvals — executes MCP on approve) |
 | `q` | Quit |
 
 ## Config (`coworker.yaml`)
 
 ```yaml
-mcp:
-  command: unistar-mcp
-  args: ["--lazy"]
-
-llm:
-  base_url: http://localhost:11434/v1
-  model: gemma3:27b   # or any Ollama OpenAI-compatible model
-
-storage:
-  backend: json
-  path: ./data
+schedule:
+  daily_digest: "0 6 * * *"    # cron → daily-work (if enabled)
+  ci_rescan: "0 */4 * * *"
 
 workflows:
   daily-work:
     enabled: true
     skill: skills/daily-work/SKILL.md
+  release-duty:
+    enabled: false
+    skill: skills/release-duty/SKILL.md
+    schedule: "0 9 * * 1-5"
 
-repos:
-  - unistar-ai/unistar-mcp
+release:
+  backport_label: needs-backport
+  target_branches:
+    - release/1.0
+  lookback_limit: 30
 
 policy:
-  auto_rerun_flaky: false   # flaky reruns go to Approvals tab
-  max_tool_calls_per_pr: 5
+  auto_rerun_flaky: false
+  auto_backport: false
 ```
 
 ## License

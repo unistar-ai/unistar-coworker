@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::error::{CoworkerError, Result};
 use crate::store::{
-    Approval, ApprovalStatus, AuditEntry, Digest, DigestMeta, FlakyIncident, FlakyQuery,
-    FlakyTestRollup, PrSnapshot, RerunOutcome, Store, WorkflowRun,
+    Approval, ApprovalStatus, AuditEntry, BackportQueueItem, Digest, DigestMeta, FlakyIncident,
+    FlakyQuery, FlakyTestRollup, PrSnapshot, RerunOutcome, Store, WorkflowRun,
 };
 use async_trait::async_trait;
 
@@ -27,6 +27,7 @@ impl JsonStore {
         fs::create_dir_all(root.join("flaky"))?;
         fs::create_dir_all(root.join("audit"))?;
         fs::create_dir_all(root.join("workflow_runs"))?;
+        fs::create_dir_all(root.join("backport_queue"))?;
 
         let rollups_path = root.join("flaky/tests.json");
         let rollups = if rollups_path.exists() {
@@ -179,6 +180,14 @@ impl Store for JsonStore {
         Self::write_json(&path, &pending)
     }
 
+    async fn get_pending_approval(&self, id: &Uuid) -> Result<Approval> {
+        let pending = self.list_pending_approvals().await?;
+        pending
+            .into_iter()
+            .find(|a| &a.id == id)
+            .ok_or_else(|| CoworkerError::Store(format!("approval {id} not found")))
+    }
+
     async fn decide_approval(&self, id: &Uuid, approve: bool) -> Result<()> {
         let pending_path = self.root.join("approvals/pending.json");
         let mut pending: Vec<Approval> = if pending_path.exists() {
@@ -243,8 +252,41 @@ impl Store for JsonStore {
     }
 
     async fn update_flaky_rerun(&self, incident_id: &Uuid, outcome: RerunOutcome) -> Result<()> {
-        let _ = (incident_id, outcome);
-        // v0.1: rollup counters updated on next incident; full incident scan in Phase 2
+        let path = self.root.join("flaky/incidents.jsonl");
+        if !path.exists() {
+            return Err(CoworkerError::Store(format!(
+                "incident {incident_id} not found"
+            )));
+        }
+        let raw = fs::read_to_string(&path)?;
+        let mut incidents: Vec<FlakyIncident> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let idx = incidents
+            .iter()
+            .position(|i| &i.id == incident_id)
+            .ok_or_else(|| CoworkerError::Store(format!("incident {incident_id} not found")))?;
+        incidents[idx].rerun_outcome = Some(outcome);
+
+        let mut out = String::new();
+        for incident in &incidents {
+            out.push_str(&serde_json::to_string(incident)?);
+            out.push('\n');
+        }
+        fs::write(&path, out)?;
+
+        let incident = &incidents[idx];
+        let mut rollups: HashMap<String, FlakyTestRollup> =
+            read_json(&self.root.join("flaky/tests.json")).unwrap_or_default();
+        if let Some(entry) = rollups.get_mut(&incident.fingerprint) {
+            entry.rerun_attempts += 1;
+            if outcome == RerunOutcome::Succeeded {
+                entry.rerun_successes += 1;
+            }
+            Self::write_json(&self.root.join("flaky/tests.json"), &rollups)?;
+        }
         Ok(())
     }
 
@@ -261,6 +303,31 @@ impl Store for JsonStore {
             .collect();
         list.sort_by(|a, b| b.incident_count.cmp(&a.incident_count));
         list.truncate(q.limit);
+        Ok(list)
+    }
+
+    async fn upsert_backport_queue(&self, item: &BackportQueueItem) -> Result<()> {
+        let path = self.root.join("backport_queue/items.json");
+        let mut items: HashMap<String, BackportQueueItem> = if path.exists() {
+            read_json(&path)?
+        } else {
+            HashMap::new()
+        };
+        items.insert(item.id.to_string(), item.clone());
+        Self::write_json(&path, &items)
+    }
+
+    async fn list_backport_queue(&self, repo: Option<&str>) -> Result<Vec<BackportQueueItem>> {
+        let path = self.root.join("backport_queue/items.json");
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        let items: HashMap<String, BackportQueueItem> = read_json(&path)?;
+        let mut list: Vec<_> = items
+            .into_values()
+            .filter(|i| repo.is_none_or(|r| i.repo == r))
+            .collect();
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(list)
     }
 

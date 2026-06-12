@@ -13,6 +13,7 @@ use crate::store::Store;
 pub mod scheduler;
 pub mod skill;
 pub mod workflows;
+pub mod approvals;
 
 pub use skill::{load_skill, Skill};
 
@@ -69,11 +70,33 @@ impl Engine {
         result
     }
 
+    pub async fn is_busy(&self) -> bool {
+        self.state.read().await.engine_busy
+    }
+
+    pub async fn decide_approval(&self, id: &uuid::Uuid, approve: bool) -> Result<String> {
+        let msg = approvals::process_decision(
+            Arc::clone(&self.store),
+            Arc::clone(&self.mcp),
+            id,
+            approve,
+        )
+        .await?;
+        self.refresh_store().await?;
+        let _ = self.events.send(AppEvent::StatusMessage(msg.clone()));
+        Ok(msg)
+    }
+
     pub fn spawn_background(self: Arc<Self>) {
         tokio::spawn(async move {
             if let Err(e) = self.refresh_store().await {
                 tracing::warn!("initial hydrate: {e}");
             }
         });
+    }
+
+    pub fn spawn_scheduler(self: Arc<Self>) {
+        let scheduler = scheduler::Scheduler::from_config(&self.config);
+        scheduler.spawn(self);
     }
 }

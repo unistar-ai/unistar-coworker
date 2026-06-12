@@ -178,6 +178,7 @@ pub async fn triage_pr(
                 )),
                 rerun_outcome: None,
             };
+            let incident_id = incident.id;
             store.record_flaky_incident(&incident).await?;
 
             if matches!(classification, Classification::LlmFlaky) && !config.policy.auto_rerun_flaky
@@ -189,6 +190,8 @@ pub async fn triage_pr(
                         repo: repo.to_string(),
                         pr_number: Some(pr_number),
                         run_id: Some(run.run_id),
+                        target_branch: None,
+                        incident_id: Some(incident_id),
                         description: format!(
                             "Flaky CI on PR #{pr_number} run {} ({}) — approve rerun?",
                             run.run_id, run.workflow

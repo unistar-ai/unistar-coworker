@@ -21,6 +21,8 @@ pub struct Config {
     pub flaky: FlakyConfig,
     #[serde(default)]
     pub output: OutputConfig,
+    #[serde(default)]
+    pub release: ReleaseConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -121,6 +123,34 @@ pub struct OutputConfig {
 
 fn default_digest_path() -> String {
     "./digests/{date}.md".into()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReleaseConfig {
+    #[serde(default = "default_backport_label")]
+    pub backport_label: String,
+    #[serde(default)]
+    pub target_branches: Vec<String>,
+    #[serde(default = "default_lookback_limit")]
+    pub lookback_limit: u32,
+}
+
+fn default_backport_label() -> String {
+    "needs-backport".into()
+}
+
+fn default_lookback_limit() -> u32 {
+    30
+}
+
+impl Default for ReleaseConfig {
+    fn default() -> Self {
+        Self {
+            backport_label: default_backport_label(),
+            target_branches: vec![],
+            lookback_limit: default_lookback_limit(),
+        }
+    }
 }
 
 impl Config {

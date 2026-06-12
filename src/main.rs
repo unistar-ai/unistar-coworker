@@ -91,7 +91,7 @@ async fn run_tui(config: Config, config_path: String, store: Arc<dyn store::Stor
 
     {
         let mut s = state.write().await;
-        s.push_log("info", "unistar-coworker v0.1 started");
+        s.push_log("info", "unistar-coworker v0.3 started");
     }
 
     let engine = Arc::new(Engine::new(
@@ -102,6 +102,7 @@ async fn run_tui(config: Config, config_path: String, store: Arc<dyn store::Stor
     )
     .await);
     engine.clone().spawn_background();
+    engine.clone().spawn_scheduler();
 
     let mut terminal = ratatui::init();
     let result = tui::run(&mut terminal, state, engine, store, rx).await;

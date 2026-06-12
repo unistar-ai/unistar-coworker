@@ -35,6 +35,11 @@ workflows:
 repos:
   - STARRY-S/unistar-mcp
 
+release:
+  backport_label: needs-backport
+  target_branches: []
+  lookback_limit: 30
+
 policy:
   auto_rerun_flaky: false
   auto_backport: false

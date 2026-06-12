@@ -81,10 +81,36 @@ pub struct Approval {
     pub repo: String,
     pub pr_number: Option<u32>,
     pub run_id: Option<i64>,
+    #[serde(default)]
+    pub target_branch: Option<String>,
+    #[serde(default)]
+    pub incident_id: Option<Uuid>,
     pub description: String,
     pub status: ApprovalStatus,
     pub created_at: DateTime<Utc>,
     pub decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackportQueueItem {
+    pub id: Uuid,
+    pub repo: String,
+    pub pr_number: u32,
+    pub pr_title: String,
+    pub target_branch: String,
+    pub status: BackportStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackportStatus {
+    Queued,
+    Approved,
+    Created,
+    Skipped,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -25,8 +25,12 @@ pub trait Store: Send + Sync {
     async fn list_pr_snapshots(&self, repo: Option<&str>) -> Result<Vec<PrSnapshot>>;
 
     async fn push_approval(&self, item: &Approval) -> Result<()>;
+    async fn get_pending_approval(&self, id: &Uuid) -> Result<Approval>;
     async fn decide_approval(&self, id: &Uuid, approve: bool) -> Result<()>;
     async fn list_pending_approvals(&self) -> Result<Vec<Approval>>;
+
+    async fn upsert_backport_queue(&self, item: &BackportQueueItem) -> Result<()>;
+    async fn list_backport_queue(&self, repo: Option<&str>) -> Result<Vec<BackportQueueItem>>;
 
     async fn append_audit(&self, entry: &AuditEntry) -> Result<()>;
 

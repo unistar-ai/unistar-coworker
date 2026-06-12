@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use crate::error::{CoworkerError, Result};
 use crate::store::{
-    Approval, ApprovalStatus, AuditEntry, Digest, DigestMeta, FlakyIncident, FlakyQuery,
-    FlakyTestRollup, PrSnapshot, RerunOutcome, Store, WorkflowRun,
+    Approval, ApprovalStatus, AuditEntry, BackportQueueItem, Digest, DigestMeta, FlakyIncident,
+    FlakyQuery, FlakyTestRollup, PrSnapshot, RerunOutcome, Store, WorkflowRun,
 };
 
 pub struct SqliteStore {
@@ -79,6 +79,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS workflow_runs (
             id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS backport_queue (
+            id TEXT PRIMARY KEY,
             payload_json TEXT NOT NULL
         );
         ",
@@ -186,6 +190,20 @@ impl Store for SqliteStore {
         })
     }
 
+    async fn get_pending_approval(&self, id: &Uuid) -> Result<Approval> {
+        let id = *id;
+        self.with_conn(move |conn| {
+            let mut stmt =
+                conn.prepare("SELECT payload_json FROM approvals WHERE id = ?1 AND status = 'pending'")?;
+            let mut rows = stmt.query([id.to_string()])?;
+            if let Some(row) = rows.next()? {
+                Ok(serde_json::from_str(&row.get::<_, String>(0)?)?)
+            } else {
+                Err(CoworkerError::Store(format!("approval {id} not found")))
+            }
+        })
+    }
+
     async fn decide_approval(&self, id: &Uuid, approve: bool) -> Result<()> {
         let id = *id;
         self.with_conn(move |conn| {
@@ -237,8 +255,40 @@ impl Store for SqliteStore {
         })
     }
 
-    async fn update_flaky_rerun(&self, _id: &Uuid, _outcome: RerunOutcome) -> Result<()> {
-        Ok(())
+    async fn update_flaky_rerun(&self, incident_id: &Uuid, outcome: RerunOutcome) -> Result<()> {
+        let incident_id = *incident_id;
+        self.with_conn(move |conn| {
+            let mut stmt =
+                conn.prepare("SELECT payload_json FROM flaky_incidents WHERE id = ?1")?;
+            let mut rows = stmt.query([incident_id.to_string()])?;
+            let row = rows
+                .next()?
+                .ok_or_else(|| CoworkerError::Store(format!("incident {incident_id} not found")))?;
+            let mut incident: FlakyIncident = serde_json::from_str(&row.get::<_, String>(0)?)?;
+            incident.rerun_outcome = Some(outcome);
+            conn.execute(
+                "UPDATE flaky_incidents SET payload_json = ?1 WHERE id = ?2",
+                params![serde_json::to_string(&incident)?, incident_id.to_string()],
+            )?;
+
+            let mut stmt = conn.prepare("SELECT payload_json FROM flaky_tests WHERE fingerprint = ?1")?;
+            let mut rows = stmt.query([&incident.fingerprint])?;
+            if let Some(row) = rows.next()? {
+                let mut rollup: FlakyTestRollup = serde_json::from_str(&row.get::<_, String>(0)?)?;
+                rollup.rerun_attempts += 1;
+                if outcome == RerunOutcome::Succeeded {
+                    rollup.rerun_successes += 1;
+                }
+                conn.execute(
+                    "UPDATE flaky_tests SET payload_json = ?1 WHERE fingerprint = ?2",
+                    params![
+                        serde_json::to_string(&rollup)?,
+                        incident.fingerprint.clone()
+                    ],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     async fn list_flaky_tests(&self, q: FlakyQuery) -> Result<Vec<FlakyTestRollup>> {
@@ -256,6 +306,32 @@ impl Store for SqliteStore {
                 .collect();
             list.sort_by(|a, b| b.incident_count.cmp(&a.incident_count));
             list.truncate(q.limit);
+            Ok(list)
+        })
+    }
+
+    async fn upsert_backport_queue(&self, item: &BackportQueueItem) -> Result<()> {
+        let item = item.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO backport_queue (id, payload_json) VALUES (?1,?2)",
+                params![item.id.to_string(), serde_json::to_string(&item)?],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn list_backport_queue(&self, repo: Option<&str>) -> Result<Vec<BackportQueueItem>> {
+        let repo = repo.map(str::to_string);
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare("SELECT payload_json FROM backport_queue")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut list: Vec<BackportQueueItem> = rows
+                .filter_map(|r| r.ok())
+                .filter_map(|j| serde_json::from_str(&j).ok())
+                .filter(|i| repo.as_ref().is_none_or(|r| &i.repo == r))
+                .collect();
+            list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             Ok(list)
         })
     }

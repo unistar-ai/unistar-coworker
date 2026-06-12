@@ -4,6 +4,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::agent::parse::{ci_is_failing, needs_review, parse_pr_line};
+use crate::agent::release::run_release_duty;
 use crate::agent::triage::triage_pr;
 use crate::app::{append_audit, AppEvent, SharedState};
 use crate::store::LogLine;
@@ -83,6 +84,7 @@ impl AgentLoop {
 
         let result = match workflow_id {
             "daily-work" => self.run_daily_work(&skill).await,
+            "release-duty" => self.run_release_duty(&skill).await,
             other => {
                 append_audit(
                     self.store.as_ref(),
@@ -292,6 +294,36 @@ Summary: {} need attention, {} flaky, {} ignorable\n\n\
 
         Ok(format!(
             "digest saved ({needs_attention} need attention, {flaky_candidates} flaky, {ignorable} ok)"
+        ))
+    }
+
+    async fn run_release_duty(&self, skill: &Skill) -> Result<String> {
+        if !self.mcp.is_available() {
+            return Err(crate::error::CoworkerError::Workflow(
+                "unistar-mcp is required for release-duty".into(),
+            ));
+        }
+
+        let outcome = run_release_duty(
+            &self.config,
+            self.mcp.as_ref(),
+            self.store.as_ref(),
+            skill,
+            |level, msg| self.log(level, msg),
+        )
+        .await?;
+
+        self.log(
+            "info",
+            format!(
+                "release-duty: {} queued, {} skipped",
+                outcome.queued, outcome.skipped
+            ),
+        );
+
+        Ok(format!(
+            "release-duty: {} backport(s) queued, {} skipped",
+            outcome.queued, outcome.skipped
         ))
     }
 

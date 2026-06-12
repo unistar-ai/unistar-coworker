@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use crate::error::{CoworkerError, Result};
 
 pub mod helpers;
+pub mod gh_query;
 mod subprocess;
 
 pub use subprocess::SubprocessMcp;

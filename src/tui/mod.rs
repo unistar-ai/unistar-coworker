@@ -10,7 +10,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::broadcast;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{hydrate_from_store, AppEvent, AppState, SharedState, Tab};
+use crate::app::{AppEvent, AppState, SharedState, Tab};
 use crate::engine::Engine;
 use crate::error::Result;
 use crate::store::Store;
@@ -19,7 +19,7 @@ pub async fn run(
     terminal: &mut DefaultTerminal,
     state: SharedState,
     engine: Arc<Engine>,
-    store: Arc<dyn Store>,
+    _store: Arc<dyn Store>,
     mut events_rx: broadcast::Receiver<AppEvent>,
 ) -> Result<()> {
     let mut list_state = ListState::default();
@@ -37,7 +37,7 @@ pub async fn run(
 
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                if handle_key(key, &state, &engine, &store, &mut list_state).await? {
+                if handle_key(key, &state, &engine, &mut list_state).await? {
                     break;
                 }
             }
@@ -67,7 +67,10 @@ async fn apply_event(state: &SharedState, ev: AppEvent) {
                 format!("error: {message}")
             };
         }
-        AppEvent::StatusMessage(m) => s.status = m,
+        AppEvent::StatusMessage(m) => {
+            s.status = m.clone();
+            s.push_log("info", m);
+        }
     }
 }
 
@@ -75,7 +78,6 @@ async fn handle_key(
     key: KeyEvent,
     state: &SharedState,
     engine: &Arc<Engine>,
-    store: &Arc<dyn Store>,
     list_state: &mut ListState,
 ) -> Result<bool> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -108,6 +110,12 @@ async fn handle_key(
                 let _ = engine.run_workflow("daily-work").await;
             });
         }
+        KeyCode::Char('R') => {
+            let engine = Arc::clone(engine);
+            tokio::spawn(async move {
+                let _ = engine.run_workflow("release-duty").await;
+            });
+        }
         KeyCode::Char('y') => {
             let id = {
                 let s = state.read().await;
@@ -118,8 +126,22 @@ async fn handle_key(
                 }
             };
             if let Some(id) = id {
-                let _ = store.decide_approval(&id, true).await;
-                hydrate_from_store(state, store.as_ref()).await?;
+                let engine = Arc::clone(engine);
+                let state = state.clone();
+                tokio::spawn(async move {
+                    match engine.decide_approval(&id, true).await {
+                        Ok(msg) => {
+                            let mut s = state.write().await;
+                            s.push_log("info", format!("approved: {msg}"));
+                            s.status = msg;
+                        }
+                        Err(e) => {
+                            let mut s = state.write().await;
+                            s.push_log("error", format!("approval failed: {e}"));
+                            s.status = format!("error: {e}");
+                        }
+                    }
+                });
             }
         }
         KeyCode::Char('n') => {
@@ -132,8 +154,20 @@ async fn handle_key(
                 }
             };
             if let Some(id) = id {
-                let _ = store.decide_approval(&id, false).await;
-                hydrate_from_store(state, store.as_ref()).await?;
+                let engine = Arc::clone(engine);
+                let state = state.clone();
+                tokio::spawn(async move {
+                    match engine.decide_approval(&id, false).await {
+                        Ok(msg) => {
+                            let mut s = state.write().await;
+                            s.push_log("info", msg);
+                        }
+                        Err(e) => {
+                            let mut s = state.write().await;
+                            s.push_log("error", format!("deny failed: {e}"));
+                        }
+                    }
+                });
             }
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -218,8 +252,8 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
 
 fn draw_hints(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let hint = match state.tab {
-        Tab::Dashboard => "r: run daily-work  j/k: scroll  Tab: next  q: quit",
-        Tab::Approvals => "y: approve  n: deny  q: quit",
+        Tab::Dashboard => "r: daily-work  R: release-duty  j/k: scroll  Tab: next  q: quit",
+        Tab::Approvals => "y: approve (runs MCP)  n: deny  q: quit",
         _ => "j/k: scroll  Tab: next  q: quit",
     };
     frame.render_widget(Paragraph::new(hint).style(Style::default().dim()), area);
@@ -329,7 +363,17 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
             .unwrap_or_else(|| "Select a PR".into()),
         Tab::Approvals => state
             .selected_approval()
-            .map(|a| format!("{:?}\n{}\nrepo: {}", a.kind, a.description, a.repo))
+            .map(|a| {
+                format!(
+                    "{:?}\n{}\nrepo: {}\npr: {:?}\nrun: {:?}\nbranch: {:?}",
+                    a.kind,
+                    a.description,
+                    a.repo,
+                    a.pr_number,
+                    a.run_id,
+                    a.target_branch
+                )
+            })
             .unwrap_or_else(|| "Select an approval".into()),
         Tab::Logs => state
             .logs
