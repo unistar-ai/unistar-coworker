@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::config::{Config, WorkflowConfig};
 use crate::error::{CoworkerError, Result};
@@ -57,13 +57,4 @@ impl<'a> WorkflowRunner<'a> {
             schedule: w.schedule.clone(),
         }
     }
-}
-
-pub fn load_skill(path: impl AsRef<Path>) -> Result<String> {
-    std::fs::read_to_string(path.as_ref()).map_err(|e| {
-        CoworkerError::Workflow(format!(
-            "read skill {}: {e}",
-            path.as_ref().display()
-        ))
-    })
 }

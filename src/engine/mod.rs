@@ -6,16 +6,21 @@ use crate::agent::AgentLoop;
 use crate::app::{hydrate_from_store, AppEvent, SharedState};
 use crate::config::Config;
 use crate::error::Result;
+use crate::llm::LlmClient;
 use crate::mcp::{spawn_mcp, McpClient};
 use crate::store::Store;
 
 pub mod scheduler;
+pub mod skill;
 pub mod workflows;
+
+pub use skill::{load_skill, Skill};
 
 pub struct Engine {
     config: Config,
     store: Arc<dyn Store>,
     mcp: Arc<dyn McpClient>,
+    llm: Arc<LlmClient>,
     events: broadcast::Sender<AppEvent>,
     state: SharedState,
 }
@@ -28,15 +33,17 @@ impl Engine {
         state: SharedState,
     ) -> Self {
         let mcp = spawn_mcp(&config).await;
+        let llm = Arc::new(LlmClient::new(config.llm.clone()));
         {
             let mut s = state.write().await;
             s.mcp_ok = mcp.is_available();
-            s.llm_ok = crate::llm::ollama::probe(&config.llm).await;
+            s.llm_ok = llm.available().await;
         }
         Self {
             config,
             store,
             mcp,
+            llm,
             events,
             state,
         }
@@ -53,6 +60,7 @@ impl Engine {
             self.config.clone(),
             Arc::clone(&self.store),
             Arc::clone(&self.mcp),
+            Arc::clone(&self.llm),
             self.events.clone(),
             Arc::clone(&self.state),
         );

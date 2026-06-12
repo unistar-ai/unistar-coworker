@@ -3,20 +3,25 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::agent::budget::TokenBudget;
+use crate::agent::parse::{ci_is_failing, needs_review, parse_pr_line};
+use crate::agent::triage::triage_pr;
 use crate::app::{append_audit, AppEvent, SharedState};
+use crate::store::LogLine;
 use crate::config::Config;
-use crate::engine::workflows::{load_skill, WorkflowRunner};
+use crate::engine::{load_skill, Skill};
+use crate::engine::workflows::WorkflowRunner;
 use crate::error::Result;
+use crate::llm::LlmClient;
+use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
-use crate::store::{compute_fingerprint, Classification, Digest, DigestSummary, FlakyIncident, Store};
-
 use crate::output::export::maybe_export_digest;
+use crate::store::{Digest, DigestSummary, PrSnapshot, Store};
 
 pub struct AgentLoop {
     config: Config,
     store: Arc<dyn Store>,
     mcp: Arc<dyn McpClient>,
+    llm: Arc<LlmClient>,
     events: broadcast::Sender<AppEvent>,
     state: SharedState,
 }
@@ -26,6 +31,7 @@ impl AgentLoop {
         config: Config,
         store: Arc<dyn Store>,
         mcp: Arc<dyn McpClient>,
+        llm: Arc<LlmClient>,
         events: broadcast::Sender<AppEvent>,
         state: SharedState,
     ) -> Self {
@@ -33,17 +39,34 @@ impl AgentLoop {
             config,
             store,
             mcp,
+            llm,
             events,
             state,
         }
     }
 
+    fn log(&self, level: &str, message: impl Into<String>) {
+        let msg = message.into();
+        let _ = self.events.send(AppEvent::LogLine(LogLine {
+            ts: chrono::Utc::now(),
+            level: level.into(),
+            message: msg.clone(),
+        }));
+        {
+            let state = self.state.clone();
+            let level = level.to_string();
+            tokio::spawn(async move {
+                let mut s = state.write().await;
+                s.push_log(&level, msg);
+            });
+        }
+    }
+
     pub async fn run_workflow(&self, workflow_id: &str) -> Result<String> {
-        let _budget = TokenBudget::from_config(self.config.llm.context_limit);
         let runner = WorkflowRunner::new(&self.config);
         let wf = runner.get(workflow_id)?;
+        let skill = load_skill(wf.skill_path())?;
 
-        let _skill = load_skill(&wf.skill_path())?;
         let run_id = self.store.start_workflow_run(workflow_id).await?;
         let _ = self.events.send(AppEvent::WorkflowStarted {
             workflow_id: workflow_id.to_string(),
@@ -54,14 +77,18 @@ impl AgentLoop {
             s.push_log("info", format!("workflow {workflow_id} started"));
         }
 
+        if !self.mcp.is_available() {
+            self.log("error", "unistar-mcp unavailable — set mcp.command and GH_TOKEN");
+        }
+
         let result = match workflow_id {
-            "daily-work" => self.run_daily_work().await,
+            "daily-work" => self.run_daily_work(&skill).await,
             other => {
                 append_audit(
                     self.store.as_ref(),
                     "warn",
                     "workflow",
-                    &format!("workflow {other} not implemented in v0.1"),
+                    &format!("workflow {other} not implemented yet"),
                 )
                 .await;
                 Err(crate::error::CoworkerError::Workflow(format!(
@@ -101,63 +128,143 @@ impl AgentLoop {
         result
     }
 
-    async fn run_daily_work(&self) -> Result<String> {
+    async fn run_daily_work(&self, skill: &Skill) -> Result<String> {
+        if !self.mcp.is_available() {
+            return Err(crate::error::CoworkerError::Workflow(
+                "unistar-mcp is required for daily-work".into(),
+            ));
+        }
+
+        self.log(
+            "info",
+            format!(
+                "loaded skill '{}' ({} chars)",
+                skill.name,
+                skill.body.len()
+            ),
+        );
+
         let mut needs_attention = 0u32;
         let mut ignorable = 0u32;
         let mut flaky_candidates = 0u32;
-        let mut body = String::from("# Daily Digest\n\n");
 
-        for repo in &self.config.repos.clone() {
-            body.push_str(&format!("## {repo}\n\n"));
-            let list_result = self
-                .mcp
-                .tool_call(
-                    "tool_call",
-                    serde_json::json!({
-                        "name": "pr_list_open",
-                        "args": { "repo": repo, "limit": self.config.policy.max_prs_per_repo }
-                    }),
-                )
-                .await;
+        let mut attention_section = String::from("## Needs attention\n\n");
+        let mut flaky_section = String::from("## Flaky candidates\n\n");
+        let mut ok_section = String::from("## OK / ignorable\n\n");
 
-            match list_result {
-                Ok(text) => {
-                    body.push_str(&text);
-                    body.push_str("\n\n");
-                    self.ingest_pr_lines(repo, &text).await?;
+        for repo in self.config.repos.clone() {
+            self.log("info", format!("listing open PRs for {repo}"));
+            let list_text = lazy_tool(
+                self.mcp.as_ref(),
+                "pr_list_open",
+                serde_json::json!({
+                    "repo": repo,
+                    "limit": self.config.policy.max_prs_per_repo,
+                }),
+            )
+            .await?;
+
+            attention_section.push_str(&format!("### {repo}\n\n"));
+            flaky_section.push_str(&format!("### {repo}\n\n"));
+            ok_section.push_str(&format!("### {repo}\n\n"));
+
+            for line in list_text.lines() {
+                let Some(pr) = parse_pr_line(line) else {
+                    continue;
+                };
+
+                if pr.is_draft {
+                    ignorable += 1;
+                    ok_section.push_str(&format!(
+                        "- #{} {} (draft)\n",
+                        pr.number, pr.title
+                    ));
+                    self.save_pr_snapshot(&repo, &pr, None).await?;
+                    continue;
                 }
-                Err(e) => {
-                    body.push_str(&format!("*MCP unavailable: {e}. Stub listing skipped.*\n\n"));
-                    append_audit(
+
+                let mut handled = false;
+
+                if ci_is_failing(&pr.ci) {
+                    self.log("info", format!("triaging {repo}#{}", pr.number));
+                    let outcome = triage_pr(
+                        &self.config,
+                        self.mcp.as_ref(),
+                        self.llm.as_ref(),
                         self.store.as_ref(),
-                        "error",
-                        "mcp",
-                        &format!("pr_list_open failed for {repo}: {e}"),
+                        skill,
+                        &repo,
+                        &pr,
                     )
-                    .await;
+                    .await?;
+
+                    if outcome.flaky {
+                        flaky_candidates += 1;
+                        flaky_section.push_str(&format!(
+                            "- #{} {} — flaky\n  {}\n",
+                            pr.number,
+                            pr.title,
+                            outcome.note.replace('\n', "\n  ")
+                        ));
+                    }
+                    if outcome.real {
+                        needs_attention += 1;
+                        attention_section.push_str(&format!(
+                            "- #{} {} — CI failure\n  {}\n",
+                            pr.number,
+                            pr.title,
+                            outcome.note.replace('\n', "\n  ")
+                        ));
+                    }
+                    if !outcome.flaky && !outcome.real {
+                        needs_attention += 1;
+                        attention_section.push_str(&format!(
+                            "- #{} {} — CI unclear\n  {}\n",
+                            pr.number,
+                            pr.title,
+                            outcome.note.replace('\n', "\n  ")
+                        ));
+                    }
+                    handled = true;
+                } else if needs_review(&pr.review) && pr.review != "approved" {
+                    needs_attention += 1;
+                    attention_section.push_str(&format!(
+                        "- #{} {} — waiting for review (CI: {})\n",
+                        pr.number, pr.title, pr.ci
+                    ));
+                    self.save_pr_snapshot(&repo, &pr, Some("review blocked".into()))
+                        .await?;
+                    handled = true;
+                }
+
+                if !handled {
+                    ignorable += 1;
+                    ok_section.push_str(&format!(
+                        "- #{} {} CI:{} review:{}\n",
+                        pr.number, pr.title, pr.ci, pr.review
+                    ));
+                    self.save_pr_snapshot(&repo, &pr, None).await?;
                 }
             }
         }
 
-        for snap in self.store.list_pr_snapshots(None).await? {
-            if snap.ci_summary.contains('✗') || snap.ci_summary.to_ascii_lowercase().contains("fail") {
-                needs_attention += 1;
-            } else if snap.is_draft {
-                ignorable += 1;
+        let body = format!(
+            "# Daily Digest\n\n\
+Skill: {}\n\n\
+Summary: {} need attention, {} flaky, {} ignorable\n\n\
+{attention_section}\n\
+{flaky_section}\n\
+{ok_section}"
+        ,
+            if skill.name.is_empty() {
+                "daily-work"
             } else {
-                ignorable += 1;
-            }
-        }
-
-        flaky_candidates = self
-            .store
-            .list_flaky_tests(crate::store::FlakyQuery {
-                repo: None,
-                since_days: Some(1),
-                limit: 100,
-            })
-            .await?
-            .len() as u32;
+                &skill.name
+            },
+            needs_attention,
+            flaky_candidates,
+            ignorable,
+        );
 
         let digest = Digest {
             id: Uuid::new_v4(),
@@ -175,59 +282,37 @@ impl AgentLoop {
         maybe_export_digest(&self.config, &digest)?;
         let _ = self.events.send(AppEvent::DigestReady(digest));
 
+        append_audit(
+            self.store.as_ref(),
+            "info",
+            "daily-work",
+            &format!("digest: {needs_attention} attention, {flaky_candidates} flaky"),
+        )
+        .await;
+
         Ok(format!(
-            "digest saved ({needs_attention} need attention, {flaky_candidates} flaky)"
+            "digest saved ({needs_attention} need attention, {flaky_candidates} flaky, {ignorable} ok)"
         ))
     }
 
-    async fn ingest_pr_lines(&self, repo: &str, text: &str) -> Result<()> {
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with("Open PRs") {
-                continue;
-            }
-            // Expected compact line: "#123 title — CI … — review …"
-            if let Some(rest) = line.strip_prefix('#') {
-                let number_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(number) = number_str.parse::<u32>() {
-                    let snap = crate::store::PrSnapshot {
-                        repo: repo.to_string(),
-                        number,
-                        title: line.to_string(),
-                        author: String::new(),
-                        ci_summary: line.to_string(),
-                        review_summary: String::new(),
-                        is_draft: line.to_ascii_lowercase().contains("draft"),
-                        fetched_at: chrono::Utc::now(),
-                        triage_note: None,
-                    };
-                    self.store.upsert_pr_snapshot(&snap).await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn record_stub_flaky(&self, repo: &str, pr: u32, run_id: i64) -> Result<()> {
-        let error_sig = "timeout waiting for condition";
-        let fp = compute_fingerprint(repo, "ci", Some("test"), None, error_sig);
-        let incident = FlakyIncident {
-            id: Uuid::new_v4(),
-            ts: chrono::Utc::now(),
-            repo: repo.to_string(),
-            pr_number: Some(pr),
-            run_id,
-            workflow: "ci".into(),
-            job: Some("test".into()),
-            step: None,
-            test_name: None,
-            fingerprint: fp,
-            classification: Classification::LlmFlaky,
-            log_excerpt: error_sig.into(),
-            llm_reason: Some("stub incident for demo".into()),
-            rerun_outcome: None,
-        };
-        self.store.record_flaky_incident(&incident).await?;
-        Ok(())
+    async fn save_pr_snapshot(
+        &self,
+        repo: &str,
+        pr: &crate::agent::parse::ParsedPrLine,
+        triage_note: Option<String>,
+    ) -> Result<()> {
+        self.store
+            .upsert_pr_snapshot(&PrSnapshot {
+                repo: repo.to_string(),
+                number: pr.number,
+                title: pr.title.clone(),
+                author: pr.author.clone(),
+                ci_summary: pr.ci.clone(),
+                review_summary: pr.review.clone(),
+                is_draft: pr.is_draft,
+                fetched_at: chrono::Utc::now(),
+                triage_note,
+            })
+            .await
     }
 }

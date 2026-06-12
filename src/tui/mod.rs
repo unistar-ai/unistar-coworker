@@ -316,8 +316,14 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
             .selected_pr()
             .map(|p| {
                 format!(
-                    "#{} {}\nrepo: {}\nci: {}\nreview: {}\nfetched: {}",
-                    p.number, p.title, p.repo, p.ci_summary, p.review_summary, p.fetched_at
+                    "#{} {} @{} \nrepo: {}\nci: {} review: {}\n\n{}",
+                    p.number,
+                    p.title,
+                    p.author,
+                    p.repo,
+                    p.ci_summary,
+                    p.review_summary,
+                    p.triage_note.as_deref().unwrap_or("(no triage yet)")
                 )
             })
             .unwrap_or_else(|| "Select a PR".into()),
