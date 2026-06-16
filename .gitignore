@@ -1,0 +1,8 @@
+/target/
+/data/
+/digests/
+*.db
+*.db-*
+.coworker/
+coworker.yaml
+.coworker/coworker.yaml

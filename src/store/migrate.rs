@@ -1,0 +1,276 @@
+use std::path::{Path, PathBuf};
+
+use crate::config::StorageBackend;
+use crate::error::{CoworkerError, Result};
+
+#[derive(Debug, Default, Clone)]
+pub struct MigrateStats {
+    pub digests: u32,
+    pub pr_snapshots: u32,
+    pub approvals: u32,
+    pub backport_items: u32,
+    pub main_alerts: u32,
+    pub flaky_incidents: u32,
+    pub chat_messages: u32,
+}
+
+pub async fn migrate(
+    from: StorageBackend,
+    to: StorageBackend,
+    source_path: PathBuf,
+    dest_path: PathBuf,
+    wal: bool,
+) -> Result<MigrateStats> {
+    match (from, to) {
+        (StorageBackend::Json, StorageBackend::Sqlite) => {
+            migrate_json_to_sqlite(&source_path, &dest_path, wal).await
+        }
+        (StorageBackend::Sqlite, StorageBackend::Json) => {
+            migrate_sqlite_to_json(&source_path, &dest_path, wal).await
+        }
+        (a, b) if std::mem::discriminant(&a) == std::mem::discriminant(&b) => {
+            Err(CoworkerError::Store(format!(
+                "source and destination are both {a:?}; pick json→sqlite or sqlite→json"
+            )))
+        }
+        _ => Err(CoworkerError::Store(
+            "unsupported migrate direction (requires --features sqlite)".into(),
+        )),
+    }
+}
+
+async fn migrate_json_to_sqlite(
+    json_root: &Path,
+    sqlite_path: &Path,
+    wal: bool,
+) -> Result<MigrateStats> {
+    #[cfg(not(feature = "sqlite"))]
+    {
+        let _ = (json_root, sqlite_path, wal);
+        Err(CoworkerError::Store(
+            "sqlite backend requires `cargo build --features sqlite`".into(),
+        ))
+    }
+
+    #[cfg(feature = "sqlite")]
+    {
+        use super::sqlite::SqliteStore;
+
+        if !json_root.is_dir() {
+            return Err(CoworkerError::Store(format!(
+                "json source not found: {}",
+                json_root.display()
+            )));
+        }
+        if sqlite_path.exists() {
+            return Err(CoworkerError::Store(format!(
+                "destination sqlite file already exists: {}",
+                sqlite_path.display()
+            )));
+        }
+        let dst = SqliteStore::open(sqlite_path.to_path_buf(), wal)?;
+        import_json_tree(json_root, &dst).await
+    }
+}
+
+async fn migrate_sqlite_to_json(
+    sqlite_path: &Path,
+    json_root: &Path,
+    wal: bool,
+) -> Result<MigrateStats> {
+    #[cfg(not(feature = "sqlite"))]
+    {
+        let _ = (sqlite_path, json_root, wal);
+        Err(CoworkerError::Store(
+            "sqlite backend requires `cargo build --features sqlite`".into(),
+        ))
+    }
+
+    #[cfg(feature = "sqlite")]
+    {
+        use super::json::JsonStore;
+        use super::sqlite::SqliteStore;
+
+        if !sqlite_path.is_file() {
+            return Err(CoworkerError::Store(format!(
+                "sqlite source not found: {}",
+                sqlite_path.display()
+            )));
+        }
+        if json_root.exists() && dir_not_empty(json_root)? {
+            return Err(CoworkerError::Store(format!(
+                "destination json directory is not empty: {}",
+                json_root.display()
+            )));
+        }
+        let src = SqliteStore::open(sqlite_path.to_path_buf(), wal)?;
+        let dst = JsonStore::open(json_root.to_path_buf())?;
+        export_store_to_json(&src, &dst).await
+    }
+}
+
+#[cfg(feature = "sqlite")]
+use std::fs;
+
+#[cfg(feature = "sqlite")]
+async fn import_json_tree(json_root: &Path, dst: &dyn crate::store::Store) -> Result<MigrateStats> {
+    use std::collections::HashMap;
+
+    use crate::store::{
+        Approval, BackportQueueItem, ChatMessage, Digest, FlakyIncident, MainAlert, PrSnapshot,
+    };
+
+    let mut stats = MigrateStats::default();
+
+    for digest in read_json_glob::<Digest>(&json_root.join("digests"), "json")? {
+        dst.save_digest(&digest).await?;
+        stats.digests += 1;
+    }
+
+    let pr_dir = json_root.join("pr_snapshots");
+    if pr_dir.is_dir() {
+        for entry in fs::read_dir(&pr_dir)? {
+            let map: HashMap<u32, PrSnapshot> = read_json_file(&entry?.path())?;
+            for snap in map.into_values() {
+                dst.upsert_pr_snapshot(&snap).await?;
+                stats.pr_snapshots += 1;
+            }
+        }
+    }
+
+    let pending_path = json_root.join("approvals/pending.json");
+    if pending_path.exists() {
+        for item in read_json_file::<Vec<Approval>>(&pending_path)? {
+            dst.push_approval(&item).await?;
+            stats.approvals += 1;
+        }
+    }
+
+    let backport_path = json_root.join("backport_queue/items.json");
+    if backport_path.exists() {
+        let items: HashMap<String, BackportQueueItem> = read_json_file(&backport_path)?;
+        for item in items.into_values() {
+            dst.upsert_backport_queue(&item).await?;
+            stats.backport_items += 1;
+        }
+    }
+
+    for alert in read_jsonl_file::<MainAlert>(&json_root.join("main_alerts/alerts.jsonl"))? {
+        dst.record_main_alert(&alert).await?;
+        stats.main_alerts += 1;
+    }
+
+    for incident in read_jsonl_file::<FlakyIncident>(&json_root.join("flaky/incidents.jsonl"))? {
+        dst.record_flaky_incident(&incident).await?;
+        stats.flaky_incidents += 1;
+    }
+
+    let messages_dir = json_root.join("chat/messages");
+    if messages_dir.is_dir() {
+        for entry in fs::read_dir(&messages_dir)? {
+            for msg in read_jsonl_file::<ChatMessage>(&entry?.path())? {
+                dst.append_chat_message(&msg).await?;
+                stats.chat_messages += 1;
+            }
+        }
+    }
+
+    Ok(stats)
+}
+
+#[cfg(feature = "sqlite")]
+async fn export_store_to_json(
+    src: &dyn crate::store::Store,
+    dst: &dyn crate::store::Store,
+) -> Result<MigrateStats> {
+    let mut stats = MigrateStats::default();
+
+    for digest in src.list_digests(500).await? {
+        dst.save_digest(&digest).await?;
+        stats.digests += 1;
+    }
+
+    for snap in src.list_pr_snapshots(None).await? {
+        dst.upsert_pr_snapshot(&snap).await?;
+        stats.pr_snapshots += 1;
+    }
+
+    for item in src.list_pending_approvals().await? {
+        dst.push_approval(&item).await?;
+        stats.approvals += 1;
+    }
+
+    for item in src.list_backport_queue(None).await? {
+        dst.upsert_backport_queue(&item).await?;
+        stats.backport_items += 1;
+    }
+
+    for alert in src
+        .list_main_alerts(crate::store::MainAlertQuery {
+            repo: None,
+            unacknowledged_only: false,
+            since_hours: None,
+            limit: 10_000,
+        })
+        .await?
+    {
+        dst.record_main_alert(&alert).await?;
+        stats.main_alerts += 1;
+    }
+
+    Ok(stats)
+}
+
+#[cfg(feature = "sqlite")]
+fn dir_not_empty(path: &Path) -> Result<bool> {
+    if !path.is_dir() {
+        return Ok(false);
+    }
+    Ok(fs::read_dir(path)?.next().is_some())
+}
+
+#[cfg(feature = "sqlite")]
+fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let data = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&data)?)
+}
+
+#[cfg(feature = "sqlite")]
+fn read_jsonl_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let raw = fs::read_to_string(path)?;
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).map_err(CoworkerError::from))
+        .collect()
+}
+
+#[cfg(feature = "sqlite")]
+fn read_json_glob<T: serde::de::DeserializeOwned>(dir: &Path, ext: &str) -> Result<Vec<T>> {
+    if !dir.is_dir() {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == ext) {
+            out.push(read_json_file(&path)?);
+        }
+    }
+    Ok(out)
+}
+
+pub fn format_migrate_summary(stats: &MigrateStats) -> String {
+    format!(
+        "migrated: {} digests, {} PR snapshots, {} approvals, {} backport items, {} main alerts, {} flaky incidents, {} chat messages",
+        stats.digests,
+        stats.pr_snapshots,
+        stats.approvals,
+        stats.backport_items,
+        stats.main_alerts,
+        stats.flaky_incidents,
+        stats.chat_messages
+    )
+}

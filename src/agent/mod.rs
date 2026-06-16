@@ -1,0 +1,26 @@
+pub mod breaking_sniff;
+pub mod budget;
+pub mod chat_loop;
+pub mod context;
+pub mod tool_catalog;
+pub mod ci_efficiency;
+pub mod comment_assist;
+pub mod flaky_govern;
+pub mod issue_triage;
+pub mod light_review;
+pub mod log_pages;
+pub mod main_guard;
+pub mod merge_health;
+pub mod my_pr_brief;
+pub mod oncall;
+pub mod parse;
+pub mod pr_hygiene;
+pub mod r#loop;
+pub mod regression_link;
+pub mod release;
+pub mod release_notes;
+pub mod security_digest;
+pub mod review_radar;
+pub mod triage;
+
+pub use r#loop::AgentLoop;
