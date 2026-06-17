@@ -35,6 +35,8 @@ pub struct ThemePalette {
     pub pr_ref: Color,
     pub heading_h1: Color,
     pub heading_h2: Color,
+    pub heading_h3: Color,
+    pub heading_h4: Color,
 }
 
 impl ThemePalette {
@@ -73,8 +75,10 @@ impl ThemePalette {
             code_fg: Color::Rgb(250, 220, 160),
             code_bg: Color::Rgb(48, 52, 64),
             pr_ref: Color::Rgb(250, 179, 135),
-            heading_h1: Color::Rgb(137, 180, 250),
-            heading_h2: Color::Rgb(166, 200, 240),
+            heading_h1: Color::Rgb(205, 214, 244),
+            heading_h2: Color::Rgb(137, 180, 250),
+            heading_h3: Color::Rgb(250, 179, 135),
+            heading_h4: Color::Rgb(166, 200, 240),
         }
     }
 
@@ -106,8 +110,10 @@ impl ThemePalette {
             code_fg: Color::Rgb(154, 52, 18),
             code_bg: Color::Rgb(241, 245, 249),
             pr_ref: Color::Rgb(194, 65, 12),
-            heading_h1: Color::Rgb(30, 64, 175),
-            heading_h2: Color::Rgb(29, 78, 216),
+            heading_h1: Color::Rgb(15, 23, 42),
+            heading_h2: Color::Rgb(30, 64, 175),
+            heading_h3: Color::Rgb(194, 65, 12),
+            heading_h4: Color::Rgb(29, 78, 216),
         }
     }
 }

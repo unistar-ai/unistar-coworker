@@ -104,7 +104,7 @@ pub async fn run_breaking_sniff(
                 let diff = lazy_tool(
                     mcp,
                     "pr_get_diff",
-                    serde_json::json!({ "repo": repo, "pr_number": pr.number, "max_bytes": 32000 }),
+                    serde_json::json!({ "repo": repo, "pr_number": pr.number, "max_bytes": 48000 }),
                 )
                 .await
                 .unwrap_or_default();

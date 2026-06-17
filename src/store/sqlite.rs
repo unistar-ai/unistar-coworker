@@ -494,7 +494,6 @@ impl Store for SqliteStore {
             created_at: Utc::now(),
             title: title.unwrap_or("Chat").to_string(),
             repo_scope: repo_scope.map(str::to_string),
-            focus_pr: None,
         };
         let payload = serde_json::to_string(&session)?;
         let id = session.id;
@@ -517,18 +516,6 @@ impl Store for SqliteStore {
                 return Ok(Some(serde_json::from_str(&json)?));
             }
             Ok(None)
-        })
-    }
-
-    async fn update_chat_session(&self, session: &ChatSession) -> Result<()> {
-        let payload = serde_json::to_string(session)?;
-        let sid = session.id.to_string();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE chat_sessions SET payload_json = ?1 WHERE id = ?2",
-                params![payload, sid],
-            )?;
-            Ok(())
         })
     }
 

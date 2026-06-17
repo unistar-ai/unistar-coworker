@@ -62,16 +62,16 @@ pub fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
 }
 
-/// Per-tool byte cap before a result enters LLM context (current turn).
+/// Per-tool byte cap when compressing older tool turns (not the live turn path).
 pub fn tool_result_char_cap(tool_name: &str) -> usize {
     match tool_name {
-        "pr_list_open" | "pr_list_merged" | "pr_list_waiting_review" | "issue_list_open" => 2_800,
-        "ci_get_failed_logs" => 4_800,
-        "pr_list_changed_files" => 3_200,
-        "pr_get_diff" => 4_000,
-        "pr_get_overview" | "ci_analyze_pr_failures" | "ci_get_run_summary" => 3_500,
-        "store_get_latest_digest" => 2_000,
-        _ => 6_000,
+        "pr_list_open" | "pr_list_merged" | "pr_list_waiting_review" | "issue_list_open" => 4_200,
+        "ci_get_failed_logs" => 7_200,
+        "pr_list_changed_files" => 4_800,
+        "pr_get_diff" => 6_000,
+        "pr_get_overview" | "ci_analyze_pr_failures" | "ci_get_run_summary" => 5_250,
+        "store_get_latest_digest" => 3_000,
+        _ => 9_000,
     }
 }
 
@@ -191,8 +191,8 @@ fn split_unified_diff(diff: &str) -> Vec<(String, String)> {
 
 /// Per-file diff excerpts so large PRs fit context without losing file names.
 pub fn structure_pr_get_diff_output(text: &str) -> String {
-    const MAX_FILES: usize = 12;
-    const PER_FILE_CHARS: usize = 720;
+    const MAX_FILES: usize = 16;
+    const PER_FILE_CHARS: usize = 1_200;
 
     let body = text
         .strip_prefix("Diff for ")
@@ -391,9 +391,10 @@ pub fn format_history_for_summary(messages: &[LlmTurnMessage]) -> String {
 }
 
 fn fit_history_to_budget(messages: &mut Vec<LlmTurnMessage>, token_budget: u32) -> Vec<LlmTurnMessage> {
+    const TAIL_KEEP: usize = 4;
     let mut dropped = Vec::new();
-    while estimate_messages_tokens(messages) > token_budget && messages.len() > 2 {
-        let compress_end = messages.len().saturating_sub(2);
+    while estimate_messages_tokens(messages) > token_budget && messages.len() > TAIL_KEEP {
+        let compress_end = messages.len().saturating_sub(TAIL_KEEP);
         if compress_oldest_tool_in_slice(messages, 0, compress_end) {
             continue;
         }
@@ -582,12 +583,93 @@ pub fn is_harness_nudge_content(content: &str) -> bool {
 }
 
 fn first_removable_message_index(messages: &[LlmTurnMessage], start: usize, end: usize) -> Option<usize> {
-    (start..end).find(|&i| !is_harness_nudge_content(&messages[i].content))
+    (start..end).find(|&i| {
+        !is_harness_nudge_content(&messages[i].content)
+            && !is_rolling_summary_content(&messages[i].content)
+    })
+}
+
+/// Chars kept when summarizing an older tool turn during trim (live turn stays full).
+const TOOL_SUMMARY_PREVIEW_CHARS: usize = 1_200;
+
+/// Prior rolling summaries produced when context exceeded the budget.
+pub fn is_rolling_summary_content(content: &str) -> bool {
+    let t = content.trim_start();
+    t.starts_with("[session history summary]")
+        || t.starts_with("[earlier context summary]")
+        || (t.starts_with("[earlier ") && t.contains("omitted from context"))
+}
+
+fn collapsible_indices_for_summary(messages: &[LlmTurnMessage], tail_protect: usize) -> Vec<usize> {
+    let collapse_end = messages.len().saturating_sub(tail_protect);
+    (1..collapse_end)
+        .filter(|&i| !is_harness_nudge_content(&messages[i].content))
+        .collect()
+}
+
+/// Batch older turns into one LLM summary message (harness nudges stay in place).
+async fn try_collapse_old_messages_with_llm(
+    messages: &mut Vec<LlmTurnMessage>,
+    token_budget: u32,
+    llm: &LlmClient,
+    summary_min_tokens: u32,
+) -> Result<()> {
+    const TAIL_PROTECT: usize = 8;
+    const MAX_PASSES: u32 = 4;
+
+    for _ in 0..MAX_PASSES {
+        if estimate_messages_tokens(messages) <= token_budget {
+            return Ok(());
+        }
+        let indices = collapsible_indices_for_summary(messages, TAIL_PROTECT);
+        if indices.len() < 2 {
+            break;
+        }
+        let batch: Vec<LlmTurnMessage> = indices.iter().map(|&i| messages[i].clone()).collect();
+        let batch_tokens = estimate_messages_tokens(&batch);
+        if batch_tokens < summary_min_tokens && indices.len() < 3 {
+            break;
+        }
+        let text = format_history_for_summary(&batch);
+        let summary = llm.summarize_session_history(&text).await?;
+        if summary.trim().is_empty() {
+            break;
+        }
+        let insert_at = indices[0];
+        for &i in indices.iter().rev() {
+            messages.remove(i);
+        }
+        messages.insert(
+            insert_at,
+            LlmTurnMessage::new(
+                "user",
+                format!("[earlier context summary]\n{summary}"),
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Fit messages to the token budget; older turns may be rolled into one LLM summary first.
+pub async fn trim_llm_messages_with_llm(
+    messages: &mut Vec<LlmTurnMessage>,
+    token_budget: u32,
+    llm: &LlmClient,
+    compress_with_llm: bool,
+    summary_min_tokens: u32,
+) -> Result<()> {
+    if compress_with_llm && estimate_messages_tokens(messages) > token_budget {
+        try_collapse_old_messages_with_llm(messages, token_budget, llm, summary_min_tokens).await?;
+    }
+    if estimate_messages_tokens(messages) > token_budget {
+        trim_llm_messages(messages, token_budget);
+    }
+    Ok(())
 }
 
 /// Shrink `messages` (system at index 0) to fit `token_budget`. Keeps system + recent tail.
 pub fn trim_llm_messages(messages: &mut Vec<LlmTurnMessage>, token_budget: u32) {
-    const TAIL_PROTECT: usize = 3;
+    const TAIL_PROTECT: usize = 8;
     if messages.len() <= 1 {
         return;
     }
@@ -660,10 +742,15 @@ fn compress_oldest_tool_in_slice(
 ) -> bool {
     for i in start..end.min(messages.len()) {
         if llm_message_is_tool_result(&messages[i]) && !is_already_summarized(&messages[i].content)
+            && !is_rolling_summary_content(&messages[i].content)
         {
             let summary = if messages[i].role == "tool" {
                 let tool = llm_message_tool_label(&messages[i]);
-                let preview: String = messages[i].content.chars().take(360).collect();
+                let preview: String = messages[i]
+                    .content
+                    .chars()
+                    .take(TOOL_SUMMARY_PREVIEW_CHARS)
+                    .collect();
                 format!("[summarized tool_result {tool}]\n{preview}…")
             } else {
                 summarize_tool_content(&messages[i].content)
@@ -688,7 +775,11 @@ fn summarize_message_at(messages: &mut [LlmTurnMessage], idx: usize) {
     if llm_message_is_tool_result(&messages[idx]) {
         if messages[idx].role == "tool" {
             let tool = llm_message_tool_label(&messages[idx]);
-            let preview: String = messages[idx].content.chars().take(360).collect();
+            let preview: String = messages[idx]
+                .content
+                .chars()
+                .take(TOOL_SUMMARY_PREVIEW_CHARS)
+                .collect();
             messages[idx].content = format!("[summarized tool_result {tool}]\n{preview}…");
         } else {
             messages[idx].content = summarize_tool_content(&messages[idx].content);
@@ -697,7 +788,7 @@ fn summarize_message_at(messages: &mut [LlmTurnMessage], idx: usize) {
         messages[idx].tool_name = None;
         return;
     }
-    let preview: String = messages[idx].content.chars().take(280).collect();
+    let preview: String = messages[idx].content.chars().take(500).collect();
     messages[idx].content = format!("[earlier {role} message]\n{preview}…");
 }
 
@@ -771,7 +862,7 @@ fn is_already_summarized(content: &str) -> bool {
 fn summarize_tool_content(content: &str) -> String {
     let tool = extract_tool_label(content);
     let body = tool_result_body(content);
-    let preview: String = body.chars().take(360).collect();
+    let preview: String = body.chars().take(TOOL_SUMMARY_PREVIEW_CHARS).collect();
     format!("[summarized tool_result {tool}]\n{preview}…")
 }
 
@@ -804,7 +895,7 @@ pub fn truncate_reasoning_local(text: &str, max_chars: usize) -> String {
 /// Resolve how many tokens prior session turns may use.
 pub fn history_token_budget(budget: &TokenBudget, configured: u32) -> u32 {
     if configured > 0 {
-        return configured.min(budget.input_budget() / 2);
+        return configured.min(budget.input_budget() * 3 / 4);
     }
     budget.history_budget()
 }
@@ -1027,6 +1118,32 @@ diff --git a/bar.rs b/bar.rs\n\
     }
 
     #[test]
+    fn is_rolling_summary_content_detects_prior_summaries() {
+        assert!(is_rolling_summary_content(
+            "[session history summary]\n- user asked about PR #42"
+        ));
+        assert!(is_rolling_summary_content(
+            "[earlier context summary]\n- reran CI on acme/widget"
+        ));
+        assert!(!is_rolling_summary_content("tool_result(pr_list_open):\n#1"));
+    }
+
+    #[test]
+    fn collapsible_indices_skip_harness_and_protect_tail() {
+        let mut msgs = vec![LlmTurnMessage::new("system", "sys")];
+        msgs.push(LlmTurnMessage::new("user", "msg1"));
+        msgs.push(LlmTurnMessage::new(
+            "user",
+            "Identical `pr_list_open` with the same args",
+        ));
+        msgs.push(LlmTurnMessage::new("user", "msg2"));
+        msgs.push(LlmTurnMessage::new("user", "tail1"));
+        msgs.push(LlmTurnMessage::new("user", "tail2"));
+        let idx = collapsible_indices_for_summary(&msgs, 2);
+        assert_eq!(idx, vec![1, 3]);
+    }
+
+    #[test]
     fn pack_history_respects_token_budget() {
         let history = sample_history(20);
         let budget = TokenBudget::from_config(64_000);
@@ -1037,16 +1154,20 @@ diff --git a/bar.rs b/bar.rs\n\
     #[test]
     fn trim_keeps_system_and_tail() {
         let mut msgs = vec![LlmTurnMessage::new("system", "sys")];
-        for _ in 0..10 {
+        for _ in 0..16 {
             msgs.push(LlmTurnMessage::new(
                 "user",
                 format!("tool_result(pr_list_open):\n{}", "y".repeat(3000)),
             ));
         }
-        trim_llm_messages(&mut msgs, 900);
+        let before = estimate_messages_tokens(&msgs);
+        trim_llm_messages(&mut msgs, 6_500);
+        let after = estimate_messages_tokens(&msgs);
         assert_eq!(msgs[0].role, "system");
-        assert!(msgs.len() >= 2);
-        assert!(estimate_messages_tokens(&msgs) <= 950);
+        assert!(msgs.len() >= 9);
+        assert!(after < before);
+        // Eight tail tool rows stay large by design; budget must allow that protected tail.
+        assert!(after <= 7_200);
     }
 
     #[test]

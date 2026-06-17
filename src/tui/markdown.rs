@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -15,6 +15,7 @@ pub fn markdown_to_lines_in_width(
     max_width: Option<usize>,
 ) -> Vec<Line<'static>> {
     let input = input.replace("\r\n", "\n");
+    let input = promote_section_lines(&input);
     if should_preserve_line_breaks(&input) || !looks_like_markdown(&input) {
         return plain_lines(th, &input, base);
     }
@@ -24,7 +25,7 @@ pub fn markdown_to_lines_in_width(
     for event in Parser::new_ext(&input, opts) {
         renderer.on_event(event);
     }
-    renderer.finish()
+    wrap_rendered_lines(renderer.finish(), max_width)
 }
 
 fn plain_lines(th: ThemePalette, input: &str, base: Style) -> Vec<Line<'static>> {
@@ -111,6 +112,159 @@ fn looks_like_table_row(line: &str) -> bool {
     t.starts_with('|') && t.ends_with('|') && t.matches('|').count() >= 2
 }
 
+/// LLMs often emit `1. Section` / `A. Subsection` / `**Title**` instead of ATX `#` headings.
+fn promote_section_lines(input: &str) -> String {
+    let lines: Vec<&str> = input.lines().collect();
+    let skip = numbered_list_lines_to_preserve(&lines);
+    lines
+        .iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            if skip[idx] {
+                (*line).to_string()
+            } else {
+                promote_section_line(line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Consecutive `N. item` lines are an ordered list, not section headings.
+fn numbered_list_lines_to_preserve(lines: &[&str]) -> Vec<bool> {
+    let mut skip = vec![false; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        while i < lines.len() && lines[i].trim().is_empty() {
+            i += 1;
+        }
+        if i >= lines.len() || !looks_like_numbered_list_item(lines[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut items = 0usize;
+        while i < lines.len() {
+            if lines[i].trim().is_empty() {
+                i += 1;
+                continue;
+            }
+            if looks_like_numbered_list_item(lines[i]) {
+                items += 1;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if items >= 2 {
+            for j in start..i {
+                if looks_like_numbered_list_item(lines[j]) {
+                    skip[j] = true;
+                }
+            }
+        }
+    }
+    skip
+}
+
+fn looks_like_numbered_list_item(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    i > 0 && bytes.get(i) == Some(&b'.') && bytes.get(i + 1) == Some(&b' ')
+}
+
+fn promote_section_line(line: &str) -> String {
+    if looks_like_atx_heading(line) {
+        return line.to_string();
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() || line.starts_with(' ') || line.starts_with('\t') {
+        return line.to_string();
+    }
+    if let Some(title) = standalone_bold_line(trimmed) {
+        return format!("## {title}");
+    }
+    if looks_like_numbered_section(trimmed) {
+        return format!("## {trimmed}");
+    }
+    if looks_like_lettered_section(trimmed) {
+        return format!("### {trimmed}");
+    }
+    if looks_like_emoji_section(trimmed) {
+        return format!("### {trimmed}");
+    }
+    line.to_string()
+}
+
+fn standalone_bold_line(s: &str) -> Option<String> {
+    let inner = s.strip_prefix("**")?.strip_suffix("**")?;
+    if inner.is_empty() || inner.contains("**") {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
+fn looks_like_numbered_section(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 || bytes.get(i) != Some(&b'.') || bytes.get(i + 1) != Some(&b' ') {
+        return false;
+    }
+    let rest = &s[i + 2..];
+    !rest.is_empty() && rest.chars().count() <= 120
+}
+
+fn looks_like_lettered_section(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    if chars.next() != Some('.') || chars.next() != Some(' ') {
+        return false;
+    }
+    chars.next().is_some()
+}
+
+fn looks_like_emoji_section(s: &str) -> bool {
+    const PREFIXES: &[&str] = &["✅", "⚠️", "❗", "❌", "🔴", "🟡", "🟢"];
+    PREFIXES.iter().any(|p| s.starts_with(p))
+        || (s.starts_with('!') && s.len() > 1 && s.as_bytes().get(1) == Some(&b' '))
+}
+
+fn heading_style(th: ThemePalette, level: HeadingLevel) -> Style {
+    match level {
+        HeadingLevel::H1 => Style::default()
+            .fg(th.heading_h1)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        HeadingLevel::H2 => Style::default()
+            .fg(th.heading_h2)
+            .add_modifier(Modifier::BOLD),
+        HeadingLevel::H3 => Style::default()
+            .fg(th.heading_h3)
+            .add_modifier(Modifier::BOLD),
+        HeadingLevel::H4 => Style::default()
+            .fg(th.heading_h4)
+            .add_modifier(Modifier::BOLD),
+        HeadingLevel::H5 => Style::default()
+            .fg(th.muted)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
+        HeadingLevel::H6 => Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
+    }
+}
+
 struct TableBuilder {
     rows: Vec<Vec<String>>,
     current_row: Vec<String>,
@@ -183,6 +337,195 @@ fn truncate_to_display_width(s: &str, max: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+#[derive(Clone, Copy)]
+struct StyledChar {
+    ch: char,
+    style: Style,
+}
+
+fn line_display_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
+}
+
+fn flatten_line(line: &Line<'_>) -> Vec<StyledChar> {
+    let mut out = Vec::new();
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            out.push(StyledChar {
+                ch,
+                style: span.style,
+            });
+        }
+    }
+    out
+}
+
+fn chars_to_line(chars: Vec<StyledChar>) -> Line<'static> {
+    if chars.is_empty() {
+        return Line::from("");
+    }
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_style = chars[0].style;
+    for sc in chars {
+        if sc.style != current_style && !current.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut current), current_style));
+            current_style = sc.style;
+        }
+        current.push(sc.ch);
+    }
+    if !current.is_empty() {
+        spans.push(Span::styled(current, current_style));
+    }
+    Line::from(spans)
+}
+
+fn styled_width(chars: &[StyledChar]) -> usize {
+    chars
+        .iter()
+        .map(|sc| unicode_width::UnicodeWidthChar::width(sc.ch).unwrap_or(0))
+        .sum()
+}
+
+fn split_into_words(chars: Vec<StyledChar>) -> Vec<Vec<StyledChar>> {
+    let mut words = Vec::new();
+    let mut current = Vec::new();
+    let mut is_space = false;
+    for sc in chars {
+        if sc.ch.is_whitespace() {
+            if !is_space && !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            is_space = true;
+            current.push(sc);
+        } else {
+            if is_space && !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+                is_space = false;
+            }
+            current.push(sc);
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn is_list_marker_span(text: &str) -> bool {
+    if text.contains('▸') {
+        return true;
+    }
+    let trimmed = text.trim_start();
+    let bytes = trimmed.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    i > 0 && bytes.get(i) == Some(&b'.') && bytes.get(i + 1) == Some(&b' ')
+}
+
+fn list_marker_hang_width(line: &Line<'_>) -> Option<usize> {
+    let first = line.spans.first()?;
+    if is_list_marker_span(first.content.as_ref()) {
+        Some(UnicodeWidthStr::width(first.content.as_ref()))
+    } else {
+        None
+    }
+}
+
+fn should_preserve_line_as_single(line: &Line<'_>) -> bool {
+    if line.spans.is_empty() {
+        return true;
+    }
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    text.contains('│') || text.starts_with("  ┌─") || text.starts_with("  └─") || text.starts_with('─')
+}
+
+fn wrap_rendered_lines(lines: Vec<Line<'static>>, max_width: Option<usize>) -> Vec<Line<'static>> {
+    let Some(width) = max_width.filter(|w| *w > 0) else {
+        return lines;
+    };
+    lines
+        .into_iter()
+        .flat_map(|line| {
+            if should_preserve_line_as_single(&line) || line_display_width(&line) <= width {
+                vec![line]
+            } else {
+                let hang = list_marker_hang_width(&line);
+                wrap_line_to_width(line, width, hang)
+            }
+        })
+        .collect()
+}
+
+fn wrap_line_to_width(
+    line: Line<'static>,
+    max_width: usize,
+    hang_width: Option<usize>,
+) -> Vec<Line<'static>> {
+    let hang = hang_width.unwrap_or(0);
+    let words = split_into_words(flatten_line(&line));
+    if words.is_empty() {
+        return vec![line];
+    }
+
+    let pad_style = words
+        .iter()
+        .find_map(|w| w.first().map(|sc| sc.style))
+        .unwrap_or(Style::default());
+
+    let mut lines_out: Vec<Vec<StyledChar>> = vec![vec![]];
+    let mut col = 0usize;
+    let mut budget = max_width;
+
+    let start_new_line = |lines_out: &mut Vec<Vec<StyledChar>>, col: &mut usize, budget: &mut usize| {
+        lines_out.push(Vec::new());
+        *col = 0;
+        *budget = max_width;
+        if hang > 0 {
+            for _ in 0..hang {
+                lines_out
+                    .last_mut()
+                    .expect("line vec")
+                    .push(StyledChar {
+                        ch: ' ',
+                        style: pad_style,
+                    });
+            }
+            *col = hang;
+        }
+    };
+
+    for word in words {
+        let ww = styled_width(&word);
+        if ww == 0 {
+            continue;
+        }
+        if col > 0 && col + ww > budget {
+            start_new_line(&mut lines_out, &mut col, &mut budget);
+        }
+        if ww > budget && col == hang {
+            for sc in word {
+                let cw = unicode_width::UnicodeWidthChar::width(sc.ch).unwrap_or(0);
+                if col + cw > budget && col > hang {
+                    start_new_line(&mut lines_out, &mut col, &mut budget);
+                }
+                lines_out.last_mut().expect("line vec").push(sc);
+                col += cw;
+            }
+            continue;
+        }
+        lines_out.last_mut().expect("line vec").extend(word);
+        col += ww;
+    }
+
+    lines_out.into_iter().map(chars_to_line).collect()
 }
 
 fn format_table_lines(
@@ -349,18 +692,10 @@ impl MarkdownRenderer {
             Tag::Paragraph => {}
             Tag::Heading { level, .. } => {
                 self.flush_line();
-                let style = match level {
-                    pulldown_cmark::HeadingLevel::H1 => Style::default()
-                        .fg(self.th.heading_h1)
-                        .add_modifier(Modifier::BOLD),
-                    pulldown_cmark::HeadingLevel::H2 => Style::default()
-                        .fg(self.th.heading_h2)
-                        .add_modifier(Modifier::BOLD),
-                    _ => Style::default()
-                        .fg(self.th.accent_dim)
-                        .add_modifier(Modifier::BOLD),
-                };
-                self.style_stack.push(style);
+                if !self.lines.is_empty() {
+                    self.lines.push(Line::from(""));
+                }
+                self.style_stack.push(heading_style(self.th, level));
             }
             Tag::Strong => {
                 self.style_stack
@@ -449,8 +784,15 @@ impl MarkdownRenderer {
     fn end_tag(&mut self, tag: TagEnd) {
         match tag {
             TagEnd::Paragraph if !self.in_table_cell() => self.new_line(),
-            TagEnd::Heading { .. } => {
+            TagEnd::Heading(level) => {
                 self.style_stack.pop();
+                self.flush_line();
+                if level == HeadingLevel::H1 {
+                    self.lines.push(Line::from(Span::styled(
+                        "─".repeat(20),
+                        Style::default().fg(self.th.muted),
+                    )));
+                }
                 self.new_line();
             }
             TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
@@ -678,6 +1020,7 @@ fn shorten_url(url: &str) -> String {
 mod tests {
     use super::*;
     use crate::tui::theme::ThemePalette;
+    use ratatui::style::Modifier;
 
     fn dark() -> ThemePalette {
         ThemePalette::dark()
@@ -790,6 +1133,126 @@ mod tests {
         assert!(
             joined.iter().any(|l| l.contains("19235")),
             "expected PR bullet: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn atx_heading_levels_use_distinct_colors() {
+        let th = dark();
+        let base = Style::default().fg(th.assistant);
+        let md = "# Title one\n\n## Title two\n\n### Title three";
+        let lines = markdown_to_lines_in_width(th, md, base, None);
+        let heading_lines: Vec<_> = lines
+            .iter()
+            .filter(|l| {
+                let t = line_text(l);
+                t.contains("Title one")
+                    || t.contains("Title two")
+                    || t.contains("Title three")
+            })
+            .collect();
+        assert_eq!(heading_lines.len(), 3, "expected three heading lines: {lines:?}");
+        let colors: Vec<_> = heading_lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.style.fg))
+            .collect();
+        assert!(
+            colors.windows(2).any(|w| w[0] != w[1]),
+            "heading levels should differ in color: {colors:?}"
+        );
+    }
+
+    #[test]
+    fn numbered_sections_promoted_to_headings() {
+        let th = dark();
+        let base = Style::default().fg(th.assistant);
+        let md = "1. 代码修改核心内容\n\nA. 新增 `smart_router.py`\n\n✅ 优点\n\n* detail";
+        let lines = markdown_to_lines_in_width(th, md, base, None);
+        let section = lines
+            .iter()
+            .find(|l| line_text(l).contains("代码修改核心内容"))
+            .expect("section title");
+        assert!(
+            section
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "promoted section should be bold: {section:?}"
+        );
+        assert_ne!(
+            section.spans[0].style.fg,
+            Some(th.assistant),
+            "section title should not use body color"
+        );
+    }
+
+    #[test]
+    fn promote_section_line_helpers() {
+        assert_eq!(
+            promote_section_line("1. Overview"),
+            "## 1. Overview"
+        );
+        assert_eq!(
+            promote_section_line("A. Details"),
+            "### A. Details"
+        );
+        assert_eq!(
+            promote_section_line("✅ Pros"),
+            "### ✅ Pros"
+        );
+        assert_eq!(promote_section_line("## Already"), "## Already");
+    }
+
+    #[test]
+    fn consecutive_numbered_lines_stay_ordered_list() {
+        let th = dark();
+        let base = Style::default().fg(th.assistant);
+        let md = "1. **Detection**: short\n2. **Filtering**: short\n3. **Action**: Instead of running the full suite, it would skip the heavy integration tests and only run the most relevant unit tests or even just documentation checks.";
+        let lines = markdown_to_lines_in_width(th, md, base, None);
+        let joined: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        assert!(
+            joined.iter().filter(|l| l.starts_with("1. ")).count() >= 1,
+            "expected ordered list item 1: {joined:?}"
+        );
+        assert!(
+            joined.iter().filter(|l| l.starts_with("2. ")).count() >= 1,
+            "expected ordered list item 2: {joined:?}"
+        );
+        assert!(
+            joined.iter().filter(|l| l.starts_with("3. ")).count() >= 1,
+            "expected ordered list item 3: {joined:?}"
+        );
+        assert!(
+            !joined.iter().any(|l| l.starts_with("## 1.")),
+            "list items should not be promoted to headings: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn ordered_list_wrap_uses_hang_indent() {
+        let th = dark();
+        let base = Style::default().fg(th.assistant);
+        let md = "1. first\n2. second\n3. **Action**: Instead of running the full suite, it would skip the heavy integration tests and only run unit tests or documentation checks.";
+        let width = 52;
+        let lines = markdown_to_lines_in_width(th, md, base, Some(width));
+        let joined: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        let item3_lines: Vec<_> = joined
+            .iter()
+            .skip_while(|l| !l.starts_with("3. "))
+            .take_while(|l| l.starts_with(' ') || l.starts_with("3. "))
+            .collect();
+        assert!(
+            item3_lines.len() >= 2,
+            "long list item should wrap: {joined:?}"
+        );
+        let continuation = item3_lines[1];
+        assert!(
+            continuation.starts_with("   "),
+            "wrapped continuation should hang-indent under list text: {continuation:?} in {joined:?}"
+        );
+        assert!(
+            !continuation.trim_start().starts_with("checks."),
+            "continuation should be indented, not flush-left: {continuation:?}"
         );
     }
 

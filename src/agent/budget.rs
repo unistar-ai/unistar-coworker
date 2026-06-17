@@ -1,4 +1,4 @@
-/// Token budget for 64K context windows.
+/// Token budget for 64K (and other) context windows.
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
     pub context_limit: u32,
@@ -9,11 +9,13 @@ pub struct TokenBudget {
 
 impl TokenBudget {
     pub fn from_config(context_limit: u32) -> Self {
+        // Output reserve tracks model max generation, not a full 10K block.
+        let output_reserved = context_limit.saturating_div(12).max(4_096);
         Self {
             context_limit,
             system_reserved: 4_096,
             tools_reserved: 2_048,
-            output_reserved: 10_240,
+            output_reserved,
         }
     }
 
@@ -24,20 +26,22 @@ impl TokenBudget {
             .saturating_sub(self.output_reserved)
     }
 
-    /// ~25% of input for prior session turns (user/assistant/tool summaries).
+    /// ~40% of input for prior session turns (was 25% — too tight for 64K windows).
     pub fn history_budget(&self) -> u32 {
-        self.input_budget() / 4
+        self.input_budget() * 2 / 5
     }
 
-    /// ~55% for the current user message + tool results this turn.
+    /// Remaining headroom for the active user message + tool results this turn.
     #[allow(dead_code)]
     pub fn turn_budget(&self) -> u32 {
-        self.input_budget() * 11 / 20
+        self.input_budget()
+            .saturating_sub(self.history_budget())
+            .saturating_sub(self.system_budget())
     }
 
-    /// Hard cap for system prompt (skill + store snapshot).
+    /// System prompt cap (skill + store snapshot) — 30% of input.
     pub fn system_budget(&self) -> u32 {
-        self.input_budget() / 5
+        self.input_budget() * 3 / 10
     }
 }
 
@@ -48,7 +52,9 @@ mod tests {
     #[test]
     fn input_budget_64k() {
         let b = TokenBudget::from_config(64_000);
-        assert_eq!(b.input_budget(), 47_616);
-        assert_eq!(b.history_budget(), 11_904);
+        assert_eq!(b.output_reserved, 5_333);
+        assert_eq!(b.input_budget(), 52_523);
+        assert_eq!(b.history_budget(), 21_009);
+        assert_eq!(b.system_budget(), 15_756);
     }
 }

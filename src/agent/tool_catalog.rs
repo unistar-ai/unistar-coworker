@@ -168,6 +168,7 @@ pub struct ToolCatalog<'a> {
 
 impl ToolCatalog<'static> {
     /// Full static catalog (`preferred_tools` empty → all [`TOOLS`] whitelisted).
+    #[cfg(test)]
     pub fn full() -> Self {
         Self { preferred: &[] }
     }
@@ -661,12 +662,6 @@ fn native_tool_from_spec(spec: &ToolSpec) -> Value {
     })
 }
 
-// --- helpers for llm JSON normalize (full catalog salvage) ---
-
-pub fn salvage_hallucinated_tool_name(name: &str) -> Option<(String, Option<u32>)> {
-    ToolCatalog::full().salvage_hallucinated_tool_name(name)
-}
-
 pub fn is_plausible_tool_name(name: &str) -> bool {
     let name = name.trim().trim_matches('`');
     !name.is_empty()
@@ -758,7 +753,7 @@ fn example_native_tool_args(
             "{{\"repo\":\"{repo}\",\"pr_number\":{pr}}}"
         ),
         "pr_get_diff" => format!(
-            "{{\"repo\":\"{repo}\",\"pr_number\":{pr},\"max_bytes\":32000}}"
+            "{{\"repo\":\"{repo}\",\"pr_number\":{pr},\"max_bytes\":48000}}"
         ),
         "pr_list_open" => format!(
             r#"{{"repo":"{repo}","author":"@me","limit":20}}"#
@@ -847,10 +842,11 @@ mod tests {
 
     #[test]
     fn salvage_extracts_pr_from_compound_name() {
-        let (name, pr) = salvage_hallucinated_tool_name(
-            "pr_get_overview_and_changed_files_combined_for_prs_19264_19263",
-        )
-        .unwrap();
+        let (name, pr) = ToolCatalog::full()
+            .salvage_hallucinated_tool_name(
+                "pr_get_overview_and_changed_files_combined_for_prs_19264_19263",
+            )
+            .unwrap();
         assert_eq!(name, "pr_get_overview");
         assert_eq!(pr, Some(19264));
     }

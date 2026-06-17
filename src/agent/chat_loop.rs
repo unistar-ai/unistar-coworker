@@ -12,9 +12,9 @@ use crate::agent::budget::TokenBudget;
 use crate::agent::context::{
     estimate_message_tokens, format_tool_approval_pending_message, format_tool_context_message,
     harness_nudge_base, history_token_budget,
-    pack_session_history_with_llm, trim_llm_messages, trim_system_content, truncate_chars,
+    pack_session_history_with_llm, trim_llm_messages_with_llm, trim_system_content, truncate_chars,
 };
-use crate::agent::parse::{parse_failing_runs, parse_pr_line};
+use crate::agent::parse::parse_failing_runs;
 use crate::agent::tool_catalog;
 use crate::app::{append_audit, AppEvent};
 use crate::config::Config;
@@ -29,7 +29,7 @@ use crate::llm::{ChatAgentAction, ChatStepOptions, LlmClient, LlmTurnMessage};
 use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
 use crate::store::{
-    Approval, ApprovalKind, ApprovalStatus, ChatMessage, ChatRole, ChatSession, Store,
+    Approval, ApprovalKind, ApprovalStatus, ChatMessage, ChatRole, Store,
 };
 
 const MUTATING_TOOLS: &[&str] = &["ci_rerun_workflow", "pr_create_backport", "pr_post_comment"];
@@ -75,7 +75,7 @@ pub enum ChatProgress {
         /// Capped body for TUI expand (see `chat_tool_outputs`).
         output_preview: String,
     },
-    /// Streaming JSON with `action:tool` — not a user-facing assistant reply.
+    /// In-progress native tool call label while streaming.
     ToolPending {
         label: String,
     },
@@ -93,9 +93,9 @@ pub enum ChatProgress {
         approved: bool,
         detail: String,
     },
-    /// Summarizing streamed thinking via think=false LLM before the next tool/JSON step.
+    /// Summarizing streamed thinking via think=false LLM before the next step.
     ReasoningCompressing,
-    /// Incremental assistant reply text while the model streams JSON.
+    /// Incremental assistant reply text while streaming.
     AssistantPartial {
         text: String,
     },
@@ -498,7 +498,7 @@ pub async fn run_chat_turn(
         )));
     }
 
-    let mut session = match session_id {
+    let session = match session_id {
         Some(id) => store
             .get_chat_session(&id)
             .await?
@@ -600,43 +600,14 @@ Reply in natural language when the answer is complete.",
     let mut tool_calls = Vec::new();
     let mut tools_used = 0u32;
     let mut tool_exec_records: HashMap<String, ToolExecRecord> = HashMap::new();
-    let mut fetched_prs_by_tool: HashMap<String, HashSet<u32>> = HashMap::new();
     let mut duplicate_tool_nudges: HashMap<String, u32> = HashMap::new();
     let mut duplicate_ui_shown: HashSet<String> = HashSet::new();
-    let mut investigation_pr: Option<u32> = session
-        .focus_pr
-        .or_else(|| infer_pr_number_from_text(user_task));
     let mut duplicate_forced_reply_nudged = false;
     let mut harness_corrections = 0u32;
     let turn_started = Instant::now();
     let mut llm_rounds = 0u32;
 
     emit_context_snapshot(&progress, &llm_messages, 0, &token_budget);
-
-    if !is_resume {
-        tools_used += bootstrap_latest_pr_chain(
-            config,
-            user_task,
-            &tool_catalog,
-            store.as_ref(),
-            mcp.as_ref(),
-            &session.id,
-            &progress,
-            &cancel,
-            &mut llm_messages,
-            &mut tool_calls,
-            &mut tool_exec_records,
-            &mut fetched_prs_by_tool,
-            &mut investigation_pr,
-        )
-        .await?;
-    }
-    if investigation_pr.is_some() {
-        session.focus_pr = investigation_pr;
-    }
-    if tools_used > 0 {
-        emit_context_snapshot(&progress, &llm_messages, 0, &token_budget);
-    }
 
     loop {
         ensure_chat_not_cancelled(&cancel)?;
@@ -658,7 +629,17 @@ Reply in natural language when the answer is complete.",
                 elapsed_secs: turn_started.elapsed().as_secs(),
             },
         );
-        trim_llm_messages(&mut llm_messages, token_budget.input_budget());
+        race_chat_cancel(
+            cancel.clone(),
+            trim_llm_messages_with_llm(
+                &mut llm_messages,
+                token_budget.input_budget(),
+                llm.as_ref(),
+                config.chat.compress_history,
+                config.chat.history_summary_min_tokens,
+            ),
+        )
+        .await??;
         emit_context_snapshot(&progress, &llm_messages, llm_rounds, &token_budget);
         tracing::debug!(
             "chat context ~{} tokens (budget {})",
@@ -804,7 +785,7 @@ not a tool-result transcript. Synthesize from tool results already in context.";
                     continue;
                 }
                 let tool_names = tool_call_names(&tool_calls);
-                if reply_premature_for_task(&message, user_task, &tool_names, investigation_pr) {
+                if reply_premature_for_task(&message, user_task, &tool_names) {
                     emit_progress(
                         &progress,
                         ChatProgress::TurnThinking {
@@ -845,123 +826,11 @@ not a tool-result transcript. Synthesize from tool results already in context.";
                     None,
                 )
                 .await?;
-                persist_session_focus(store.as_ref(), &mut session, user_task, &llm_messages)
-                    .await?;
                 return Ok(ChatTurnResult {
                     session_id: session.id,
                     assistant_message: message,
                     tool_calls,
                     awaiting_approval: false,
-                });
-            }
-            ChatAgentAction::Approval => {
-                let tool_name = step.tool_name.as_deref().ok_or_else(|| {
-                    CoworkerError::Workflow("approval action missing tool_name".into())
-                })?;
-                let mut tool_args = step.tool_args.unwrap_or_else(|| json!({}));
-                normalize_model_tool_args(tool_name, &mut tool_args);
-                coerce_numeric_tool_args(tool_name, &mut tool_args);
-                normalize_pr_tool_args(tool_name, &mut tool_args);
-                if let Some(hint) =
-                    missing_required_tool_hint(&tool_catalog, user_task, tool_name, &tool_args)
-                {
-                    if harness_retry_or_stop(
-                        &mut harness_corrections,
-                        &progress,
-                        store.as_ref(),
-                        &session.id,
-                        &hint,
-                        &mut llm_messages,
-                    )
-                    .await?
-                    {
-                        break;
-                    }
-                    continue;
-                }
-                let queued = queue_mutating_approval(store.as_ref(), tool_name, &tool_args).await?;
-                if let Some(detail) =
-                    maybe_auto_approve_mutations(config, &store, &mcp, &queued).await?
-                {
-                    emit_progress(
-                        &progress,
-                        ChatProgress::ApprovalResolved {
-                            approval_id: queued.id,
-                            tool_name: queued.tool_name.clone(),
-                            approved: true,
-                            detail: detail.clone(),
-                        },
-                    );
-                    tool_calls.push(ToolCallSummary {
-                        tool_name: format!("approval:{}", queued.tool_name),
-                        output: detail.clone(),
-                    });
-                    let message = if step.message.trim().is_empty() {
-                        format!("Auto-approved `{}`: {}", queued.tool_name, detail)
-                    } else {
-                        format!(
-                            "{}\n\nAuto-approved `{}`: {}",
-                            step.message, queued.tool_name, detail
-                        )
-                    };
-                    append_message(
-                        store.as_ref(),
-                        &session.id,
-                        ChatRole::Assistant,
-                        &message,
-                        None,
-                        None,
-                    )
-                    .await?;
-                    persist_session_focus(
-                        store.as_ref(),
-                        &mut session,
-                        user_task,
-                        &llm_messages,
-                    )
-                    .await?;
-                    return Ok(ChatTurnResult {
-                        session_id: session.id,
-                        assistant_message: message,
-                        tool_calls,
-                        awaiting_approval: false,
-                    });
-                }
-                emit_progress(
-                    &progress,
-                    ChatProgress::ApprovalQueued {
-                        approval_id: queued.id,
-                        session_id: session.id,
-                        tool_name: queued.tool_name.clone(),
-                        tool_args_json: tool_args.to_string(),
-                        description: queued.description.clone(),
-                    },
-                );
-                tool_calls.push(ToolCallSummary {
-                    tool_name: format!("approval:{}", queued.tool_name),
-                    output: queued.summary.clone(),
-                });
-                let message = if step.message.trim().is_empty() {
-                    queued.summary.clone()
-                } else {
-                    format!("{}\n\n{}", step.message, queued.summary)
-                };
-                append_message(
-                    store.as_ref(),
-                    &session.id,
-                    ChatRole::Assistant,
-                    &message,
-                    None,
-                    None,
-                )
-                .await?;
-                persist_session_focus(store.as_ref(), &mut session, user_task, &llm_messages)
-                    .await?;
-                return Ok(ChatTurnResult {
-                    session_id: session.id,
-                    assistant_message: message,
-                    tool_calls,
-                    awaiting_approval: true,
                 });
             }
             ChatAgentAction::Tool => {
@@ -1018,72 +887,12 @@ from tool results already in context.";
                     }
                     continue;
                 }
-                if step.tool_name_was_pasted_list {
-                    let raw = step.raw_tool_name.as_deref().unwrap_or(tool_name);
-                    let nudge = crate::llm::chat::format_pasted_tool_names_harness_message(
-                        tool_name,
-                        raw,
-                        step.tool_args.as_ref(),
-                    );
-                    persist_harness_nudge(store.as_ref(), &session.id, &mut llm_messages, &nudge)
-                        .await?;
-                } else if step.tool_name_had_salvaged_args {
-                    let raw = step.raw_tool_name.as_deref().unwrap_or(tool_name);
-                    let nudge = crate::llm::chat::format_salvaged_tool_name_harness_message(
-                        tool_name,
-                        raw,
-                        step.tool_args.as_ref(),
-                    );
-                    persist_harness_nudge(store.as_ref(), &session.id, &mut llm_messages, &nudge)
-                        .await?;
-                }
                 let mut tool_args = step.tool_args.clone().unwrap_or_else(|| json!({}));
                 normalize_model_tool_args(tool_name, &mut tool_args);
                 coerce_numeric_tool_args(tool_name, &mut tool_args);
                 normalize_pr_tool_args(tool_name, &mut tool_args);
-                let empty_fetched = HashSet::new();
-                let turn_fetched = fetched_prs_by_tool.get(tool_name).unwrap_or(&empty_fetched);
-                let fetched_prs = combined_fetched_prs(
-                    &llm_messages,
-                    tool_name,
-                    turn_fetched,
-                    &tool_exec_records,
-                );
                 fill_default_diff_max_bytes(tool_name, &mut tool_args);
                 normalize_pr_tool_args(tool_name, &mut tool_args);
-                redirect_stale_pr_number(
-                    tool_name,
-                    &mut tool_args,
-                    &llm_messages,
-                    &fetched_prs,
-                    user_task,
-                    investigation_pr.or(session.focus_pr),
-                );
-                resolve_duplicate_pr_tool_by_advancing(
-                    tool_name,
-                    &mut tool_args,
-                    &llm_messages,
-                    &fetched_prs,
-                    &tool_exec_records,
-                );
-
-                if let Some(hint) =
-                    missing_required_tool_hint(&tool_catalog, user_task, tool_name, &tool_args)
-                {
-                    if harness_retry_or_stop(
-                        &mut harness_corrections,
-                        &progress,
-                        store.as_ref(),
-                        &session.id,
-                        &hint,
-                        &mut llm_messages,
-                    )
-                    .await?
-                    {
-                        break;
-                    }
-                    continue;
-                }
 
                 let fingerprint = tool_call_fingerprint(tool_name, &tool_args);
                 if let Some(block) =
@@ -1138,11 +947,6 @@ from tool results already in context.";
                         break;
                     }
                     continue;
-                }
-
-                if let Some(n) = normalized_pr_number(&tool_args) {
-                    investigation_pr = Some(n);
-                    session.focus_pr = investigation_pr;
                 }
 
                 push_native_assistant_tool_call(&mut llm_messages, &step, tool_name, &tool_args);
@@ -1227,8 +1031,6 @@ from tool results already in context.";
                         Some(tool_args.to_string()),
                     )
                     .await?;
-                    persist_session_focus(store.as_ref(), &mut session, user_task, &llm_messages)
-                        .await?;
                     return Ok(ChatTurnResult {
                         session_id: session.id,
                         assistant_message: String::new(),
@@ -1293,12 +1095,6 @@ from tool results already in context.";
                     record.succeeded = true;
                     duplicate_tool_nudges.remove(&fingerprint);
                     duplicate_ui_shown.remove(&fingerprint);
-                    if let Some(n) = normalized_pr_number(&tool_args) {
-                        fetched_prs_by_tool
-                            .entry(tool_name.to_string())
-                            .or_default()
-                            .insert(n);
-                    }
                 } else {
                     record.fail_count += 1;
                 }
@@ -1366,7 +1162,6 @@ from tool results already in context.";
         None,
     )
     .await?;
-    persist_session_focus(store.as_ref(), &mut session, user_task, &llm_messages).await?;
     Ok(ChatTurnResult {
         session_id: session.id,
         assistant_message: fallback,
@@ -1522,23 +1317,20 @@ async fn apply_approval_resolution(
 }
 
 fn interim_assistant_message(step: &ChatAgentStep) -> Option<String> {
-    match step.action {
-        ChatAgentAction::Tool | ChatAgentAction::Approval => {
-            let message = step.message.trim();
-            if message.is_empty()
-                || message.starts_with('{')
-                || message.contains("\"action\"")
-                || crate::agent::context::is_tool_result_transcript(message)
-            {
-                return None;
-            }
-            if message.len() > 800 {
-                return None;
-            }
-            Some(message.to_string())
-        }
-        ChatAgentAction::Reply => None,
+    if step.action != ChatAgentAction::Tool {
+        return None;
     }
+    let message = step.message.trim();
+    if message.is_empty()
+        || message.starts_with('{')
+        || crate::agent::context::is_tool_result_transcript(message)
+    {
+        return None;
+    }
+    if message.len() > 800 {
+        return None;
+    }
+    Some(message.to_string())
 }
 
 async fn persist_interim_assistant_message(
@@ -1558,7 +1350,7 @@ fn is_mutating_tool(name: &str) -> bool {
 
 fn fill_default_diff_max_bytes(tool_name: &str, tool_args: &mut Value) {
     if tool_name == "pr_get_diff" && tool_args.get("max_bytes").is_none() {
-        tool_args["max_bytes"] = json!(32_000);
+        tool_args["max_bytes"] = json!(48_000);
     }
 }
 
@@ -1697,22 +1489,6 @@ fn normalize_meta_tool_call_args(tool_args: &mut Value) {
     }
 }
 
-async fn persist_session_focus(
-    store: &dyn Store,
-    session: &mut ChatSession,
-    user_message: &str,
-    context: &[LlmTurnMessage],
-) -> Result<()> {
-    let new_focus = infer_pr_number_from_text(user_message)
-        .or_else(|| infer_latest_pr_from_context(context))
-        .or(session.focus_pr);
-    if new_focus != session.focus_pr {
-        session.focus_pr = new_focus;
-        store.update_chat_session(session).await?;
-    }
-    Ok(())
-}
-
 fn chat_limit_reached(max: u32, used: u32) -> bool {
     max > 0 && used >= max
 }
@@ -1776,277 +1552,6 @@ fn synthesize_turn_exhausted_reply(
     parts.join("\n")
 }
 
-fn tool_requires_repo(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "pr_list_open"
-            | "pr_list_waiting_review"
-            | "pr_get_overview"
-            | "pr_get_merge_blockers"
-            | "pr_get_status"
-            | "pr_list_changed_files"
-            | "pr_list_stale"
-            | "pr_list_merged"
-            | "pr_get_diff"
-            | "ci_analyze_pr_failures"
-            | "ci_get_run_summary"
-            | "ci_get_failed_logs"
-            | "ci_list_runs"
-            | "ci_rerun_workflow"
-            | "issue_list_open"
-            | "issue_get"
-            | "issue_add_label"
-            | "alert_list_open"
-            | "pr_post_comment"
-            | "pr_create_backport"
-    )
-}
-
-/// User is continuing a batch open-PR sweep, not drilling into one PR.
-fn is_pr_sweep_continuation(user_message: &str) -> bool {
-    let lower = user_message.trim().to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "继续" | "continue" | "next" | "next pr" | "go on"
-    ) || lower.starts_with("继续")
-        || lower.contains("next pr")
-        || lower.contains("another pr")
-        || lower.contains("find another")
-}
-
-/// PR the user is intentionally investigating (not open-list sweep).
-fn explicit_investigation_pr(user_message: &str, focus_pr: Option<u32>) -> Option<u32> {
-    if let Some(n) = infer_pr_number_from_text(user_message) {
-        return Some(n);
-    }
-    if is_pr_sweep_continuation(user_message) {
-        return None;
-    }
-    focus_pr
-}
-
-/// PRs already present in successful tool results (this turn or packed history).
-fn prs_already_fetched_for_tool(context: &[LlmTurnMessage], tool_name: &str) -> HashSet<u32> {
-    let paren_prefix = format!("tool_result({tool_name}");
-    let bracket_prefix = format!("[tool_result {tool_name}]");
-    let mut fetched = HashSet::new();
-    for msg in context {
-        if msg.role == "tool" {
-            if msg.tool_name.as_deref() == Some(tool_name) {
-                let body = crate::agent::context::split_tool_transcript(&msg.content)
-                    .map(|(_, b)| b)
-                    .unwrap_or_else(|| msg.content.clone());
-                if let Some(n) = pr_number_from_tool_result_body(&body) {
-                    fetched.insert(n);
-                }
-            }
-            continue;
-        }
-        let content = &msg.content;
-        if content.starts_with(&paren_prefix) {
-            if let Some(n) = pr_number_from_tool_result_header(content, tool_name) {
-                fetched.insert(n);
-                continue;
-            }
-            if let Some(n) = pr_number_from_tool_result_body(content) {
-                fetched.insert(n);
-            }
-        } else if content.starts_with(&bracket_prefix) {
-            if let Some(n) = pr_number_from_tool_result_body(content) {
-                fetched.insert(n);
-            }
-        }
-    }
-    fetched
-}
-
-fn pr_number_from_tool_result_header(content: &str, tool_name: &str) -> Option<u32> {
-    let prefix = format!("tool_result({tool_name}, pr_number=");
-    let rest = content.strip_prefix(&prefix)?;
-    let digits = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>();
-    digits.parse().ok()
-}
-
-fn pr_number_from_tool_result_body(content: &str) -> Option<u32> {
-    let body = content
-        .split_once('\n')
-        .map(|(_, body)| body)
-        .unwrap_or(content);
-    first_pr_number_in_text(body).or_else(|| pr_number_from_repo_hash(body))
-}
-
-fn pr_number_from_repo_hash(text: &str) -> Option<u32> {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'#' {
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > start && i > 0 {
-                let prev = bytes[i - 1];
-                if prev == b'/' || prev.is_ascii_alphanumeric() || prev == b'-' || prev == b'_' {
-                    if let Ok(n) = text[start..j].parse::<u32>() {
-                        return Some(n);
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-fn fetched_prs_from_records(
-    tool_name: &str,
-    records: &HashMap<String, ToolExecRecord>,
-) -> HashSet<u32> {
-    let prefix = format!("{tool_name}:");
-    let mut fetched = HashSet::new();
-    for (fp, record) in records {
-        if !record.succeeded || !fp.starts_with(&prefix) {
-            continue;
-        }
-        if let Some(n) = pr_number_from_tool_fingerprint(fp) {
-            fetched.insert(n);
-        }
-    }
-    fetched
-}
-
-fn pr_number_from_tool_fingerprint(fingerprint: &str) -> Option<u32> {
-    fingerprint
-        .split("pr_number=")
-        .nth(1)?
-        .split([',', ' '])
-        .next()?
-        .parse()
-        .ok()
-}
-
-fn combined_fetched_prs(
-    context: &[LlmTurnMessage],
-    tool_name: &str,
-    turn_fetched: &HashSet<u32>,
-    turn_records: &HashMap<String, ToolExecRecord>,
-) -> HashSet<u32> {
-    let mut combined = prs_already_fetched_for_tool(context, tool_name);
-    combined.extend(turn_fetched);
-    combined.extend(fetched_prs_from_records(tool_name, turn_records));
-    combined
-}
-
-/// When the model repeats a PR we already have, advance to the next open-list PR.
-fn redirect_stale_pr_number(
-    tool_name: &str,
-    tool_args: &mut Value,
-    context: &[LlmTurnMessage],
-    fetched_prs: &HashSet<u32>,
-    user_message: &str,
-    focus_pr: Option<u32>,
-) -> bool {
-    if !tool_requires_pr_number(tool_name) {
-        return false;
-    }
-    let Some(n) = normalized_pr_number(tool_args) else {
-        return false;
-    };
-    if explicit_investigation_pr(user_message, focus_pr) == Some(n) {
-        return false;
-    }
-    if !fetched_prs.contains(&n) {
-        return false;
-    }
-    let Some(next) = infer_next_pr_from_open_list(context, fetched_prs) else {
-        return false;
-    };
-    if next == n {
-        return false;
-    }
-    tracing::debug!("redirect {tool_name} pr_number {n} -> {next} (already in context)");
-    tool_args["pr_number"] = json!(next);
-    true
-}
-
-/// When the model repeats a PR tool that already succeeded, advance to the next open-list PR
-/// instead of blocking — only block when the open list is exhausted.
-fn resolve_duplicate_pr_tool_by_advancing(
-    tool_name: &str,
-    tool_args: &mut Value,
-    context: &[LlmTurnMessage],
-    fetched_prs: &HashSet<u32>,
-    records: &HashMap<String, ToolExecRecord>,
-) -> bool {
-    if !tool_requires_pr_number(tool_name) {
-        return false;
-    }
-    let mut advanced = false;
-    let mut fetched = fetched_prs.clone();
-    for _ in 0..48 {
-        normalize_pr_tool_args(tool_name, tool_args);
-        let fingerprint = tool_call_fingerprint(tool_name, tool_args);
-        let Some(DuplicateToolBlock::AlreadySucceeded) =
-            duplicate_tool_block_reason(records.get(&fingerprint))
-        else {
-            break;
-        };
-        let current = normalized_pr_number(tool_args);
-        let Some(next) = infer_next_pr_from_open_list(context, &fetched) else {
-            break;
-        };
-        if Some(next) == current {
-            break;
-        }
-        if let Some(current) = current {
-            fetched.insert(current);
-        }
-        tracing::debug!(
-            "auto-advance duplicate {tool_name} pr_number {:?} -> {next}",
-            current
-        );
-        tool_args["pr_number"] = json!(next);
-        fetched.insert(next);
-        advanced = true;
-    }
-    advanced
-}
-
-fn latest_pr_list_open_body(context: &[LlmTurnMessage]) -> Option<String> {
-    for msg in context.iter().rev() {
-        if !is_pr_list_open_result(&msg.content) {
-            continue;
-        }
-        let body = msg.content.lines().skip(1).collect::<Vec<_>>().join("\n");
-        if !body.trim().is_empty() {
-            return Some(body);
-        }
-    }
-    None
-}
-
-fn is_pr_list_open_result(content: &str) -> bool {
-    content.starts_with("tool_result(pr_list_open):")
-        || content.starts_with("[tool_result pr_list_open]")
-}
-
-/// First PR from the latest `pr_list_open` result not yet fetched this turn.
-fn infer_next_pr_from_open_list(context: &[LlmTurnMessage], fetched: &HashSet<u32>) -> Option<u32> {
-    let body = latest_pr_list_open_body(context)?;
-    for line in body.lines() {
-        if let Some(pr) = parse_pr_line(line.trim()) {
-            if !fetched.contains(&pr.number) {
-                return Some(pr.number);
-            }
-        }
-    }
-    None
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ToolExecRecord {
     succeeded: bool,
@@ -2083,10 +1588,6 @@ fn tool_output_indicates_failure(tool_name: &str, output: &str) -> bool {
     crate::agent::context::tool_body_header_indicates_failure(output)
 }
 
-fn is_plausible_github_run_id(run_id: i64) -> bool {
-    run_id >= 100_000
-}
-
 fn tool_requires_pr_number(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -2097,64 +1598,6 @@ fn tool_requires_pr_number(tool_name: &str) -> bool {
             | "pr_get_diff"
             | "ci_analyze_pr_failures"
     )
-}
-
-fn missing_required_tool_hint(
-    catalog: &tool_catalog::ToolCatalog<'_>,
-    user_message: &str,
-    tool_name: &str,
-    tool_args: &Value,
-) -> Option<String> {
-    let url_repo = repo_from_github_pr_url(user_message);
-    let url_pr = infer_pr_number_from_text(user_message);
-    let pr_s = url_pr.map(|n| n.to_string());
-
-    if tool_name == "tool_call" {
-        if tool_args
-            .get("name")
-            .and_then(Value::as_str)
-            .is_none_or(|s| s.trim().is_empty())
-        {
-            return Some(catalog.format_tool_args_nudge(tool_name, "name", None, None));
-        }
-        if !tool_args.get("args").is_some_and(Value::is_object) {
-            return Some(catalog.format_tool_args_nudge(tool_name, "args", None, None));
-        }
-        return None;
-    }
-
-    if tool_requires_repo(tool_name)
-        && tool_args
-            .get("repo")
-            .and_then(|v| v.as_str())
-            .is_none_or(|s| s.is_empty())
-    {
-        return Some(catalog.format_tool_args_nudge(tool_name, "repo", None, url_repo.as_deref()));
-    }
-    if tool_requires_pr_number(tool_name) && tool_arg_u64(tool_args, "pr_number").is_none() {
-        return Some(catalog.format_tool_args_nudge(
-            tool_name,
-            "pr_number",
-            pr_s.as_deref(),
-            url_repo.as_deref(),
-        ));
-    }
-    if matches!(
-        tool_name,
-        "ci_get_run_summary" | "ci_get_failed_logs" | "ci_rerun_workflow"
-    ) && !tool_args
-        .get("run_id")
-        .and_then(|v| v.as_i64())
-        .is_some_and(is_plausible_github_run_id)
-    {
-        return Some(catalog.format_tool_args_nudge(
-            tool_name,
-            "run_id",
-            None,
-            url_repo.as_deref(),
-        ));
-    }
-    None
 }
 
 fn tool_call_names(tool_calls: &[ToolCallSummary]) -> Vec<&str> {
@@ -2254,75 +1697,6 @@ fn ci_analyze_lacks_runs(output: &str) -> bool {
         return true;
     }
     false
-}
-
-/// PR number from `github.com/owner/repo/pull/19272` (no `#` required).
-fn pr_number_from_github_pr_url(text: &str) -> Option<u32> {
-    let lower = text.to_ascii_lowercase();
-    for marker in ["/pull/", "/pulls/"] {
-        let mut search_from = 0;
-        while let Some(rel) = lower[search_from..].find(marker) {
-            let idx = search_from + rel + marker.len();
-            let digits: String = text[idx..]
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if !digits.is_empty() {
-                if let Ok(n) = digits.parse::<u32>() {
-                    if n > 0 {
-                        return Some(n);
-                    }
-                }
-            }
-            search_from = idx.saturating_add(1);
-        }
-    }
-    None
-}
-
-fn infer_pr_number_from_text(text: &str) -> Option<u32> {
-    pr_number_from_github_pr_url(text)
-        .or_else(|| first_pr_number_in_text(text))
-        .or_else(|| infer_pr_number_jsonish(text))
-}
-
-/// `owner/repo` from a GitHub PR URL in the user message (not inferred from tool context).
-fn repo_from_github_pr_url(text: &str) -> Option<String> {
-    let lower = text.to_ascii_lowercase();
-    let idx = lower.find("github.com/")?;
-    let rest = &text[idx + "github.com/".len()..];
-    let owner = rest.split('/').next()?.trim();
-    if owner.is_empty() {
-        return None;
-    }
-    let after_owner = rest.get(owner.len() + 1..)?;
-    let repo = after_owner.split(['/', '?', '#']).next()?.trim();
-    if repo.is_empty() {
-        return None;
-    }
-    Some(format!("{owner}/{repo}"))
-}
-
-fn infer_pr_number_jsonish(text: &str) -> Option<u32> {
-    for needle in ["\"pr_number\":", "\"pr_number\" :", "pr_number="] {
-        let Some(idx) = text.find(needle) else {
-            continue;
-        };
-        let rest = &text[idx + needle.len()..];
-        let digits: String = rest
-            .chars()
-            .skip_while(|c| !c.is_ascii_digit())
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if digits.len() >= 3 {
-            if let Ok(n) = digits.parse::<u32>() {
-                if n > 0 {
-                    return Some(n);
-                }
-            }
-        }
-    }
-    None
 }
 
 fn maybe_push_tool_failure_harness_nudge(
@@ -2497,140 +1871,6 @@ async fn harness_retry_or_stop(
     Ok(*harness_corrections > MAX_HARNESS_CORRECTIONS)
 }
 
-fn infer_latest_pr_from_context(context: &[LlmTurnMessage]) -> Option<u32> {
-    for msg in context.iter().rev() {
-        if let Some(n) = first_pr_number_in_text(&msg.content) {
-            return Some(n);
-        }
-    }
-    None
-}
-
-fn first_pr_number_in_text(text: &str) -> Option<u32> {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'#' {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i > start {
-                if let Ok(n) = text[start..i].parse::<u32>() {
-                    return Some(n);
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-    None
-}
-
-/// User asked for the newest open PR without an explicit `#N` — prefetch list + overview.
-fn should_bootstrap_latest_pr(user_message: &str) -> bool {
-    if infer_pr_number_from_text(user_message).is_some() {
-        return false;
-    }
-    let lower = user_message.to_ascii_lowercase();
-    let mentions_pr =
-        lower.contains("pr") || lower.contains("pull request") || lower.contains("pull-request");
-    if !mentions_pr {
-        return false;
-    }
-    lower.contains("latest")
-        || lower.contains("newest")
-        || lower.contains("most recent")
-        || (lower.contains("recent") && lower.contains("open"))
-}
-
-/// Execute a read-only MCP tool from the harness (bootstrap or future prefetch).
-#[allow(clippy::too_many_arguments)]
-async fn harness_execute_readonly_tool(
-    store: &dyn Store,
-    mcp: &dyn McpClient,
-    session_id: &Uuid,
-    progress: &Option<broadcast::Sender<AppEvent>>,
-    cancel: &Option<Arc<AtomicBool>>,
-    tool_name: &str,
-    mut tool_args: Value,
-    llm_messages: &mut Vec<LlmTurnMessage>,
-    tool_calls: &mut Vec<ToolCallSummary>,
-    tool_exec_records: &mut HashMap<String, ToolExecRecord>,
-    fetched_prs_by_tool: &mut HashMap<String, HashSet<u32>>,
-) -> Result<bool> {
-    normalize_pr_tool_args(tool_name, &mut tool_args);
-    let fingerprint = tool_call_fingerprint(tool_name, &tool_args);
-    if duplicate_tool_block_reason(tool_exec_records.get(&fingerprint)).is_some() {
-        return Ok(false);
-    }
-
-    ensure_chat_not_cancelled(cancel)?;
-    let args_short = format_tool_args_short(&tool_args);
-    emit_progress(
-        progress,
-        ChatProgress::ToolStart {
-            name: tool_name.to_string(),
-            args_short,
-        },
-    );
-    let tool_start = Instant::now();
-    let result = race_chat_cancel(
-        cancel.clone(),
-        execute_readonly_tool(store, mcp, tool_name, tool_args.clone()),
-    )
-    .await?;
-    let (output, ok) = match result {
-        Ok(o) if tool_output_indicates_failure(tool_name, &o) => (o, false),
-        Ok(o) => (o, true),
-        Err(e) => (format!("tool error: {e}"), false),
-    };
-    let ctx = format_tool_context_message(tool_name, &tool_args, ok, &output);
-    emit_progress(
-        progress,
-        ChatProgress::ToolDone {
-            name: tool_name.to_string(),
-            args_short: format_tool_args_short(&tool_args),
-            ok,
-            elapsed_ms: tool_start.elapsed().as_millis(),
-            output_preview: crate::agent::context::truncate_chars(&ctx, 6_000),
-        },
-    );
-    tool_calls.push(ToolCallSummary {
-        tool_name: tool_name.to_string(),
-        output: ctx.clone(),
-    });
-    let record = tool_exec_records
-        .entry(fingerprint)
-        .or_insert(ToolExecRecord {
-            succeeded: false,
-            fail_count: 0,
-        });
-    if ok {
-        record.succeeded = true;
-        if let Some(n) = normalized_pr_number(&tool_args) {
-            fetched_prs_by_tool
-                .entry(tool_name.to_string())
-                .or_default()
-                .insert(n);
-        }
-    } else {
-        record.fail_count += 1;
-    }
-    append_message(
-        store,
-        session_id,
-        ChatRole::Tool,
-        &ctx,
-        Some(tool_name),
-        Some(tool_args.to_string()),
-    )
-    .await?;
-    llm_messages.push(LlmTurnMessage::tool_result(tool_name, ctx));
-    Ok(ok)
-}
-
 fn push_native_assistant_tool_call(
     messages: &mut Vec<LlmTurnMessage>,
     step: &ChatAgentStep,
@@ -2649,86 +1889,6 @@ fn push_native_assistant_tool_call(
             arguments: tool_args.clone(),
         }],
     ));
-}
-
-/// Harness A2: `latest PR` without `#N` → `pr_list_open` then `pr_get_overview` (newest first).
-#[allow(clippy::too_many_arguments)]
-async fn bootstrap_latest_pr_chain(
-    config: &Config,
-    user_message: &str,
-    catalog: &tool_catalog::ToolCatalog<'_>,
-    store: &dyn Store,
-    mcp: &dyn McpClient,
-    session_id: &Uuid,
-    progress: &Option<broadcast::Sender<AppEvent>>,
-    cancel: &Option<Arc<AtomicBool>>,
-    llm_messages: &mut Vec<LlmTurnMessage>,
-    tool_calls: &mut Vec<ToolCallSummary>,
-    tool_exec_records: &mut HashMap<String, ToolExecRecord>,
-    fetched_prs_by_tool: &mut HashMap<String, HashSet<u32>>,
-    investigation_pr: &mut Option<u32>,
-) -> Result<u32> {
-    if !should_bootstrap_latest_pr(user_message) {
-        return Ok(0);
-    }
-    if !catalog.is_known_chat_tool("pr_list_open") || !catalog.is_known_chat_tool("pr_get_overview")
-    {
-        return Ok(0);
-    }
-
-    let mut list_args = json!({});
-    let Some(repo) = config.repos.first().cloned() else {
-        tracing::debug!("latest-PR bootstrap skipped: no repos in config");
-        return Ok(0);
-    };
-    list_args["repo"] = json!(repo);
-
-    tracing::info!("harness bootstrap: pr_list_open({repo}) for latest-PR query");
-    let list_ok = harness_execute_readonly_tool(
-        store,
-        mcp,
-        session_id,
-        progress,
-        cancel,
-        "pr_list_open",
-        list_args,
-        llm_messages,
-        tool_calls,
-        tool_exec_records,
-        fetched_prs_by_tool,
-    )
-    .await?;
-    if !list_ok {
-        return Ok(1);
-    }
-
-    let empty = HashSet::new();
-    let Some(pr) = infer_next_pr_from_open_list(llm_messages, &empty) else {
-        return Ok(1);
-    };
-
-    tracing::info!("harness bootstrap: pr_get_overview({repo}, {pr})");
-    let overview_args = json!({ "repo": repo, "pr_number": pr });
-    let overview_ok = harness_execute_readonly_tool(
-        store,
-        mcp,
-        session_id,
-        progress,
-        cancel,
-        "pr_get_overview",
-        overview_args,
-        llm_messages,
-        tool_calls,
-        tool_exec_records,
-        fetched_prs_by_tool,
-    )
-    .await?;
-    if overview_ok {
-        *investigation_pr = Some(pr);
-        Ok(2)
-    } else {
-        Ok(2)
-    }
 }
 
 async fn execute_readonly_tool(
@@ -2969,81 +2129,6 @@ mod tests {
     }
 
     #[test]
-    fn should_bootstrap_latest_pr_detects_intent() {
-        assert!(should_bootstrap_latest_pr(
-            "Analyze the latest PR in acme/widget"
-        ));
-        assert!(should_bootstrap_latest_pr(
-            "What is the newest pull request?"
-        ));
-        assert!(!should_bootstrap_latest_pr("Analyze PR #19235"));
-        assert!(!should_bootstrap_latest_pr("list all open PRs"));
-        assert!(!should_bootstrap_latest_pr("hello"));
-    }
-
-    #[test]
-    fn infer_latest_pr_from_tool_context() {
-        use crate::llm::LlmTurnMessage;
-        let ctx = vec![LlmTurnMessage::new(
-            "user",
-            "tool_result(pr_list_open):\n#19235 backport [acme/widget] ci:fail",
-        )];
-        assert_eq!(infer_latest_pr_from_context(&ctx), Some(19235));
-    }
-
-    #[test]
-    fn infer_pr_number_from_hash_token() {
-        assert_eq!(
-            infer_pr_number_from_text("analyze PR #19235 please"),
-            Some(19235)
-        );
-    }
-
-    #[test]
-    fn infer_pr_number_from_jsonish_params() {
-        assert_eq!(
-            infer_pr_number_from_text(r#"{"tool":"pr_get_overview","params":{"pr_number":19263}}"#),
-            Some(19263)
-        );
-    }
-
-    #[test]
-    fn missing_required_tool_hint_is_schema_only() {
-        let catalog = tool_catalog::ToolCatalog::full();
-        let hint = missing_required_tool_hint(
-            &catalog,
-            "unrelated question",
-            "pr_get_overview",
-            &json!({ "repo": "acme/widget" }),
-        )
-        .expect("hint");
-        assert!(hint.contains("pr_number"));
-        assert!(!hint.contains("19235"));
-        assert!(!hint.contains("Hint: set"));
-    }
-
-    #[test]
-    fn missing_required_tool_hint_uses_github_url_in_user_message() {
-        let catalog = tool_catalog::ToolCatalog::full();
-        let hint = missing_required_tool_hint(
-            &catalog,
-            "Read https://github.com/acme/widget/pull/18286",
-            "pr_get_overview",
-            &json!({ "repo": "acme/widget" }),
-        )
-        .expect("hint");
-        assert!(hint.contains("18286"));
-    }
-
-    #[test]
-    fn repo_from_github_pr_url_parses_owner_repo() {
-        assert_eq!(
-            repo_from_github_pr_url("see https://github.com/acme/widget/pull/18286"),
-            Some("acme/widget".into())
-        );
-    }
-
-    #[test]
     fn push_harness_nudge_replaces_instead_of_stacking() {
         let mut msgs = Vec::new();
         push_harness_nudge(
@@ -3181,13 +2266,6 @@ mod tests {
         let mut args = json!({ "pr_number": "19252", "repo": "o/r" });
         coerce_numeric_tool_args("pr_get_overview", &mut args);
         assert_eq!(args["pr_number"], json!(19252));
-        assert!(missing_required_tool_hint(
-            &tool_catalog::ToolCatalog::full(),
-            "summarize pr",
-            "pr_get_overview",
-            &args,
-        )
-        .is_none());
     }
 
     #[test]
@@ -3217,33 +2295,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_missing_hint_accepts_nested_args() {
-        assert!(missing_required_tool_hint(
-            &tool_catalog::ToolCatalog::full(),
-            "summarize pr",
-            "tool_call",
-            &json!({
-                "name": "pr_get_overview",
-                "args": { "repo": "o/r", "pr_number": 19263 }
-            }),
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn infer_pr_number_from_github_pull_url() {
-        assert_eq!(
-            infer_pr_number_from_text("see https://github.com/acme/widget/pull/19272"),
-            Some(19272)
-        );
-        assert_eq!(
-            infer_pr_number_from_text("https://github.com/acme/widget/pull/19272#issuecomment-1"),
-            Some(19272)
-        );
-    }
-
-    #[test]
-    fn redirect_stale_explicit_pr_number() {
+    fn format_tool_args_short_includes_fields() {
         let args = json!({
             "repo": "unistar-ai/unistar-coworker",
             "pr": 42,
@@ -3304,12 +2356,12 @@ mod tests {
             LlmTurnMessage::new("system", "You are helpful."),
             LlmTurnMessage::tool_result("pr_list_open", "#1 title"),
         ];
-        let snap = build_context_snapshot(&msgs, 2, 47_616, 64_000);
+        let snap = build_context_snapshot(&msgs, 2, 52_523, 64_000);
         assert_eq!(snap.message_count, 2);
         assert_eq!(snap.messages.len(), 2);
         assert_eq!(snap.turn, 2);
         assert_eq!(snap.context_limit, 64_000);
-        assert_eq!(snap.input_budget, 47_616);
+        assert_eq!(snap.input_budget, 52_523);
         assert!(snap.tokens_used > 0);
         assert_eq!(snap.messages[0].display_role, "system");
         assert_eq!(snap.messages[1].display_role, "tool");
@@ -3428,120 +2480,15 @@ mod tests {
 
     #[test]
     fn format_tool_args_short_truncates() {
-        use crate::llm::LlmTurnMessage;
-        let ctx = vec![LlmTurnMessage::new(
-            "user",
-            "tool_result(pr_list_open):\nopen PR(s) in acme/widget (2):\n\
-#19264  a  @x  CI:passing  review:none\n\
-#19263  b  @y  CI:passing  review:none",
-        )];
-        let fetched = HashSet::from([19264_u32]);
-        let mut args = json!({ "repo": "acme/widget", "pr_number": 19264 });
-        assert!(redirect_stale_pr_number(
-            "pr_list_changed_files",
-            &mut args,
-            &ctx,
-            &fetched,
-            "继续",
-            Some(19264),
-        ));
-        assert_eq!(args["pr_number"], json!(19263));
-    }
-
-    #[test]
-    fn redirect_stale_skipped_for_focused_investigation_pr() {
-        use crate::llm::LlmTurnMessage;
-        let ctx = vec![LlmTurnMessage::new(
-            "user",
-            "tool_result(pr_list_open):\nopen PR(s) in acme/widget (2):\n\
-#19853  a  @x  CI:passing  review:none\n\
-#19278  b  @y  CI:passing  review:none",
-        )];
-        let fetched = HashSet::from([19853_u32]);
-        let mut args = json!({ "repo": "acme/widget", "pr_number": 19853 });
-        assert!(!redirect_stale_pr_number(
-            "pr_get_diff",
-            &mut args,
-            &ctx,
-            &fetched,
-            "look at the specific code line changes",
-            Some(19853),
-        ));
-        assert_eq!(args["pr_number"], json!(19853));
-    }
-
-    #[test]
-    fn prs_already_fetched_seeded_from_context() {
-        use crate::llm::LlmTurnMessage;
-        let ctx = vec![LlmTurnMessage::new(
-            "user",
-            "tool_result(pr_list_changed_files):\nPR #19264 changed files\n- foo.rs",
-        )];
-        let seeded = prs_already_fetched_for_tool(&ctx, "pr_list_changed_files");
-        assert!(seeded.contains(&19264));
-        let combined = combined_fetched_prs(
-            &ctx,
-            "pr_list_changed_files",
-            &HashSet::new(),
-            &HashMap::new(),
-        );
-        assert!(combined.contains(&19264));
-    }
-
-    #[test]
-    fn prs_already_fetched_from_packed_history_bracket_format() {
-        use crate::llm::LlmTurnMessage;
-        let ctx = vec![LlmTurnMessage::new(
-            "user",
-            "[tool_result pr_list_changed_files]\n5 changed file(s) in acme/widget#19264:\n\
-foo.rs  +1/-0  (modified)",
-        )];
-        let seeded = prs_already_fetched_for_tool(&ctx, "pr_list_changed_files");
-        assert!(seeded.contains(&19264));
-    }
-
-    #[test]
-    fn prs_already_fetched_from_tool_result_header() {
-        use crate::llm::LlmTurnMessage;
-        let ctx = vec![LlmTurnMessage::new(
-            "user",
-            "tool_result(pr_list_changed_files, pr_number=19263):\n3 changed file(s)…",
-        )];
-        let seeded = prs_already_fetched_for_tool(&ctx, "pr_list_changed_files");
-        assert!(seeded.contains(&19263));
-    }
-
-    #[test]
-    fn resolve_duplicate_advances_to_next_pr() {
-        use crate::llm::LlmTurnMessage;
-        let ctx = vec![LlmTurnMessage::new(
-            "user",
-            "tool_result(pr_list_open):\nopen PR(s) in acme/widget (2):\n\
-#19264  a  @x  CI:passing  review:none\n\
-#19263  b  @y  CI:passing  review:none",
-        )];
-        let fp = tool_call_fingerprint(
-            "pr_list_changed_files",
-            &json!({"repo": "acme/widget", "pr_number": 19264}),
-        );
-        let mut records = HashMap::new();
-        records.insert(
-            fp,
-            ToolExecRecord {
-                succeeded: true,
-                fail_count: 0,
-            },
-        );
-        let fetched = HashSet::from([19264_u32]);
-        let mut args = json!({"repo": "acme/widget", "pr_number": 19264});
-        assert!(resolve_duplicate_pr_tool_by_advancing(
-            "pr_list_changed_files",
-            &mut args,
-            &ctx,
-            &fetched,
-            &records,
-        ));
-        assert_eq!(args["pr_number"], json!(19263));
+        let args = json!({
+            "repo": "unistar-ai/unistar-coworker",
+            "pr_number": 42,
+            "extra": "x"
+        });
+        let short = format_tool_args_short(&args);
+        assert!(short.contains("repo=unistar-ai/unistar-coworker"));
+        assert!(short.contains("pr_number=42"));
+        assert!(short.contains("extra=x"));
     }
 
     #[test]

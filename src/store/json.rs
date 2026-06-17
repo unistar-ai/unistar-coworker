@@ -489,7 +489,6 @@ impl Store for JsonStore {
             created_at: Utc::now(),
             title: title.unwrap_or("Chat").to_string(),
             repo_scope: repo_scope.map(str::to_string),
-            focus_pr: None,
         };
         let path = self
             .root
@@ -508,14 +507,6 @@ impl Store for JsonStore {
             return Ok(None);
         }
         Ok(Some(read_json(&path)?))
-    }
-
-    async fn update_chat_session(&self, session: &ChatSession) -> Result<()> {
-        let path = self
-            .root
-            .join("chat/sessions")
-            .join(format!("{}.json", session.id));
-        Self::write_json(&path, session)
     }
 
     async fn append_chat_message(&self, msg: &ChatMessage) -> Result<()> {

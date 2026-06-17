@@ -48,7 +48,7 @@ Capped unified diff (harness compresses per-file). Use after `pr_list_changed_fi
 |-------|----------|-------|
 | `repo` | yes | |
 | `pr_number` | yes | |
-| `max_bytes` | no | Max diff bytes returned (default **32000**) |
+| `max_bytes` | no | Max diff bytes returned (default **48000**) |
 
 ### `pr_list_open`
 Open PRs, newest first, one compact CI/review line each.

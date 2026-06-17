@@ -291,7 +291,7 @@ pub struct ChatConfig {
     pub llm_step_timeout_secs: u64,
     #[serde(default = "default_chat_history_messages")]
     pub history_messages: u32,
-    /// Max tokens for prior session turns in LLM context. 0 = auto (~25% of input budget).
+    /// Max tokens for prior session turns in LLM context. 0 = auto (~40% of input budget).
     #[serde(default)]
     pub history_tokens: u32,
     /// Read-only tools pre-registered for chat (MCP names + coworker virtual tools).
@@ -339,7 +339,7 @@ fn default_chat_llm_step_timeout_secs() -> u64 {
 }
 
 fn default_chat_history_messages() -> u32 {
-    12
+    24
 }
 
 pub fn default_chat_preferred_tools() -> Vec<String> {

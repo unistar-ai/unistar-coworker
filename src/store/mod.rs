@@ -62,7 +62,6 @@ pub trait Store: Send + Sync {
         repo_scope: Option<&str>,
     ) -> Result<ChatSession>;
     async fn get_chat_session(&self, id: &Uuid) -> Result<Option<ChatSession>>;
-    async fn update_chat_session(&self, session: &ChatSession) -> Result<()>;
     async fn append_chat_message(&self, msg: &ChatMessage) -> Result<()>;
     async fn update_chat_message(&self, msg: &ChatMessage) -> Result<()>;
     async fn list_chat_messages(&self, session_id: &Uuid, limit: usize) -> Result<Vec<ChatMessage>>;

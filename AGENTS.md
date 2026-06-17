@@ -68,7 +68,7 @@ Entry: [`src/engine/chat.rs`](./src/engine/chat.rs) → [`src/agent/chat_loop.rs
 
 Chat agent spec: [`agents/chat/AGENT.md`](./agents/chat/AGENT.md).
 
-Legacy JSON `action: reply | tool | approval` parsing remains in `llm/chat.rs` for classify workflow and salvage tests; **chat path uses native tool calls**.
+Legacy JSON `action: reply | tool | approval` has been removed; chat uses native `tools` / `tool_calls` only.
 
 ---
 
@@ -127,7 +127,7 @@ List agents/skills: `cargo run --release -- agents list` / `skills list`.
 - **Comments** — only for non-obvious harness invariants; prefer clear names.
 - **No new secrets** in repo; no real session dumps under `data/` in commits.
 - **Mutating behavior** — must stay behind approval unless config explicitly opts out.
-- **Context budget** — 64K-oriented; trimming in `trim_llm_messages` compresses old tool turns; harness nudges are protected from aggressive trim (`is_harness_nudge_content`).
+- **Context budget** — 64K-oriented; history uses ~40% of input; when over budget, older turns batch into one `[earlier context summary]` via LLM (`trim_llm_messages_with_llm`), then incremental trim if needed; harness nudges are never folded into summaries.
 
 When adding a chat tool to the whitelist, update: `TOOLS.md` (if documented), `tool_catalog.rs` `TOOLS` table, tests, and optionally `chat.preferred_tools` in example yaml.
 

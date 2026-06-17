@@ -292,9 +292,6 @@ pub struct ChatSession {
     pub title: String,
     #[serde(default)]
     pub repo_scope: Option<String>,
-    /// Most recently discussed PR in this session (for follow-up tool args).
-    #[serde(default)]
-    pub focus_pr: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

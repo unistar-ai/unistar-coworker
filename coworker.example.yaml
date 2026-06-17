@@ -132,8 +132,8 @@ chat:
   max_tool_calls: 0
   max_duration_secs: 900
   llm_step_timeout_secs: 180   # abort one LLM step if thinking/JSON stalls
-  history_messages: 12
-  history_tokens: 0          # 0 = auto (~25% of input budget for prior session turns)
+  history_messages: 24
+  history_tokens: 0          # 0 = auto (~40% of input budget for prior session turns)
   compress_reasoning: true   # summarize long thinking via fast think=false LLM call
   reasoning_compress_min_chars: 480
   # When true, mutating chat tools (rerun/backport/comment) run without the approval popup.
