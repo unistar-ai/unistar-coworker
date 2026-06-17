@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use crate::error::{CoworkerError, Result};
 use crate::mcp::helpers::warn_if_mcp_tools_missing;
 
-pub mod helpers;
 pub mod gh_query;
+pub mod helpers;
 mod subprocess;
 
 pub use subprocess::SubprocessMcp;

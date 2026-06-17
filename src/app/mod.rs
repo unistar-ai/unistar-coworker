@@ -7,8 +7,8 @@ use tokio::sync::broadcast;
 use crate::agent::chat_loop::{ChatProgress, ContextSnapshot};
 use crate::config::Config;
 use crate::store::{
-    Approval, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, Digest,
-    DigestMeta, FlakyTestRollup, IssueSnapshot, LogLine, MainAlert, PrSnapshot, Store,
+    Approval, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, Digest, DigestMeta,
+    FlakyTestRollup, IssueSnapshot, LogLine, MainAlert, PrSnapshot, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,7 +183,9 @@ pub enum AppEvent {
     StoreUpdated,
     DigestReady(Digest),
     LogLine(LogLine),
-    WorkflowStarted { workflow_id: String },
+    WorkflowStarted {
+        workflow_id: String,
+    },
     WorkflowFinished {
         workflow_id: String,
         ok: bool,
@@ -436,10 +438,8 @@ impl AppState {
                 } else {
                     ("✗", "denied")
                 };
-                self.chat_lines[pending.line_index] = format!(
-                    "  {mark} approval {verb}: {}",
-                    pending.tool_name
-                );
+                self.chat_lines[pending.line_index] =
+                    format!("  {mark} approval {verb}: {}", pending.tool_name);
                 self.chat_pending_approval = None;
                 self.bump_chat_render();
             }
@@ -464,12 +464,7 @@ impl AppState {
         self.approval_dialog.is_some() || self.chat_approval_target_id().is_some()
     }
 
-    pub fn open_approval_dialog(
-        &mut self,
-        id: uuid::Uuid,
-        tool_name: String,
-        description: String,
-    ) {
+    pub fn open_approval_dialog(&mut self, id: uuid::Uuid, tool_name: String, description: String) {
         if self.approval_decision_in_flight.is_some() {
             return;
         }
@@ -484,11 +479,7 @@ impl AppState {
 
     pub fn open_approval_dialog_from(&mut self, approval: &crate::store::Approval) {
         let tool_name = approval_tool_name_for_kind(&approval.kind);
-        self.open_approval_dialog(
-            approval.id,
-            tool_name,
-            approval.description.clone(),
-        );
+        self.open_approval_dialog(approval.id, tool_name, approval.description.clone());
     }
 
     pub fn close_approval_dialog(&mut self) {
@@ -605,9 +596,6 @@ impl AppState {
 
     pub fn set_chat_reasoning_compressing(&mut self, active: bool) {
         self.chat_reasoning_compressing = active;
-        if active {
-            self.chat_reasoning = None;
-        }
         self.bump_chat_render();
     }
 
@@ -631,9 +619,8 @@ impl AppState {
 
     pub fn scroll_focused_chat_pane_line_up(&mut self) {
         if self.chat_pane_focus_is_context() {
-            self.chat_context_scroll_from_bottom = self
-                .chat_context_scroll_from_bottom
-                .saturating_add(1);
+            self.chat_context_scroll_from_bottom =
+                self.chat_context_scroll_from_bottom.saturating_add(1);
         } else {
             self.chat_scroll_from_bottom = self.chat_scroll_from_bottom.saturating_add(1);
         }
@@ -641,9 +628,8 @@ impl AppState {
 
     pub fn scroll_focused_chat_pane_line_down(&mut self) {
         if self.chat_pane_focus_is_context() {
-            self.chat_context_scroll_from_bottom = self
-                .chat_context_scroll_from_bottom
-                .saturating_sub(1);
+            self.chat_context_scroll_from_bottom =
+                self.chat_context_scroll_from_bottom.saturating_sub(1);
         } else {
             self.chat_scroll_from_bottom = self.chat_scroll_from_bottom.saturating_sub(1);
         }
@@ -652,9 +638,8 @@ impl AppState {
     pub fn scroll_focused_chat_pane_page_up(&mut self) {
         const PAGE: u16 = 8;
         if self.chat_pane_focus_is_context() {
-            self.chat_context_scroll_from_bottom = self
-                .chat_context_scroll_from_bottom
-                .saturating_add(PAGE);
+            self.chat_context_scroll_from_bottom =
+                self.chat_context_scroll_from_bottom.saturating_add(PAGE);
         } else {
             self.chat_scroll_from_bottom = self.chat_scroll_from_bottom.saturating_add(PAGE);
         }
@@ -663,9 +648,8 @@ impl AppState {
     pub fn scroll_focused_chat_pane_page_down(&mut self) {
         const PAGE: u16 = 8;
         if self.chat_pane_focus_is_context() {
-            self.chat_context_scroll_from_bottom = self
-                .chat_context_scroll_from_bottom
-                .saturating_sub(PAGE);
+            self.chat_context_scroll_from_bottom =
+                self.chat_context_scroll_from_bottom.saturating_sub(PAGE);
         } else {
             self.chat_scroll_from_bottom = self.chat_scroll_from_bottom.saturating_sub(PAGE);
         }
@@ -842,7 +826,10 @@ pub fn event_channel() -> (broadcast::Sender<AppEvent>, broadcast::Receiver<AppE
     broadcast::channel(256)
 }
 
-pub async fn hydrate_from_store(state: &SharedState, store: &dyn Store) -> crate::error::Result<()> {
+pub async fn hydrate_from_store(
+    state: &SharedState,
+    store: &dyn Store,
+) -> crate::error::Result<()> {
     let digest = store.latest_digest().await?;
     let recent_digests = store.list_digests(20).await?;
     let digest_history: Vec<DigestMeta> = recent_digests.iter().map(|d| d.meta()).collect();
@@ -917,17 +904,26 @@ pub fn chat_message_display_line(msg: &ChatMessage) -> String {
             }
         }
         ChatRole::Harness => {
-            let preview = msg
-                .content
-                .lines()
-                .next()
-                .unwrap_or(&msg.content);
+            let preview = msg.content.lines().next().unwrap_or(&msg.content);
             let preview = if preview.chars().count() > 100 {
                 format!("{}…", preview.chars().take(100).collect::<String>())
             } else {
                 preview.to_string()
             };
             format!("  ⚠ harness: {preview}")
+        }
+        ChatRole::Reasoning => {
+            let body = crate::agent::context::strip_reasoning_summary_marker(&msg.content);
+            let preview = body
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or(body);
+            let preview = if preview.chars().count() > 100 {
+                format!("{}…", preview.chars().take(100).collect::<String>())
+            } else {
+                preview.to_string()
+            };
+            format!("  … reasoning: {preview}")
         }
     }
 }
@@ -941,6 +937,9 @@ pub async fn load_chat_session_ui(
     state.clear_chat_transcript();
     state.chat_session_id = Some(session_id);
     for msg in messages {
+        if msg.role == ChatRole::Reasoning {
+            continue;
+        }
         if msg.role == ChatRole::Tool {
             let idx = state.chat_lines.len();
             state.push_chat_line(chat_message_display_line(&msg));
@@ -1055,5 +1054,23 @@ diff --git a/x.go b/x.go\n\
             tool_calls_json: None,
         };
         assert!(chat_message_display_line(&msg).starts_with("  ✗ "));
+    }
+
+    #[test]
+    fn chat_message_display_line_reasoning_summary() {
+        let msg = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            role: ChatRole::Reasoning,
+            content: "[agent reasoning summary]\n\nChecked CI on PR #42.".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+        };
+        let line = chat_message_display_line(&msg);
+        assert!(
+            line.starts_with("  … reasoning: Checked CI on PR #42."),
+            "got: {line}"
+        );
     }
 }

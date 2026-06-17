@@ -80,9 +80,9 @@ pub async fn process_decision(
 }
 
 async fn execute_rerun(mcp: &dyn McpClient, item: &crate::store::Approval) -> Result<String> {
-    let run_id = item.run_id.ok_or_else(|| {
-        CoworkerError::Workflow("rerun approval missing run_id".into())
-    })?;
+    let run_id = item
+        .run_id
+        .ok_or_else(|| CoworkerError::Workflow("rerun approval missing run_id".into()))?;
     let repo = crate::agent::chat_loop::sanitize_repo_string(&item.repo);
     let output = lazy_tool(
         mcp,
@@ -99,12 +99,13 @@ async fn execute_rerun(mcp: &dyn McpClient, item: &crate::store::Approval) -> Re
 }
 
 async fn execute_backport(mcp: &dyn McpClient, item: &crate::store::Approval) -> Result<String> {
-    let pr_number = item.pr_number.ok_or_else(|| {
-        CoworkerError::Workflow("backport approval missing pr_number".into())
-    })?;
-    let target_branch = item.target_branch.as_deref().ok_or_else(|| {
-        CoworkerError::Workflow("backport approval missing target_branch".into())
-    })?;
+    let pr_number = item
+        .pr_number
+        .ok_or_else(|| CoworkerError::Workflow("backport approval missing pr_number".into()))?;
+    let target_branch = item
+        .target_branch
+        .as_deref()
+        .ok_or_else(|| CoworkerError::Workflow("backport approval missing target_branch".into()))?;
     let output = lazy_tool(
         mcp,
         "pr_create_backport",
@@ -125,10 +126,13 @@ async fn execute_backport(mcp: &dyn McpClient, item: &crate::store::Approval) ->
     ))
 }
 
-async fn execute_post_comment(mcp: &dyn McpClient, item: &crate::store::Approval) -> Result<String> {
-    let pr_number = item.pr_number.ok_or_else(|| {
-        CoworkerError::Workflow("post comment approval missing pr_number".into())
-    })?;
+async fn execute_post_comment(
+    mcp: &dyn McpClient,
+    item: &crate::store::Approval,
+) -> Result<String> {
+    let pr_number = item
+        .pr_number
+        .ok_or_else(|| CoworkerError::Workflow("post comment approval missing pr_number".into()))?;
     let body = item.comment_body.as_deref().ok_or_else(|| {
         CoworkerError::Workflow("post comment approval missing comment_body".into())
     })?;
@@ -147,7 +151,10 @@ async fn execute_post_comment(mcp: &dyn McpClient, item: &crate::store::Approval
             "pr_post_comment failed: {output}"
         )));
     }
-    Ok(format!("comment posted on {}/#{}: {output}", item.repo, pr_number))
+    Ok(format!(
+        "comment posted on {}/#{}: {output}",
+        item.repo, pr_number
+    ))
 }
 
 async fn mark_backport_status(
@@ -164,9 +171,10 @@ async fn mark_backport_status(
         None => return Ok(()),
     };
     let queue = store.list_backport_queue(Some(&item.repo)).await?;
-    if let Some(mut entry) = queue.into_iter().find(|q| {
-        q.pr_number == pr_number && q.target_branch == target_branch
-    }) {
+    if let Some(mut entry) = queue
+        .into_iter()
+        .find(|q| q.pr_number == pr_number && q.target_branch == target_branch)
+    {
         entry.status = status;
         entry.updated_at = chrono::Utc::now();
         store.upsert_backport_queue(&entry).await?;

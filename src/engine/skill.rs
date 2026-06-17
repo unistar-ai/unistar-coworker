@@ -62,9 +62,8 @@ pub fn load_agent_with_base(path: impl AsRef<Path>) -> Result<AgentSpec> {
 
 pub fn load_markdown_spec(path: impl AsRef<Path>) -> Result<MarkdownSpec> {
     let path = path.as_ref();
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        CoworkerError::Workflow(format!("read spec {}: {e}", path.display()))
-    })?;
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| CoworkerError::Workflow(format!("read spec {}: {e}", path.display())))?;
     parse_markdown_spec(&raw)
 }
 

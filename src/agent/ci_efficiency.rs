@@ -67,7 +67,9 @@ pub async fn run_ci_efficiency(
         let mut by_workflow: HashMap<String, WorkflowStats> = HashMap::new();
         for run in &runs {
             let c = run.conclusion.to_ascii_lowercase();
-            if c.is_empty() || matches!(c.as_str(), "in_progress" | "queued" | "waiting" | "pending") {
+            if c.is_empty()
+                || matches!(c.as_str(), "in_progress" | "queued" | "waiting" | "pending")
+            {
                 continue;
             }
             let entry = by_workflow.entry(run.workflow.clone()).or_default();
@@ -99,7 +101,10 @@ pub async fn run_ci_efficiency(
             let rate = if stats.runs == 0 {
                 "—".into()
             } else {
-                format!("{:.0}%", 100.0 * f64::from(stats.failures) / f64::from(stats.runs))
+                format!(
+                    "{:.0}%",
+                    100.0 * f64::from(stats.failures) / f64::from(stats.runs)
+                )
             };
             digest.push_report_line(&format!(
                 "| {name} | {} | {} | {rate} |",
@@ -118,10 +123,7 @@ pub async fn run_ci_efficiency(
 }
 
 /// Build CI efficiency markdown without publishing a digest (for `report ci`).
-pub async fn build_ci_efficiency_markdown(
-    config: &Config,
-    mcp: &dyn McpClient,
-) -> Result<String> {
+pub async fn build_ci_efficiency_markdown(config: &Config, mcp: &dyn McpClient) -> Result<String> {
     if !mcp.is_available() {
         return Err(CoworkerError::Workflow(
             "unistar-mcp is required for CI report".into(),
@@ -147,10 +149,7 @@ pub async fn build_ci_efficiency_markdown(
         for run in &runs {
             let c = run.conclusion.to_ascii_lowercase();
             if c.is_empty()
-                || matches!(
-                    c.as_str(),
-                    "in_progress" | "queued" | "waiting" | "pending"
-                )
+                || matches!(c.as_str(), "in_progress" | "queued" | "waiting" | "pending")
             {
                 continue;
             }
@@ -180,7 +179,10 @@ pub async fn build_ci_efficiency_markdown(
             let rate = if stats.runs == 0 {
                 "—".into()
             } else {
-                format!("{:.0}%", 100.0 * f64::from(stats.failures) / f64::from(stats.runs))
+                format!(
+                    "{:.0}%",
+                    100.0 * f64::from(stats.failures) / f64::from(stats.runs)
+                )
             };
             out.push_str(&format!(
                 "| {name} | {} | {} | {rate} |\n",

@@ -22,15 +22,13 @@ static PR_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^#(\d+)\s+(.+?)\s+@(\S+)\s+CI:(\S+)\s+review:(\S+)(.*)$").unwrap()
 });
 
-static SIMPLE_PR_LINE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^#(\d+)\s+(.+?)\s+@(\S+)\s+(?:updated|merged):").unwrap()
-});
+static SIMPLE_PR_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^#(\d+)\s+(.+?)\s+@(\S+)\s+(?:updated|merged):").unwrap());
 
 static RUN_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d+)\s+(.+?)\s+(\S+)\s*$").unwrap());
 
-static BRANCH_HEADER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^branch:\s+(\S+)").unwrap());
+static BRANCH_HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^branch:\s+(\S+)").unwrap());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedBranchRun {
@@ -182,9 +180,7 @@ pub fn parse_failing_runs(text: &str) -> Vec<ParsedRunLine> {
 /// Reuse the failing-runs block from `pr_get_overview` to skip a separate analyze call.
 pub fn extract_failing_runs_from_overview(overview: &str) -> Option<String> {
     if overview.contains("Failing CI runs: none") {
-        return Some(
-            "No failing GitHub Actions runs (from pr_get_overview).".to_string(),
-        );
+        return Some("No failing GitHub Actions runs (from pr_get_overview).".to_string());
     }
     for (i, line) in overview.lines().enumerate() {
         if line.contains(" failing run(s) for PR #") {
@@ -270,7 +266,8 @@ mod tests {
 
     #[test]
     fn extract_failing_runs_from_overview_section() {
-        let overview = "PR #1 title\nFiles: 2\n2 failing run(s) for PR #1 @abc1234:\n123  wf  failure\n";
+        let overview =
+            "PR #1 title\nFiles: 2\n2 failing run(s) for PR #1 @abc1234:\n123  wf  failure\n";
         let section = extract_failing_runs_from_overview(overview).unwrap();
         let runs = parse_failing_runs(&section);
         assert_eq!(runs.len(), 1);
@@ -279,7 +276,8 @@ mod tests {
 
     #[test]
     fn merge_blockers_summary_parses_list() {
-        let text = "PR #1 t\nMergeable: no\nBlockers:\n- review required\n- CI failing: lint (failure)";
+        let text =
+            "PR #1 t\nMergeable: no\nBlockers:\n- review required\n- CI failing: lint (failure)";
         let s = merge_blockers_summary(text);
         assert!(s.contains("review required"));
         assert!(s.contains("CI failing"));
@@ -298,8 +296,7 @@ mod tests {
         let p = parse_pr_line("#1  feat  @bob  CI:passing  review:review-required").unwrap();
         assert!(ci_is_passing(&p.ci));
         assert!(is_review_required(&p.review));
-        let pending =
-            parse_pr_line("#2  feat  @bob  CI:pending  review:review-required").unwrap();
+        let pending = parse_pr_line("#2  feat  @bob  CI:pending  review:review-required").unwrap();
         assert!(!ci_is_passing(&pending.ci));
     }
 
@@ -321,10 +318,8 @@ mod tests {
 
     #[test]
     fn parse_issue() {
-        let i = parse_issue_line(
-            "#99  bug report  @bob  labels:bug,p1  updated:2026-06-12",
-        )
-        .unwrap();
+        let i =
+            parse_issue_line("#99  bug report  @bob  labels:bug,p1  updated:2026-06-12").unwrap();
         assert_eq!(i.number, 99);
         assert_eq!(i.author, "bob");
     }

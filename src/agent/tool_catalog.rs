@@ -256,7 +256,7 @@ impl<'a> ToolCatalog<'a> {
     pub fn format_invalid_tool_nudge(&self, bad: &str) -> String {
         let suggestion = self.suggest_tool_name(bad);
         let mut out = format!(
-            "Invalid tool_name `{bad}`. Call one tool at a time — do not invent combined names."
+            "Invalid tool_name `{bad}`. Call tools via the native API — do not invent combined names."
         );
         if let Some(tool) = suggestion {
             out.push_str(&format!(
@@ -283,7 +283,9 @@ impl<'a> ToolCatalog<'a> {
             .map(String::as_str)
             .or_else(|| TOOLS.first().map(|t| t.name))
             .unwrap_or("pr_list_open");
-        let suggestion = self.suggest_tool_name(bad).unwrap_or_else(|| fallback.to_string());
+        let suggestion = self
+            .suggest_tool_name(bad)
+            .unwrap_or_else(|| fallback.to_string());
         format!(
             "Unknown tool_name `{bad}`. Did you mean `{suggestion}`? ({}){}{}",
             self.tool_blurb(&suggestion),
@@ -314,12 +316,7 @@ impl<'a> ToolCatalog<'a> {
         } else {
             None
         };
-        out.push_str(&self.format_tool_contract_block(
-            tool_name,
-            pr,
-            run_id,
-            example_repo,
-        ));
+        out.push_str(&self.format_tool_contract_block(tool_name, pr, run_id, example_repo));
         out.push_str(&self.preferred_summary_line());
         out
     }
@@ -335,11 +332,7 @@ impl<'a> ToolCatalog<'a> {
                 .get("pr_number")
                 .and_then(|v| {
                     v.as_u64()
-                        .or_else(|| {
-                            v.as_i64()
-                                .filter(|n| *n >= 0)
-                                .map(|n| n as u64)
-                        })
+                        .or_else(|| v.as_i64().filter(|n| *n >= 0).map(|n| n as u64))
                         .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
                 })
                 .is_some(),
@@ -400,13 +393,15 @@ impl<'a> ToolCatalog<'a> {
             .get("repo")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
-        let sent = serde_json::to_string_pretty(tool_args).unwrap_or_else(|_| tool_args.to_string());
+        let sent =
+            serde_json::to_string_pretty(tool_args).unwrap_or_else(|_| tool_args.to_string());
         let err = crate::agent::context::truncate_chars(error_body, 1200);
-        let mut out = format!(
-            "Tool `{tool_name}` failed.\n\nError:\n{err}\n\nArgs sent:\n{sent}"
-        );
+        let mut out = format!("Tool `{tool_name}` failed.\n\nError:\n{err}\n\nArgs sent:\n{sent}");
         out.push_str(&self.format_required_optional(tool_name));
-        if self.missing_required_fields(tool_name, tool_args).is_empty() {
+        if self
+            .missing_required_fields(tool_name, tool_args)
+            .is_empty()
+        {
             out.push_str(&self.format_actionable_failure_followup(
                 tool_name,
                 tool_args,
@@ -492,7 +487,7 @@ impl<'a> ToolCatalog<'a> {
         let example = example_native_tool_args(tool_name, pr_number, run_id, example_repo);
         format!(
             "\n\nCall `{tool_name}` via the native tool API with arguments like:\n{example}\n\n\
-             One tool per turn. Mutating tools are queued for approval automatically."
+             Read-only tools may be batched in one turn; mutating tools need approval and run one at a time."
         )
     }
 
@@ -504,7 +499,7 @@ impl<'a> ToolCatalog<'a> {
             .unwrap_or("pr_list_open");
         format!(
             "Call `{example_tool}` via the native tool API with arguments like:\n{}\n\
-             Then one tool per turn for each follow-up (e.g. pr_get_overview with pr_number).",
+             You may call multiple read-only tools in one turn; mutating tools one at a time with approval.",
             example_native_tool_args(example_tool, None, None, None)
         )
     }
@@ -749,15 +744,9 @@ fn example_native_tool_args(
         | "pr_get_status"
         | "pr_get_merge_blockers"
         | "pr_list_changed_files"
-        | "ci_analyze_pr_failures" => format!(
-            "{{\"repo\":\"{repo}\",\"pr_number\":{pr}}}"
-        ),
-        "pr_get_diff" => format!(
-            "{{\"repo\":\"{repo}\",\"pr_number\":{pr},\"max_bytes\":48000}}"
-        ),
-        "pr_list_open" => format!(
-            r#"{{"repo":"{repo}","author":"@me","limit":20}}"#
-        ),
+        | "ci_analyze_pr_failures" => format!("{{\"repo\":\"{repo}\",\"pr_number\":{pr}}}"),
+        "pr_get_diff" => format!("{{\"repo\":\"{repo}\",\"pr_number\":{pr},\"max_bytes\":48000}}"),
+        "pr_list_open" => format!(r#"{{"repo":"{repo}","author":"@me","limit":20}}"#),
         "pr_list_waiting_review"
         | "pr_list_merged"
         | "pr_list_stale"
@@ -775,9 +764,9 @@ fn example_native_tool_args(
         "pr_post_comment" => {
             format!("{{\"repo\":\"{repo}\",\"pr_number\":{pr},\"body\":\"…\"}}")
         }
-        "pr_create_backport" => format!(
-            "{{\"repo\":\"{repo}\",\"pr_number\":{pr},\"target_branch\":\"release/3.x\"}}"
-        ),
+        "pr_create_backport" => {
+            format!("{{\"repo\":\"{repo}\",\"pr_number\":{pr},\"target_branch\":\"release/3.x\"}}")
+        }
         other => format!("{{\"repo\":\"{repo}\"}} /* {other} */"),
     }
 }
@@ -790,16 +779,11 @@ fn example_tool_json(
     example_repo: Option<&str>,
 ) -> String {
     let args = example_native_tool_args(tool_name, pr_number, run_id, example_repo);
-    format!(
-        "{{\"action\":\"tool\",\"tool_name\":\"{tool_name}\",\"tool_args\":{args}}}"
-    )
+    format!("{{\"action\":\"tool\",\"tool_name\":\"{tool_name}\",\"tool_args\":{args}}}")
 }
 
 fn common_prefix_len(a: &str, b: &str) -> usize {
-    a.chars()
-        .zip(b.chars())
-        .take_while(|(x, y)| x == y)
-        .count()
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
 fn pr_numbers_in_tool_suffix(suffix: &str) -> Vec<u32> {
@@ -853,8 +837,8 @@ mod tests {
 
     #[test]
     fn invalid_nudge_includes_suggestion_and_native_args() {
-        let msg =
-            ToolCatalog::full().format_invalid_tool_nudge("pr_get_overview_and_changed_files_combined");
+        let msg = ToolCatalog::full()
+            .format_invalid_tool_nudge("pr_get_overview_and_changed_files_combined");
         assert!(msg.contains("Did you mean `pr_get_overview`"));
         assert!(msg.contains("Call `pr_get_overview`"));
         assert!(msg.contains("pr_number"));
@@ -875,7 +859,8 @@ mod tests {
 
     #[test]
     fn args_nudge_includes_schema() {
-        let msg = ToolCatalog::full().format_tool_args_nudge("pr_get_overview", "pr_number", None, None);
+        let msg =
+            ToolCatalog::full().format_tool_args_nudge("pr_get_overview", "pr_number", None, None);
         assert!(msg.contains("Required tool_args: repo, pr_number"));
         assert!(msg.contains("Call `pr_get_overview`"));
         assert!(!msg.contains("from the conversation"));
@@ -987,7 +972,8 @@ mod tests {
 
     #[test]
     fn failed_logs_lists_paging_optional() {
-        let msg = ToolCatalog::full().format_tool_args_nudge("ci_get_failed_logs", "run_id", None, None);
+        let msg =
+            ToolCatalog::full().format_tool_args_nudge("ci_get_failed_logs", "run_id", None, None);
         assert!(msg.contains("offset_lines"));
         assert!(msg.contains("max_lines"));
     }

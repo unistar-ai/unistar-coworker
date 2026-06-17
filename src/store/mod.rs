@@ -7,8 +7,8 @@ use crate::error::CoworkerError;
 use crate::error::Result;
 
 pub mod json;
-pub mod model;
 pub mod migrate;
+pub mod model;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
@@ -64,7 +64,8 @@ pub trait Store: Send + Sync {
     async fn get_chat_session(&self, id: &Uuid) -> Result<Option<ChatSession>>;
     async fn append_chat_message(&self, msg: &ChatMessage) -> Result<()>;
     async fn update_chat_message(&self, msg: &ChatMessage) -> Result<()>;
-    async fn list_chat_messages(&self, session_id: &Uuid, limit: usize) -> Result<Vec<ChatMessage>>;
+    async fn list_chat_messages(&self, session_id: &Uuid, limit: usize)
+        -> Result<Vec<ChatMessage>>;
 
     async fn upsert_issue_snapshot(&self, snap: &IssueSnapshot) -> Result<()>;
     async fn list_issue_snapshots(&self, repo: Option<&str>) -> Result<Vec<IssueSnapshot>>;
@@ -75,7 +76,11 @@ pub trait Store: Send + Sync {
     async fn save_regression_link(&self, link: &RegressionLink) -> Result<()>;
     async fn list_regression_links(&self, limit: usize) -> Result<Vec<RegressionLink>>;
 
-    async fn reclassify_flaky(&self, fingerprint: &str, classification: Classification) -> Result<u32>;
+    async fn reclassify_flaky(
+        &self,
+        fingerprint: &str,
+        classification: Classification,
+    ) -> Result<u32>;
 
     async fn list_chat_sessions(&self, limit: usize) -> Result<Vec<ChatSession>>;
 }
@@ -86,7 +91,10 @@ pub fn open_store(cfg: &Config) -> Result<Box<dyn Store>> {
         StorageBackend::Sqlite => {
             #[cfg(feature = "sqlite")]
             {
-                Ok(Box::new(SqliteStore::open(cfg.storage_path(), cfg.storage.wal)?))
+                Ok(Box::new(SqliteStore::open(
+                    cfg.storage_path(),
+                    cfg.storage.wal,
+                )?))
             }
             #[cfg(not(feature = "sqlite"))]
             {

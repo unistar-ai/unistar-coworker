@@ -34,10 +34,10 @@ pub fn estimate_message_tokens(msg: &LlmTurnMessage) -> u32 {
 
 /// Body text for the LLM context panel (includes native `tool_calls` when prose is empty).
 pub fn format_llm_message_for_context_panel(msg: &LlmTurnMessage) -> String {
-    let prose = msg.content.trim();
+    let prose = strip_reasoning_summary_marker(&msg.content);
     let mut parts = Vec::new();
-    if !prose.is_empty() {
-        parts.push(msg.content.clone());
+    if !prose.trim().is_empty() {
+        parts.push(prose.to_string());
     }
     if let Some(calls) = &msg.tool_calls {
         for tc in calls {
@@ -360,15 +360,13 @@ pub fn tool_transcript_indicates_failure(content: &str) -> bool {
 }
 
 fn pr_number_from_tool_args(args: &Value) -> Option<u32> {
-    args.get("pr_number").and_then(|v| {
-        v.as_u64()
-            .or_else(|| {
-                v.as_i64()
-                    .filter(|n| *n >= 0)
-                    .map(|n| n as u64)
-            })
-            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-    }).map(|n| n as u32)
+    args.get("pr_number")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_i64().filter(|n| *n >= 0).map(|n| n as u64))
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
+        .map(|n| n as u32)
 }
 
 fn strip_transcript_args_block(text: &str) -> String {
@@ -390,7 +388,10 @@ pub fn format_history_for_summary(messages: &[LlmTurnMessage]) -> String {
         .join("\n\n")
 }
 
-fn fit_history_to_budget(messages: &mut Vec<LlmTurnMessage>, token_budget: u32) -> Vec<LlmTurnMessage> {
+fn fit_history_to_budget(
+    messages: &mut Vec<LlmTurnMessage>,
+    token_budget: u32,
+) -> Vec<LlmTurnMessage> {
     const TAIL_KEEP: usize = 4;
     let mut dropped = Vec::new();
     while estimate_messages_tokens(messages) > token_budget && messages.len() > TAIL_KEEP {
@@ -417,10 +418,7 @@ pub fn pack_session_history(
         (&[] as &[ChatMessage], history)
     };
 
-    let mut dropped: Vec<LlmTurnMessage> = dropped_slice
-        .iter()
-        .map(chat_message_to_llm)
-        .collect();
+    let mut dropped: Vec<LlmTurnMessage> = dropped_slice.iter().map(chat_message_to_llm).collect();
     let mut out: Vec<LlmTurnMessage> = slice.iter().map(chat_message_to_llm).collect();
 
     dropped.extend(fit_history_to_budget(&mut out, token_budget));
@@ -451,11 +449,7 @@ pub async fn pack_session_history_with_llm(
     history_summary_min_tokens: u32,
 ) -> Result<Vec<LlmTurnMessage>> {
     if !compress_history {
-        return Ok(pack_session_history(
-            history,
-            max_messages,
-            token_budget,
-        ));
+        return Ok(pack_session_history(history, max_messages, token_budget));
     }
 
     let take = max_messages.max(2);
@@ -466,10 +460,7 @@ pub async fn pack_session_history_with_llm(
         (&[] as &[ChatMessage], history)
     };
 
-    let mut dropped: Vec<LlmTurnMessage> = dropped_slice
-        .iter()
-        .map(chat_message_to_llm)
-        .collect();
+    let mut dropped: Vec<LlmTurnMessage> = dropped_slice.iter().map(chat_message_to_llm).collect();
     let mut out: Vec<LlmTurnMessage> = slice.iter().map(chat_message_to_llm).collect();
 
     dropped.extend(fit_history_to_budget(&mut out, token_budget));
@@ -508,7 +499,8 @@ fn chat_message_to_llm(msg: &ChatMessage) -> LlmTurnMessage {
     match msg.role {
         ChatRole::Assistant => {
             if let Some(json) = &msg.tool_calls_json {
-                if let Ok(calls) = serde_json::from_str::<Vec<crate::llm::chat::LlmToolCall>>(json) {
+                if let Ok(calls) = serde_json::from_str::<Vec<crate::llm::chat::LlmToolCall>>(json)
+                {
                     if !calls.is_empty() {
                         return crate::llm::chat::LlmTurnMessage::assistant_tool_call(
                             msg.content.chars().take(4_000).collect::<String>(),
@@ -527,7 +519,8 @@ fn chat_message_to_llm(msg: &ChatMessage) -> LlmTurnMessage {
             let content = if tool_context_message_has_args(&msg.content) {
                 msg.content.clone()
             } else if let Some(args_json) = &msg.tool_calls_json {
-                let args = serde_json::from_str(args_json).unwrap_or_else(|_| serde_json::json!({}));
+                let args =
+                    serde_json::from_str(args_json).unwrap_or_else(|_| serde_json::json!({}));
                 let ok = !tool_transcript_indicates_failure(&msg.content);
                 format_tool_context_message(name, &args, ok, &msg.content)
             } else {
@@ -535,7 +528,9 @@ fn chat_message_to_llm(msg: &ChatMessage) -> LlmTurnMessage {
             };
             LlmTurnMessage::tool_result(name, content)
         }
-        ChatRole::User | ChatRole::Harness => LlmTurnMessage::new("user", msg.content.clone()),
+        ChatRole::User | ChatRole::Harness | ChatRole::Reasoning => {
+            LlmTurnMessage::new("user", msg.content.clone())
+        }
     }
 }
 
@@ -582,11 +577,12 @@ pub fn is_harness_nudge_content(content: &str) -> bool {
         || trimmed.contains("(Harness retry ")
 }
 
-fn first_removable_message_index(messages: &[LlmTurnMessage], start: usize, end: usize) -> Option<usize> {
-    (start..end).find(|&i| {
-        !is_harness_nudge_content(&messages[i].content)
-            && !is_rolling_summary_content(&messages[i].content)
-    })
+fn first_removable_message_index(
+    messages: &[LlmTurnMessage],
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    (start..end).find(|&i| !is_context_protected_content(&messages[i].content))
 }
 
 /// Chars kept when summarizing an older tool turn during trim (live turn stays full).
@@ -600,10 +596,32 @@ pub fn is_rolling_summary_content(content: &str) -> bool {
         || (t.starts_with("[earlier ") && t.contains("omitted from context"))
 }
 
+/// Compressed thinking trace injected after a long reasoning stream.
+pub fn is_reasoning_summary_content(content: &str) -> bool {
+    content
+        .trim_start()
+        .starts_with("[agent reasoning summary]")
+}
+
+/// Hide the harness marker in the context panel — the `[reasoning]` role label is enough.
+pub fn strip_reasoning_summary_marker(content: &str) -> &str {
+    let trimmed = content.trim_start();
+    let Some(rest) = trimmed.strip_prefix("[agent reasoning summary]") else {
+        return content;
+    };
+    rest.trim_start_matches('\n')
+}
+
+fn is_context_protected_content(content: &str) -> bool {
+    is_harness_nudge_content(content)
+        || is_rolling_summary_content(content)
+        || is_reasoning_summary_content(content)
+}
+
 fn collapsible_indices_for_summary(messages: &[LlmTurnMessage], tail_protect: usize) -> Vec<usize> {
     let collapse_end = messages.len().saturating_sub(tail_protect);
     (1..collapse_end)
-        .filter(|&i| !is_harness_nudge_content(&messages[i].content))
+        .filter(|&i| !is_context_protected_content(&messages[i].content))
         .collect()
 }
 
@@ -641,10 +659,7 @@ async fn try_collapse_old_messages_with_llm(
         }
         messages.insert(
             insert_at,
-            LlmTurnMessage::new(
-                "user",
-                format!("[earlier context summary]\n{summary}"),
-            ),
+            LlmTurnMessage::new("user", format!("[earlier context summary]\n{summary}")),
         );
     }
     Ok(())
@@ -681,9 +696,7 @@ pub fn trim_llm_messages(messages: &mut Vec<LlmTurnMessage>, token_budget: u32) 
             break;
         }
         let compress_until = len.saturating_sub(TAIL_PROTECT);
-        if compress_until > 1
-            && compress_oldest_tool_in_slice(messages, 1, compress_until)
-        {
+        if compress_until > 1 && compress_oldest_tool_in_slice(messages, 1, compress_until) {
             continue;
         }
         if compress_until > 1 {
@@ -741,7 +754,8 @@ fn compress_oldest_tool_in_slice(
     end: usize,
 ) -> bool {
     for i in start..end.min(messages.len()) {
-        if llm_message_is_tool_result(&messages[i]) && !is_already_summarized(&messages[i].content)
+        if llm_message_is_tool_result(&messages[i])
+            && !is_already_summarized(&messages[i].content)
             && !is_rolling_summary_content(&messages[i].content)
         {
             let summary = if messages[i].role == "tool" {
@@ -768,7 +782,7 @@ fn summarize_message_at(messages: &mut [LlmTurnMessage], idx: usize) {
     if idx >= messages.len() {
         return;
     }
-    if is_harness_nudge_content(&messages[idx].content) {
+    if is_context_protected_content(&messages[idx].content) {
         return;
     }
     let role = messages[idx].role;
@@ -823,25 +837,22 @@ pub fn split_tool_transcript(content: &str) -> Option<(String, String)> {
     if let Some(rest) = t.strip_prefix("tool_result(") {
         let end = rest.find("):")?;
         let name = rest[..end].split(',').next()?.trim().to_string();
-        let body = strip_transcript_args_block(
-            rest[end + 2..].trim_start_matches(':').trim_start(),
-        );
+        let body =
+            strip_transcript_args_block(rest[end + 2..].trim_start_matches(':').trim_start());
         return Some((name, body));
     }
     if let Some(rest) = t.strip_prefix("tool_error(") {
         let end = rest.find("):")?;
         let name = rest[..end].split(',').next()?.trim().to_string();
-        let body = strip_transcript_args_block(
-            rest[end + 2..].trim_start_matches(':').trim_start(),
-        );
+        let body =
+            strip_transcript_args_block(rest[end + 2..].trim_start_matches(':').trim_start());
         return Some((name, body));
     }
     if let Some(rest) = t.strip_prefix("tool_approval_pending(") {
         let end = rest.find("):")?;
         let name = rest[..end].split(',').next()?.trim().to_string();
-        let body = strip_transcript_args_block(
-            rest[end + 2..].trim_start_matches(':').trim_start(),
-        );
+        let body =
+            strip_transcript_args_block(rest[end + 2..].trim_start_matches(':').trim_start());
         return Some((name, body));
     }
     if let Some(rest) = t.strip_prefix("[tool_result ") {
@@ -1055,8 +1066,12 @@ diff --git a/bar.rs b/bar.rs\n\
     fn trim_preserves_harness_nudge_content() {
         use crate::agent::tool_catalog::ToolCatalog;
         use crate::llm::LlmTurnMessage;
-        let nudge = ToolCatalog::full()
-            .format_tool_args_nudge("pr_get_overview", "pr_number", Some("19272"), Some("acme/widget"));
+        let nudge = ToolCatalog::full().format_tool_args_nudge(
+            "pr_get_overview",
+            "pr_number",
+            Some("19272"),
+            Some("acme/widget"),
+        );
         let mut messages = vec![
             LlmTurnMessage::new("system", "sys".repeat(5000)),
             LlmTurnMessage::new("user", "user".repeat(5000)),
@@ -1064,7 +1079,9 @@ diff --git a/bar.rs b/bar.rs\n\
         ];
         trim_llm_messages(&mut messages, 200);
         assert!(
-            messages.iter().any(|m| m.content.contains("Tool `pr_get_overview`")),
+            messages
+                .iter()
+                .any(|m| m.content.contains("Tool `pr_get_overview`")),
             "harness nudge must survive trimming"
         );
         assert!(messages.last().is_some_and(|m| m.content.contains("19272")));
@@ -1086,24 +1103,21 @@ diff --git a/bar.rs b/bar.rs\n\
 #19235  backport title  @alice  CI:failing  review:approved\n\
 #19240  other  @bob  CI:passing  review:none";
         let structured = structure_tool_result("pr_list_open", raw);
-        assert!(structured.contains("#19235 CI:failing"), "got: {structured}");
+        assert!(
+            structured.contains("#19235 CI:failing"),
+            "got: {structured}"
+        );
         assert!(structured.contains("#19240 CI:passing"));
         assert!(!structured.contains("@alice"));
     }
 
     #[test]
     fn tool_results_are_not_focus_filtered() {
-        let unrelated = prepare_tool_result_for_context(
-            "pr_get_status",
-            "PR #9999 merged",
-        );
+        let unrelated = prepare_tool_result_for_context("pr_get_status", "PR #9999 merged");
         assert!(unrelated.contains("#9999"));
         assert!(!unrelated.contains("omitted"));
 
-        let related = prepare_tool_result_for_context(
-            "pr_get_overview",
-            "PR #19235 overview",
-        );
+        let related = prepare_tool_result_for_context("pr_get_overview", "PR #19235 overview");
         assert!(related.contains("19235"));
     }
 
@@ -1118,6 +1132,76 @@ diff --git a/bar.rs b/bar.rs\n\
     }
 
     #[test]
+    fn trim_preserves_reasoning_summary() {
+        use crate::llm::LlmTurnMessage;
+        let reasoning = LlmTurnMessage::new(
+            "user",
+            "[agent reasoning summary]\n- checked CI on #42\n- will call pr_get_diff",
+        );
+        let mut messages = vec![
+            LlmTurnMessage::new("system", "sys".repeat(5000)),
+            LlmTurnMessage::new("user", "user".repeat(5000)),
+            reasoning,
+        ];
+        trim_llm_messages(&mut messages, 200);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.content.contains("[agent reasoning summary]")),
+            "reasoning summary must survive trimming"
+        );
+    }
+
+    #[test]
+    fn strip_reasoning_summary_marker_for_context_panel() {
+        let msg = LlmTurnMessage::new(
+            "user",
+            "[agent reasoning summary]\n\nThe user wants PR #42.",
+        );
+        let panel = format_llm_message_for_context_panel(&msg);
+        assert_eq!(panel, "The user wants PR #42.");
+        assert!(is_reasoning_summary_content(&msg.content));
+    }
+
+    #[test]
+    fn is_reasoning_summary_content_detects_marker() {
+        assert!(is_reasoning_summary_content(
+            "[agent reasoning summary]\n- bullet"
+        ));
+        assert!(!is_reasoning_summary_content("tool_result(x):\nok"));
+    }
+
+    #[test]
+    fn pack_session_history_includes_reasoning_messages() {
+        use crate::store::{ChatMessage, ChatRole};
+        let session_id = Uuid::new_v4();
+        let history = vec![
+            ChatMessage {
+                id: Uuid::new_v4(),
+                session_id,
+                role: ChatRole::User,
+                content: "analyze PR".into(),
+                ts: Utc::now(),
+                tool_name: None,
+                tool_calls_json: None,
+            },
+            ChatMessage {
+                id: Uuid::new_v4(),
+                session_id,
+                role: ChatRole::Reasoning,
+                content: "[agent reasoning summary]\n\nWill fetch PR overview.".into(),
+                ts: Utc::now(),
+                tool_name: None,
+                tool_calls_json: None,
+            },
+        ];
+        let packed = pack_session_history(&history, 20, 64_000);
+        assert_eq!(packed.len(), 2);
+        assert!(packed[1].content.contains("[agent reasoning summary]"));
+        assert!(packed[1].content.contains("Will fetch PR overview"));
+    }
+
+    #[test]
     fn is_rolling_summary_content_detects_prior_summaries() {
         assert!(is_rolling_summary_content(
             "[session history summary]\n- user asked about PR #42"
@@ -1125,7 +1209,9 @@ diff --git a/bar.rs b/bar.rs\n\
         assert!(is_rolling_summary_content(
             "[earlier context summary]\n- reran CI on acme/widget"
         ));
-        assert!(!is_rolling_summary_content("tool_result(pr_list_open):\n#1"));
+        assert!(!is_rolling_summary_content(
+            "tool_result(pr_list_open):\n#1"
+        ));
     }
 
     #[test]

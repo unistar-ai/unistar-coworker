@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use uuid::Uuid;
 
-use crate::app::{ApprovalDialogChoice, AppState, SharedState};
+use crate::app::{AppState, ApprovalDialogChoice, SharedState};
 use crate::engine::Engine;
 use crate::tui::theme::ThemePalette;
 
@@ -164,18 +164,17 @@ fn fill_rect(frame: &mut Frame, area: Rect, bg: ratatui::style::Color) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    frame.render_widget(
-        Block::default().style(Style::default().bg(bg)),
-        area,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
 }
 
 fn scrim_color(th: ThemePalette) -> ratatui::style::Color {
     // Slightly darker than the main background to suggest a modal overlay.
     match th.bg {
-        ratatui::style::Color::Rgb(r, g, b) => {
-            ratatui::style::Color::Rgb(r.saturating_sub(6), g.saturating_sub(6), b.saturating_sub(6))
-        }
+        ratatui::style::Color::Rgb(r, g, b) => ratatui::style::Color::Rgb(
+            r.saturating_sub(6),
+            g.saturating_sub(6),
+            b.saturating_sub(6),
+        ),
         other => other,
     }
 }
@@ -207,17 +206,15 @@ fn draw_modal_button(
     frame.render_widget(block, area);
     fill_rect(frame, inner, if selected { th.surface } else { th.panel });
     frame.render_widget(
-        Paragraph::new(label)
-            .alignment(Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(if selected { accent } else { th.text })
-                    .add_modifier(if selected {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ),
+        Paragraph::new(label).alignment(Alignment::Center).style(
+            Style::default()
+                .fg(if selected { accent } else { th.text })
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
         inner,
     );
 }
@@ -380,9 +377,7 @@ pub async fn spawn_approval_decision(
                     };
                     let session_id = pending.session_id;
                     drop(s);
-                    let _ = engine
-                        .resume_chat_after_approval(session_id, resume)
-                        .await;
+                    let _ = engine.resume_chat_after_approval(session_id, resume).await;
                 }
             }
         }
@@ -458,9 +453,10 @@ mod tests {
     fn modal_button_rects_fit_inside_modal() {
         let frame = Rect::new(0, 0, 120, 40);
         let layout = modal_layout(frame);
-        assert!(layout
-            .modal_area
-            .contains(Position::new(layout.approve_button.x, layout.approve_button.y)));
+        assert!(layout.modal_area.contains(Position::new(
+            layout.approve_button.x,
+            layout.approve_button.y
+        )));
         assert!(layout
             .modal_area
             .contains(Position::new(layout.deny_button.x, layout.deny_button.y)));

@@ -11,20 +11,20 @@ use crate::llm::LlmClient;
 use crate::mcp::{spawn_mcp, McpClient};
 use crate::store::{LogLine, Store};
 
-pub mod scheduler;
-pub mod skill;
-pub mod prompt;
-pub mod workflows;
 pub mod approvals;
 pub mod chat;
-pub mod rules;
 pub mod playbook;
+pub mod prompt;
+pub mod rules;
+pub mod scheduler;
+pub mod skill;
+pub mod workflows;
 
-pub use skill::{load_markdown_spec, load_skill_with_base, AgentSpec, SkillSpec};
 pub use prompt::{
     compose_system_prompt, load_chat_prompt_bundle, load_classify_skills_for_triage,
     load_tools_doc_with_preferred, load_workflow_spec, WorkflowSpec,
 };
+pub use skill::{load_markdown_spec, load_skill_with_base, AgentSpec, SkillSpec};
 
 pub struct Engine {
     config: Config,
@@ -150,7 +150,10 @@ impl Engine {
         } else {
             Classification::UserReal
         };
-        let updated = self.store.reclassify_flaky(fingerprint, classification).await?;
+        let updated = self
+            .store
+            .reclassify_flaky(fingerprint, classification)
+            .await?;
         self.refresh_store().await?;
         Ok(updated)
     }

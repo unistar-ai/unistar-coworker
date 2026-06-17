@@ -15,10 +15,7 @@ pub struct FlakyGovernOutcome {
 
 impl FlakyGovernOutcome {
     pub fn format_summary(&self) -> String {
-        format!(
-            "flaky-govern: {} flaky test(s) in report",
-            self.test_count
-        )
+        format!("flaky-govern: {} flaky test(s) in report", self.test_count)
     }
 }
 
@@ -88,7 +85,8 @@ pub async fn run_flaky_govern(
 }
 
 pub fn format_flaky_report_csv(tests: &[crate::store::FlakyTestRollup]) -> String {
-    let mut out = String::from("test,repo,workflow,incident_count,rerun_attempts,rerun_successes\n");
+    let mut out =
+        String::from("test,repo,workflow,incident_count,rerun_attempts,rerun_successes\n");
     for t in tests {
         let name = t.test_name.as_deref().unwrap_or("");
         out.push_str(&format!(

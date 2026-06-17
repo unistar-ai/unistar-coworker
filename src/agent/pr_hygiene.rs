@@ -28,12 +28,13 @@ fn is_docs_only(files_text: &str) -> bool {
             paths.push(path);
         }
     }
-    !paths.is_empty() && paths.iter().all(|p| {
-        p.ends_with(".md")
-            || p.ends_with(".rst")
-            || p.starts_with("docs/")
-            || p.contains("/docs/")
-    })
+    !paths.is_empty()
+        && paths.iter().all(|p| {
+            p.ends_with(".md")
+                || p.ends_with(".rst")
+                || p.starts_with("docs/")
+                || p.contains("/docs/")
+        })
 }
 
 fn total_line_delta(files_text: &str) -> u32 {
@@ -88,7 +89,11 @@ pub async fn run_pr_hygiene(
                 continue;
             };
             findings += 1;
-            digest.push_report_line(&format!("**Stale** #{number} {title}", number = pr.number, title = pr.title));
+            digest.push_report_line(&format!(
+                "**Stale** #{number} {title}",
+                number = pr.number,
+                title = pr.title
+            ));
 
             let files = lazy_tool(
                 mcp,

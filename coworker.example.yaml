@@ -134,8 +134,8 @@ chat:
   llm_step_timeout_secs: 180   # abort one LLM step if thinking/JSON stalls
   history_messages: 24
   history_tokens: 0          # 0 = auto (~40% of input budget for prior session turns)
-  compress_reasoning: true   # summarize long thinking via fast think=false LLM call
-  reasoning_compress_min_chars: 480
+  compress_reasoning: true   # keep thinking in LLM context (verbatim if short, LLM summary if long)
+  reasoning_compress_min_chars: 480   # below: verbatim; at/above: summarize via think=false LLM (no local truncation)
   # When true, mutating chat tools (rerun/backport/comment) run without the approval popup.
   auto_approve_mutations: false
   # preferred_tools: omit to use built-in chat tool whitelist

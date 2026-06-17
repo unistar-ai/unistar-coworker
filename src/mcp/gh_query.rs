@@ -26,11 +26,7 @@ struct GhLabel {
 }
 
 /// List recently merged PRs that carry `label` (via `gh pr list --state merged`).
-pub async fn list_merged_prs_labeled(
-    repo: &str,
-    label: &str,
-    limit: u32,
-) -> Result<Vec<MergedPr>> {
+pub async fn list_merged_prs_labeled(repo: &str, label: &str, limit: u32) -> Result<Vec<MergedPr>> {
     let output = Command::new("gh")
         .args([
             "pr",
@@ -58,9 +54,8 @@ pub async fn list_merged_prs_labeled(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let prs: Vec<GhPullRequest> = serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Workflow(format!("parse gh pr list: {e}"))
-    })?;
+    let prs: Vec<GhPullRequest> = serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Workflow(format!("parse gh pr list: {e}")))?;
 
     Ok(prs
         .into_iter()

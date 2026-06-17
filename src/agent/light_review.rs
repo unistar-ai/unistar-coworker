@@ -106,12 +106,19 @@ pub async fn run_light_review(
                         }
                     }
                 } else {
-                    findings.push(format!("**{path}**: {} lines changed", chunk.lines().count()));
+                    findings.push(format!(
+                        "**{path}**: {} lines changed",
+                        chunk.lines().count()
+                    ));
                 }
             }
 
             reviewed += 1;
-            digest.push_report_line(&format!("### #{number} {title}", number = pr.number, title = pr.title));
+            digest.push_report_line(&format!(
+                "### #{number} {title}",
+                number = pr.number,
+                title = pr.title
+            ));
             if findings.is_empty() {
                 digest.push_report_line("_No notable risks flagged._");
             } else {
@@ -127,5 +134,7 @@ pub async fn run_light_review(
 
     let final_digest = digest.finish();
     publish_digest(config, store, events, &final_digest).await?;
-    Ok(LightReviewOutcome { prs_reviewed: reviewed })
+    Ok(LightReviewOutcome {
+        prs_reviewed: reviewed,
+    })
 }

@@ -17,7 +17,11 @@ pub fn markdown_to_lines_in_width(
     let input = input.replace("\r\n", "\n");
     let input = promote_section_lines(&input);
     if should_preserve_line_breaks(&input) || !looks_like_markdown(&input) {
-        return plain_lines(th, &input, base);
+        let lines = plain_lines(th, &input, base);
+        if let Some(mw) = max_width.filter(|w| *w > 0) {
+            return wrap_content_lines(lines, mw);
+        }
+        return lines;
     }
 
     let mut renderer = MarkdownRenderer::new(th, base, max_width);
@@ -35,7 +39,8 @@ fn plain_lines(th: ThemePalette, input: &str, base: Style) -> Vec<Line<'static>>
             if line.is_empty() {
                 Line::from("")
             } else {
-                enrich_pr_refs(th, Line::from(Span::styled(line.to_string(), base)))
+                let line = normalize_terminal_text(line);
+                enrich_pr_refs(th, Line::from(Span::styled(line, base)))
             }
         })
         .collect()
@@ -79,9 +84,7 @@ fn looks_like_pr_list_line(line: &str) -> bool {
     if !t.starts_with('#') {
         return false;
     }
-    t.chars()
-        .nth(1)
-        .is_some_and(|c| c.is_ascii_digit())
+    t.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
 }
 
 fn looks_like_markdown_line(line: &str) -> bool {
@@ -318,17 +321,22 @@ fn fit_table_widths(widths: &mut [usize], ncols: usize, max_width: usize) {
     }
 }
 
+fn normalize_terminal_text(s: &str) -> String {
+    s.replace('\t', "    ")
+}
+
 fn truncate_to_display_width(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    if UnicodeWidthStr::width(s) <= max {
-        return s.to_string();
+    let s = normalize_terminal_text(s);
+    if UnicodeWidthStr::width(s.as_str()) <= max {
+        return s;
     }
     let mut out = String::new();
     let mut used = 0;
     for ch in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
         if used + cw > max.saturating_sub(1) {
             out.push('…');
             return out;
@@ -336,6 +344,7 @@ fn truncate_to_display_width(s: &str, max: usize) -> String {
         used += cw;
         out.push(ch);
     }
+    debug_assert!(UnicodeWidthStr::width(out.as_str()) <= max);
     out
 }
 
@@ -345,11 +354,16 @@ struct StyledChar {
     style: Style,
 }
 
-fn line_display_width(line: &Line<'_>) -> usize {
+pub(crate) fn line_display_width(line: &Line<'_>) -> usize {
     line.spans
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
         .sum()
+}
+
+#[cfg(test)]
+pub(crate) fn line_display_width_for_test(line: &Line<'_>) -> usize {
+    line_display_width(line)
 }
 
 fn flatten_line(line: &Line<'_>) -> Vec<StyledChar> {
@@ -444,7 +458,10 @@ fn should_preserve_line_as_single(line: &Line<'_>) -> bool {
         return true;
     }
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    text.contains('│') || text.starts_with("  ┌─") || text.starts_with("  └─") || text.starts_with('─')
+    text.contains('│')
+        || text.starts_with("  ┌─")
+        || text.starts_with("  └─")
+        || text.starts_with('─')
 }
 
 fn wrap_rendered_lines(lines: Vec<Line<'static>>, max_width: Option<usize>) -> Vec<Line<'static>> {
@@ -464,6 +481,182 @@ fn wrap_rendered_lines(lines: Vec<Line<'static>>, max_width: Option<usize>) -> V
         .collect()
 }
 
+/// Word-wrap content rows before attaching message badges / indents.
+pub(crate) fn wrap_content_lines(
+    lines: Vec<Line<'static>>,
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    if max_width == 0 {
+        return lines;
+    }
+    lines
+        .into_iter()
+        .flat_map(|line| {
+            let hang = list_marker_hang_width(&line);
+            if line_display_width(&line) <= max_width {
+                vec![line]
+            } else {
+                wrap_line_to_width(line, max_width, hang)
+            }
+        })
+        .collect()
+}
+
+fn truncate_line_to_width(line: Line<'static>, max_width: usize) -> Line<'static> {
+    let text: String = line
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    let style = line
+        .spans
+        .first()
+        .map(|s| s.style)
+        .unwrap_or_default();
+    Line::from(Span::styled(
+        truncate_to_display_width(&text, max_width),
+        style,
+    ))
+}
+
+fn split_message_badge_line(line: &Line<'_>) -> Option<(Vec<Span<'static>>, Line<'static>)> {
+    let first = line.spans.first()?;
+    if !first.content.as_ref().starts_with('▌') || line.spans.len() < 2 {
+        return None;
+    }
+    let mut prefix_end = 2usize;
+    if line.spans.len() > 2 && line.spans[2].content.as_ref() == " " {
+        prefix_end = 3;
+    }
+    let prefix: Vec<Span<'static>> = line.spans[..prefix_end]
+        .iter()
+        .map(|s| Span::styled(s.content.to_string(), s.style))
+        .collect();
+    let body: Line<'static> = Line::from(
+        line.spans[prefix_end..]
+            .iter()
+            .map(|s| Span::styled(s.content.to_string(), s.style))
+            .collect::<Vec<_>>(),
+    );
+    Some((prefix, body))
+}
+
+fn fit_chat_line_to_panel(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    if line_display_width(&line) <= width {
+        return vec![line];
+    }
+    let hang = list_marker_hang_width(&line);
+    if let Some((prefix, body)) = split_message_badge_line(&line) {
+        let prefix_w: usize = prefix
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let body_budget = width.saturating_sub(prefix_w).max(1);
+        let indent = " ".repeat(prefix_w);
+        let wrapped = wrap_content_lines(vec![body], body_budget);
+        return wrapped
+            .into_iter()
+            .enumerate()
+            .map(|(i, wl)| {
+                if i == 0 {
+                    let mut spans = prefix.clone();
+                    spans.extend(wl.spans);
+                    Line::from(spans)
+                } else {
+                    let mut spans = vec![Span::raw(indent.clone())];
+                    spans.extend(wl.spans);
+                    Line::from(spans)
+                }
+            })
+            .map(|row| {
+                if line_display_width(&row) <= width {
+                    row
+                } else {
+                    truncate_line_to_width(row, width)
+                }
+            })
+            .collect();
+    }
+    let wrapped = wrap_line_to_width(line, width, hang);
+    wrapped
+        .into_iter()
+        .map(|row| {
+            if line_display_width(&row) <= width {
+                row
+            } else {
+                truncate_line_to_width(row, width)
+            }
+        })
+        .collect()
+}
+
+/// Fit chat history rows to the Messages pane without splitting `▌ You` / `▌ AI` badges.
+pub(crate) fn ensure_chat_lines_fit_panel(
+    lines: Vec<Line<'static>>,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    let width = panel_width.max(1) as usize;
+    lines
+        .into_iter()
+        .flat_map(|line| fit_chat_line_to_panel(line, width))
+        .collect()
+}
+
+/// Force-wrap every row to `panel_width` (tables included). Used by the chat
+/// pane where preserving wide table rows causes horizontal bleed in split view.
+pub(crate) fn reflow_chat_lines_to_width(
+    lines: Vec<Line<'static>>,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    let width = panel_width.max(1) as usize;
+    let expanded: Vec<Line<'static>> = lines.into_iter().flat_map(expand_hard_newlines).collect();
+    expanded
+        .into_iter()
+        .flat_map(|line| {
+            let hang = list_marker_hang_width(&line);
+            let wrapped = if line_display_width(&line) <= width {
+                vec![line]
+            } else {
+                wrap_line_to_width(line, width, hang)
+            };
+            wrapped.into_iter().map(move |row| {
+                if line_display_width(&row) <= width {
+                    row
+                } else {
+                    truncate_line_to_width(row, width)
+                }
+            })
+        })
+        .collect()
+}
+
+fn expand_hard_newlines(line: Line<'static>) -> Vec<Line<'static>> {
+    if !line.spans.iter().any(|span| span.content.contains('\n')) {
+        return vec![line];
+    }
+
+    let mut rows: Vec<Vec<Span<'static>>> = vec![vec![]];
+    for span in line.spans {
+        let mut first = true;
+        for part in span.content.split('\n') {
+            if !first {
+                rows.push(vec![]);
+            }
+            first = false;
+            if part.is_empty() {
+                continue;
+            }
+            rows.last_mut()
+                .expect("row vec")
+                .push(Span::styled(part.to_string(), span.style));
+        }
+    }
+    rows.into_iter()
+        .filter(|spans| !spans.is_empty())
+        .map(Line::from)
+        .collect()
+}
+
 fn wrap_line_to_width(
     line: Line<'static>,
     max_width: usize,
@@ -478,29 +671,27 @@ fn wrap_line_to_width(
     let pad_style = words
         .iter()
         .find_map(|w| w.first().map(|sc| sc.style))
-        .unwrap_or(Style::default());
+        .unwrap_or_default();
 
     let mut lines_out: Vec<Vec<StyledChar>> = vec![vec![]];
     let mut col = 0usize;
     let mut budget = max_width;
 
-    let start_new_line = |lines_out: &mut Vec<Vec<StyledChar>>, col: &mut usize, budget: &mut usize| {
-        lines_out.push(Vec::new());
-        *col = 0;
-        *budget = max_width;
-        if hang > 0 {
-            for _ in 0..hang {
-                lines_out
-                    .last_mut()
-                    .expect("line vec")
-                    .push(StyledChar {
+    let start_new_line =
+        |lines_out: &mut Vec<Vec<StyledChar>>, col: &mut usize, budget: &mut usize| {
+            lines_out.push(Vec::new());
+            *col = 0;
+            *budget = max_width;
+            if hang > 0 {
+                for _ in 0..hang {
+                    lines_out.last_mut().expect("line vec").push(StyledChar {
                         ch: ' ',
                         style: pad_style,
                     });
+                }
+                *col = hang;
             }
-            *col = hang;
-        }
-    };
+        };
 
     for word in words {
         let ww = styled_width(&word);
@@ -513,8 +704,13 @@ fn wrap_line_to_width(
         if ww > budget && col == hang {
             for sc in word {
                 let cw = unicode_width::UnicodeWidthChar::width(sc.ch).unwrap_or(0);
-                if col + cw > budget && col > hang {
-                    start_new_line(&mut lines_out, &mut col, &mut budget);
+                if col + cw > budget {
+                    if col > hang {
+                        start_new_line(&mut lines_out, &mut col, &mut budget);
+                    }
+                    if col + cw > budget {
+                        break;
+                    }
                 }
                 lines_out.last_mut().expect("line vec").push(sc);
                 col += cw;
@@ -557,10 +753,7 @@ fn format_table_lines(
             let raw = row.get(i).map(|s| s.trim()).unwrap_or("");
             let cell = truncate_to_display_width(raw, *width);
             let pad = width.saturating_sub(UnicodeWidthStr::width(cell.as_str()));
-            spans.push(Span::styled(
-                format!(" {cell}{} ", " ".repeat(pad)),
-                base,
-            ));
+            spans.push(Span::styled(format!(" {cell}{} ", " ".repeat(pad)), base));
             spans.push(Span::styled("│", Style::default().fg(th.muted)));
         }
         lines.push(Line::from(spans));
@@ -735,10 +928,7 @@ impl MarkdownRenderer {
                             .add_modifier(Modifier::BOLD),
                     );
                 } else {
-                    self.push_span(
-                        format!("{indent}▸ "),
-                        Style::default().fg(self.th.warn),
-                    );
+                    self.push_span(format!("{indent}▸ "), Style::default().fg(self.th.warn));
                 }
             }
             Tag::CodeBlock(_) => {
@@ -748,11 +938,8 @@ impl MarkdownRenderer {
                     "  ┌─ code ",
                     Style::default().fg(self.th.muted),
                 )));
-                self.style_stack.push(
-                    Style::default()
-                        .fg(self.th.code_fg)
-                        .bg(self.th.code_bg),
-                );
+                self.style_stack
+                    .push(Style::default().fg(self.th.code_fg).bg(self.th.code_bg));
             }
             Tag::BlockQuote(_) => {
                 self.flush_line();
@@ -855,9 +1042,7 @@ impl MarkdownRenderer {
         }
         self.push_span(
             format!(" `{text}` "),
-            Style::default()
-                .fg(self.th.code_fg)
-                .bg(self.th.code_bg),
+            Style::default().fg(self.th.code_fg).bg(self.th.code_bg),
         );
     }
 
@@ -943,9 +1128,11 @@ impl MarkdownRenderer {
     fn finish(mut self) -> Vec<Line<'static>> {
         self.finish_table();
         self.flush_line();
-        while self.lines.last().is_some_and(|l| {
-            l.spans.is_empty() || l.spans.iter().all(|s| s.content.is_empty())
-        }) {
+        while self
+            .lines
+            .last()
+            .is_some_and(|l| l.spans.is_empty() || l.spans.iter().all(|s| s.content.is_empty()))
+        {
             self.lines.pop();
         }
         if self.lines.is_empty() {
@@ -982,9 +1169,7 @@ fn enrich_pr_refs(th: ThemePalette, mut line: Line<'static>) -> Line<'static> {
                         }
                         new_spans.push(Span::styled(
                             text[hash_start..i].to_string(),
-                            Style::default()
-                                .fg(th.pr_ref)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(th.pr_ref).add_modifier(Modifier::BOLD),
                         ));
                         chunk_start = i;
                         continue;
@@ -1046,10 +1231,14 @@ mod tests {
     #[test]
     fn renders_bold() {
         let th = dark();
-        let lines = markdown_to_lines_in_width(th, "**PR #1** details", Style::default().fg(th.text), None);
+        let lines =
+            markdown_to_lines_in_width(th, "**PR #1** details", Style::default().fg(th.text), None);
         let joined = line_text(&lines[0]);
         assert!(joined.contains("PR #1"));
-        assert!(lines[0].spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)));
+        assert!(lines[0]
+            .spans
+            .iter()
+            .any(|s| s.style.add_modifier.contains(Modifier::BOLD)));
     }
 
     #[test]
@@ -1089,9 +1278,14 @@ mod tests {
         let md = "**Summary:**\n\n| PR | Status |\n| --- | --- |\n| #1 | open |";
         let lines = markdown_to_lines_in_width(th, md, Style::default().fg(th.text), None);
         let joined: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
-        assert!(joined.iter().any(|l| l.contains('│')), "expected box chars: {joined:?}");
         assert!(
-            joined.iter().any(|l| l.contains("#1") && l.contains("open")),
+            joined.iter().any(|l| l.contains('│')),
+            "expected box chars: {joined:?}"
+        );
+        assert!(
+            joined
+                .iter()
+                .any(|l| l.contains("#1") && l.contains("open")),
             "expected data row: {joined:?}"
         );
         assert!(
@@ -1111,7 +1305,9 @@ mod tests {
             "expected formatted table, got: {joined:?}"
         );
         assert!(
-            joined.iter().any(|l| l.contains("#2") && l.contains("closed")),
+            joined
+                .iter()
+                .any(|l| l.contains("#2") && l.contains("closed")),
             "expected second row, got: {joined:?}"
         );
         assert!(
@@ -1146,12 +1342,14 @@ mod tests {
             .iter()
             .filter(|l| {
                 let t = line_text(l);
-                t.contains("Title one")
-                    || t.contains("Title two")
-                    || t.contains("Title three")
+                t.contains("Title one") || t.contains("Title two") || t.contains("Title three")
             })
             .collect();
-        assert_eq!(heading_lines.len(), 3, "expected three heading lines: {lines:?}");
+        assert_eq!(
+            heading_lines.len(),
+            3,
+            "expected three heading lines: {lines:?}"
+        );
         let colors: Vec<_> = heading_lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.style.fg))
@@ -1188,18 +1386,9 @@ mod tests {
 
     #[test]
     fn promote_section_line_helpers() {
-        assert_eq!(
-            promote_section_line("1. Overview"),
-            "## 1. Overview"
-        );
-        assert_eq!(
-            promote_section_line("A. Details"),
-            "### A. Details"
-        );
-        assert_eq!(
-            promote_section_line("✅ Pros"),
-            "### ✅ Pros"
-        );
+        assert_eq!(promote_section_line("1. Overview"), "## 1. Overview");
+        assert_eq!(promote_section_line("A. Details"), "### A. Details");
+        assert_eq!(promote_section_line("✅ Pros"), "### ✅ Pros");
         assert_eq!(promote_section_line("## Already"), "## Already");
     }
 
@@ -1294,7 +1483,9 @@ open PR(s) in acme/widget (3):\n\
         let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
         assert!(texts.len() >= 5, "expected one line per row, got {texts:?}");
         assert!(
-            !texts.iter().any(|l| l.contains("19264") && l.contains("19263")),
+            !texts
+                .iter()
+                .any(|l| l.contains("19264") && l.contains("19263")),
             "PR rows must not merge into one line: {texts:?}"
         );
         assert!(texts.iter().any(|l| l.contains("#19264")));
@@ -1302,16 +1493,22 @@ open PR(s) in acme/widget (3):\n\
     }
 
     #[test]
-    fn plain_text_stays_one_logical_line_for_paragraph_wrap() {
+    fn truncate_respects_display_width_with_tabs() {
+        let s = "  3UNKNOWN STEP\t        Please ensure";
+        let out = truncate_to_display_width(s, 30);
+        assert!(
+            UnicodeWidthStr::width(out.as_str()) <= 30,
+            "truncated {out:?} is {}w",
+            UnicodeWidthStr::width(out.as_str())
+        );
+    }
+
+    #[test]
+    fn plain_text_wraps_when_max_width_set() {
         let th = dark();
         let long = "alpha ".repeat(40);
-        let lines = markdown_to_lines_in_width(
-            th,
-            &long,
-            Style::default().fg(th.text),
-            Some(32),
-        );
-        assert_eq!(lines.len(), 1, "non-table text should not be pre-wrapped");
+        let lines = markdown_to_lines_in_width(th, &long, Style::default().fg(th.text), Some(32));
+        assert!(lines.len() > 1, "plain text should pre-wrap to max_width");
     }
 
     #[test]

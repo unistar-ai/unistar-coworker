@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
-use crate::agent::budget::TokenBudget;
-use crate::agent::parse::{ci_is_failing, needs_review, parse_pr_line};
 use crate::agent::breaking_sniff::run_breaking_sniff;
+use crate::agent::budget::TokenBudget;
 use crate::agent::ci_efficiency::run_ci_efficiency;
 use crate::agent::comment_assist::run_comment_assist;
 use crate::agent::flaky_govern::run_flaky_govern;
@@ -14,6 +13,7 @@ use crate::agent::main_guard::run_main_guard;
 use crate::agent::merge_health::run_merge_health;
 use crate::agent::my_pr_brief::run_my_pr_brief;
 use crate::agent::oncall::run_oncall_handoff;
+use crate::agent::parse::{ci_is_failing, needs_review, parse_pr_line};
 use crate::agent::pr_hygiene::run_pr_hygiene;
 use crate::agent::regression_link::run_regression_link;
 use crate::agent::release::run_release_duty;
@@ -22,15 +22,15 @@ use crate::agent::review_radar::run_review_radar;
 use crate::agent::security_digest::run_security_digest;
 use crate::agent::triage::triage_pr;
 use crate::app::{append_audit, AppEvent, SharedState};
-use crate::store::LogLine;
 use crate::config::Config;
-use crate::engine::{load_workflow_spec, AgentSpec, WorkflowSpec};
 use crate::engine::workflows::WorkflowRunner;
+use crate::engine::{load_workflow_spec, AgentSpec, WorkflowSpec};
 use crate::error::Result;
 use crate::llm::LlmClient;
 use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
 use crate::output::digest::{publish_digest, IncrementalDigest};
+use crate::store::LogLine;
 use crate::store::{PrSnapshot, Store};
 
 pub struct AgentLoop {
@@ -107,7 +107,11 @@ impl AgentLoop {
             format!(
                 "llm: {} ({})",
                 self.config.llm.model,
-                if self.llm.is_online() { "online" } else { "offline/heuristic" }
+                if self.llm.is_online() {
+                    "online"
+                } else {
+                    "offline/heuristic"
+                }
             ),
         );
 
@@ -122,7 +126,10 @@ impl AgentLoop {
         }
 
         if !self.mcp.is_available() {
-            self.log("error", "unistar-mcp unavailable — set mcp.command and GH_TOKEN");
+            self.log(
+                "error",
+                "unistar-mcp unavailable — set mcp.command and GH_TOKEN",
+            );
         }
 
         let result = match workflow_id {
@@ -247,7 +254,10 @@ impl AgentLoop {
                 let mut handled = false;
 
                 if ci_is_failing(&pr.ci) {
-                    self.log("info", format!("triaging {repo}#{} (CI: {})", pr.number, pr.ci));
+                    self.log(
+                        "info",
+                        format!("triaging {repo}#{} (CI: {})", pr.number, pr.ci),
+                    );
                     let outcome = triage_pr(
                         &self.config,
                         self.mcp.as_ref(),
@@ -369,13 +379,7 @@ impl AgentLoop {
         let summary = outcome.format_summary();
         self.log("info", summary.clone());
 
-        append_audit(
-            self.store.as_ref(),
-            "info",
-            "review-radar",
-            &summary,
-        )
-        .await;
+        append_audit(self.store.as_ref(), "info", "review-radar", &summary).await;
 
         Ok(summary)
     }
@@ -392,11 +396,22 @@ impl AgentLoop {
         .await?;
 
         let summary = outcome.format_summary();
-        self.log(if outcome.alerts.is_empty() { "info" } else { "warn" }, summary.clone());
+        self.log(
+            if outcome.alerts.is_empty() {
+                "info"
+            } else {
+                "warn"
+            },
+            summary.clone(),
+        );
 
         append_audit(
             self.store.as_ref(),
-            if outcome.alerts.is_empty() { "info" } else { "warn" },
+            if outcome.alerts.is_empty() {
+                "info"
+            } else {
+                "warn"
+            },
             "main-guard",
             &summary,
         )
@@ -419,13 +434,7 @@ impl AgentLoop {
         let summary = outcome.format_summary();
         self.log("info", summary.clone());
 
-        append_audit(
-            self.store.as_ref(),
-            "info",
-            "flaky-govern",
-            &summary,
-        )
-        .await;
+        append_audit(self.store.as_ref(), "info", "flaky-govern", &summary).await;
 
         Ok(summary)
     }
@@ -444,13 +453,7 @@ impl AgentLoop {
         let summary = outcome.format_summary();
         self.log("info", summary.clone());
 
-        append_audit(
-            self.store.as_ref(),
-            "info",
-            "oncall-handoff",
-            &summary,
-        )
-        .await;
+        append_audit(self.store.as_ref(), "info", "oncall-handoff", &summary).await;
 
         Ok(summary)
     }

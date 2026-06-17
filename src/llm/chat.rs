@@ -14,13 +14,17 @@ pub enum ChatAgentAction {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedToolCall {
+    pub id: String,
+    pub name: String,
+    pub args: Value,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChatAgentStep {
     pub action: ChatAgentAction,
     pub message: String,
-    pub tool_name: Option<String>,
-    pub tool_args: Option<Value>,
-    /// Native API tool call id (Ollama/OpenAI `tool_calls[].id`).
-    pub tool_call_id: Option<String>,
+    pub tool_calls: Vec<ResolvedToolCall>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +47,8 @@ pub struct LlmTurnMessage {
     pub tool_calls: Option<Vec<LlmToolCall>>,
     /// Set on `role: "tool"` result messages.
     pub tool_name: Option<String>,
+    /// Native API tool call id matching the assistant `tool_calls[].id`.
+    pub tool_call_id: Option<String>,
 }
 
 impl LlmTurnMessage {
@@ -52,15 +58,25 @@ impl LlmTurnMessage {
             content: content.into(),
             tool_calls: None,
             tool_name: None,
+            tool_call_id: None,
         }
     }
 
     pub fn tool_result(tool_name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::tool_result_with_id(None, tool_name, content)
+    }
+
+    pub fn tool_result_with_id(
+        tool_call_id: Option<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             role: "tool",
             content: content.into(),
             tool_calls: None,
             tool_name: Some(tool_name.into()),
+            tool_call_id,
         }
     }
 
@@ -70,6 +86,7 @@ impl LlmTurnMessage {
             content: content.into(),
             tool_calls: Some(tool_calls),
             tool_name: None,
+            tool_call_id: None,
         }
     }
 }
@@ -84,6 +101,9 @@ pub fn llm_messages_to_api_value(messages: &[LlmTurnMessage]) -> Value {
             obj.insert("content".into(), Value::String(m.content.clone()));
             if let Some(name) = &m.tool_name {
                 obj.insert("tool_name".into(), Value::String(name.clone()));
+            }
+            if let Some(id) = &m.tool_call_id {
+                obj.insert("tool_call_id".into(), Value::String(id.clone()));
             }
             if let Some(calls) = &m.tool_calls {
                 let api_calls: Vec<Value> = calls
@@ -109,21 +129,31 @@ pub fn llm_messages_to_api_value(messages: &[LlmTurnMessage]) -> Value {
 
 /// Build a harness step from native `tool_calls` + optional assistant `content`.
 pub fn step_from_native_turn(content: &str, tool_calls: &[LlmToolCall]) -> Result<ChatAgentStep> {
-    if let Some(call) = tool_calls.first() {
-        if tool_calls.len() > 1 {
-            tracing::warn!(
-                "model returned {} tool_calls; using first (`{}`)",
-                tool_calls.len(),
-                call.name
+    if !tool_calls.is_empty() {
+        let mut resolved = Vec::with_capacity(tool_calls.len());
+        for call in tool_calls {
+            let (name, args) = normalize_native_tool_call(&call.name, &call.arguments)?;
+            resolved.push(ResolvedToolCall {
+                id: call.id.clone(),
+                name,
+                args,
+            });
+        }
+        if resolved.len() > 1 {
+            tracing::debug!(
+                "model returned {} tool_calls: {}",
+                resolved.len(),
+                resolved
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
-        let (tool_name, tool_args) = normalize_native_tool_call(&call.name, &call.arguments)?;
         return Ok(ChatAgentStep {
             action: ChatAgentAction::Tool,
             message: strip_template_tokens(content),
-            tool_name: Some(tool_name),
-            tool_args: Some(tool_args),
-            tool_call_id: Some(call.id.clone()),
+            tool_calls: resolved,
         });
     }
     let message = strip_template_tokens(content).trim().to_string();
@@ -135,9 +165,7 @@ pub fn step_from_native_turn(content: &str, tool_calls: &[LlmToolCall]) -> Resul
     Ok(ChatAgentStep {
         action: ChatAgentAction::Reply,
         message,
-        tool_name: None,
-        tool_args: None,
-        tool_call_id: None,
+        tool_calls: Vec::new(),
     })
 }
 
@@ -169,10 +197,15 @@ pub fn tool_calls_stream_preview(tool_calls: &[LlmToolCall]) -> Option<String> {
         parts.push(format!("run_id={n}"));
     }
     let args_short = parts.join(", ");
-    if args_short.is_empty() {
-        Some(call.name.clone())
+    let first = if args_short.is_empty() {
+        call.name.clone()
     } else {
-        Some(format!("{}({args_short})", call.name))
+        format!("{}({args_short})", call.name)
+    };
+    if tool_calls.len() == 1 {
+        Some(first)
+    } else {
+        Some(format!("{first} +{} more", tool_calls.len() - 1))
     }
 }
 
@@ -189,7 +222,6 @@ pub struct ChatStreamUpdate {
 #[derive(Debug, Clone)]
 pub struct ChatStepOptions {
     pub compress_reasoning: bool,
-    pub reasoning_compress_min_chars: u32,
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -197,7 +229,6 @@ impl Default for ChatStepOptions {
     fn default() -> Self {
         Self {
             compress_reasoning: true,
-            reasoning_compress_min_chars: 480,
             cancel: None,
         }
     }
@@ -216,8 +247,8 @@ pub fn chat_cancel_requested(cancel: &Option<Arc<AtomicBool>>) -> bool {
 #[derive(Debug, Clone)]
 pub struct ChatAgentStepOutcome {
     pub step: ChatAgentStep,
-    /// Raw thinking trace to compress into context (handled by harness after stream ends).
-    pub reasoning_to_compress: Option<String>,
+    /// Non-empty thinking trace to fold into LLM context (verbatim or summarized).
+    pub reasoning_for_context: Option<String>,
 }
 
 impl LlmClient {
@@ -262,34 +293,56 @@ impl LlmClient {
                 step.message
             );
         }
-        let reasoning_to_compress = if should_compress_reasoning(
-            options.compress_reasoning,
-            &last_reasoning,
-            options.reasoning_compress_min_chars,
-        ) {
-            Some(last_reasoning)
-        } else {
-            None
-        };
+        let reasoning_for_context =
+            if should_capture_reasoning_for_context(options.compress_reasoning, &last_reasoning) {
+                Some(last_reasoning)
+            } else {
+                None
+            };
         Ok(ChatAgentStepOutcome {
             step,
-            reasoning_to_compress,
+            reasoning_for_context,
         })
     }
 }
 
-/// Summarize a long thinking trace via think=false LLM (called by harness after stream ends).
-pub async fn compress_reasoning_for_context(
-    llm: &LlmClient,
-    reasoning: &str,
-) -> Result<Option<String>> {
-    maybe_compress_reasoning(llm, reasoning, true, 0).await
+/// Whether any non-empty thinking trace should be kept in LLM context.
+pub fn should_capture_reasoning_for_context(enabled: bool, reasoning: &str) -> bool {
+    enabled && !reasoning.trim().is_empty()
 }
 
+/// Whether to call the summarizer LLM (long traces only).
 pub fn should_compress_reasoning(enabled: bool, reasoning: &str, min_chars: u32) -> bool {
-    enabled && reasoning.trim().len() >= min_chars as usize
+    should_capture_reasoning_for_context(enabled, reasoning)
+        && reasoning.trim().len() >= min_chars as usize
 }
 
+/// Verbatim or LLM-summarized body for `[agent reasoning summary]` context lines.
+pub async fn materialize_reasoning_for_context(
+    llm: &LlmClient,
+    raw: &str,
+    compress_enabled: bool,
+    min_chars: u32,
+) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    if should_compress_reasoning(compress_enabled, raw, min_chars) {
+        if let Some(summary) =
+            maybe_compress_reasoning(llm, raw, compress_enabled, min_chars).await?
+        {
+            return Ok(summary);
+        }
+        tracing::warn!(
+            reasoning_chars = trimmed.len(),
+            "reasoning summarizer failed; keeping verbatim trace (no local truncation)"
+        );
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Summarize a long thinking trace via think=false LLM (used by `materialize_reasoning_for_context`).
 async fn maybe_compress_reasoning(
     llm: &LlmClient,
     reasoning: &str,
@@ -303,10 +356,10 @@ async fn maybe_compress_reasoning(
         "compressing reasoning ~{} chars via summarizer",
         reasoning.len()
     );
-    const MAX_ATTEMPTS: u32 = 2;
+    const MAX_ATTEMPTS: u32 = 3;
     for attempt in 1..=MAX_ATTEMPTS {
         match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(90),
             llm.summarize_reasoning_trace(reasoning),
         )
         .await
@@ -321,7 +374,7 @@ async fn maybe_compress_reasoning(
                 tracing::warn!("reasoning compress failed (attempt {attempt}): {e}");
             }
             Err(_) => {
-                tracing::warn!("reasoning compress timed out after 60s (attempt {attempt})");
+                tracing::warn!("reasoning compress timed out after 90s (attempt {attempt})");
             }
         }
     }
@@ -442,9 +495,34 @@ fn reply_message_looks_complete(s: &str) -> bool {
 fn reply_message_has_broken_suffix(s: &str) -> bool {
     let lower = s.to_ascii_lowercase();
     const SUFFIXES: &[&str] = &[
-        " i", " a", " an", " the", " and", " or", " but", " to", " of", " for", " with",
-        " however,", " however", " though", " because", " when", " that", " which", " it", " my",
-        " your", " we", " they", " this", " these", " those", " if", " as",
+        " i",
+        " a",
+        " an",
+        " the",
+        " and",
+        " or",
+        " but",
+        " to",
+        " of",
+        " for",
+        " with",
+        " however,",
+        " however",
+        " though",
+        " because",
+        " when",
+        " that",
+        " which",
+        " it",
+        " my",
+        " your",
+        " we",
+        " they",
+        " this",
+        " these",
+        " those",
+        " if",
+        " as",
     ];
     if SUFFIXES.iter().any(|suffix| lower.ends_with(suffix)) {
         return true;
@@ -467,8 +545,28 @@ mod tests {
         }];
         let step = step_from_native_turn("", &calls).unwrap();
         assert_eq!(step.action, ChatAgentAction::Tool);
-        assert_eq!(step.tool_name.as_deref(), Some("pr_list_open"));
-        assert_eq!(step.tool_args.as_ref().unwrap()["repo"], "acme/widget");
+        assert_eq!(step.tool_calls.len(), 1);
+        assert_eq!(step.tool_calls[0].name, "pr_list_open");
+        assert_eq!(step.tool_calls[0].args["repo"], "acme/widget");
+    }
+
+    #[test]
+    fn step_from_native_multiple_tool_calls() {
+        let calls = vec![
+            LlmToolCall {
+                id: "call_1".into(),
+                name: "pr_get_overview".into(),
+                arguments: serde_json::json!({"repo": "o/r", "pr_number": 1}),
+            },
+            LlmToolCall {
+                id: "call_2".into(),
+                name: "pr_list_changed_files".into(),
+                arguments: serde_json::json!({"repo": "o/r", "pr_number": 1}),
+            },
+        ];
+        let step = step_from_native_turn("", &calls).unwrap();
+        assert_eq!(step.tool_calls.len(), 2);
+        assert_eq!(step.tool_calls[1].name, "pr_list_changed_files");
     }
 
     #[test]
@@ -489,8 +587,9 @@ mod tests {
             }),
         }];
         let step = step_from_native_turn("", &calls).unwrap();
-        assert_eq!(step.tool_name.as_deref(), Some("pr_get_overview"));
-        assert_eq!(step.tool_args.as_ref().unwrap()["pr_number"], 1);
+        assert_eq!(step.tool_calls.len(), 1);
+        assert_eq!(step.tool_calls[0].name, "pr_get_overview");
+        assert_eq!(step.tool_calls[0].args["pr_number"], 1);
     }
 
     #[test]
@@ -517,10 +616,52 @@ mod tests {
     }
 
     #[test]
+    fn should_capture_reasoning_when_non_empty() {
+        assert!(!should_capture_reasoning_for_context(true, ""));
+        assert!(!should_capture_reasoning_for_context(true, "   "));
+        assert!(should_capture_reasoning_for_context(true, "short trace"));
+        assert!(!should_capture_reasoning_for_context(false, "short trace"));
+    }
+
+    #[test]
     fn should_compress_reasoning_threshold() {
         assert!(!should_compress_reasoning(true, "short", 480));
         assert!(should_compress_reasoning(true, &"x".repeat(500), 480));
         assert!(!should_compress_reasoning(false, &"x".repeat(500), 480));
+    }
+
+    #[test]
+    fn short_reasoning_materializes_verbatim_without_llm() {
+        let raw = "Checking PR #42 CI before calling pr_get_overview.";
+        assert!(should_capture_reasoning_for_context(true, raw));
+        assert!(!should_compress_reasoning(true, raw, 480));
+        assert_eq!(raw.trim(), raw);
+    }
+
+    #[test]
+    fn long_reasoning_fallback_is_verbatim_not_local_truncation() {
+        let raw = "x".repeat(5_000);
+        assert!(should_compress_reasoning(true, &raw, 480));
+        // When summarizer fails, materialize keeps full trace — never 2000-char local cut.
+        assert!(!raw.contains("[reasoning truncated locally"));
+    }
+
+    #[test]
+    fn tool_calls_stream_preview_shows_batch_size() {
+        let calls = vec![
+            LlmToolCall {
+                id: "1".into(),
+                name: "pr_get_overview".into(),
+                arguments: serde_json::json!({"repo": "o/r", "pr_number": 1}),
+            },
+            LlmToolCall {
+                id: "2".into(),
+                name: "pr_list_changed_files".into(),
+                arguments: serde_json::json!({"repo": "o/r", "pr_number": 1}),
+            },
+        ];
+        let preview = tool_calls_stream_preview(&calls).unwrap();
+        assert!(preview.contains("+1 more"));
     }
 
     #[test]

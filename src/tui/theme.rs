@@ -254,9 +254,14 @@ pub fn tab_separator(th: ThemePalette) -> Span<'static> {
     Span::styled("│", Style::default().fg(th.border).bg(th.surface))
 }
 
-/// Usable markdown width inside the Messages pane after the continuation indent.
-pub fn message_content_max_width(panel_width: u16) -> usize {
+/// Usable markdown width inside the Messages pane (continuation indent).
+pub fn chat_content_max_width(panel_width: u16) -> usize {
     content_max_width(panel_width, message_indent_width())
+}
+
+/// Usable body width inside the Context panel (`  ` prefix per line).
+pub fn context_content_max_width(panel_width: u16) -> usize {
+    content_max_width(panel_width, 2)
 }
 
 /// Usable markdown width for the streaming tail body (deeper indent).
@@ -265,9 +270,128 @@ pub fn tail_content_max_width(panel_width: u16) -> usize {
 }
 
 fn content_max_width(panel_width: u16, indent_cols: usize) -> usize {
-    panel_width
-        .saturating_sub(indent_cols as u16)
-        .max(1) as usize
+    panel_width.saturating_sub(indent_cols as u16).max(1) as usize
+}
+
+fn meta_message_indent() -> &'static str {
+    "               "
+}
+
+fn meta_badge(th: ThemePalette, kind: &str) -> Span<'static> {
+    Span::styled(
+        format!(" {kind} "),
+        Style::default()
+            .fg(th.muted)
+            .bg(th.title_bg)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn format_system_help_body(body: &str) -> String {
+    body.split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| format!("• {part}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_system_session_row(body: &str) -> Option<(&str, &str, &str)> {
+    let body = body.trim();
+    let mut parts = body.split("  ").filter(|part| !part.is_empty());
+    let id = parts.next()?;
+    let date = parts.next()?;
+    let title = parts.next()?;
+    if !id.contains('-') || id.len() < 8 {
+        return None;
+    }
+    Some((id, date, title))
+}
+
+fn system_session_row_line(th: ThemePalette, id: &str, date: &str, title: &str) -> Line<'static> {
+    let short_id = crate::agent::context::truncate_chars(id, 8);
+    Line::from(vec![
+        Span::raw("      "),
+        Span::styled("┊ ", Style::default().fg(th.border)),
+        Span::styled(
+            short_id,
+            Style::default()
+                .fg(th.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {date}  "),
+            Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
+        ),
+        Span::styled(title.to_string(), Style::default().fg(th.text)),
+    ])
+}
+
+fn meta_message_lines(
+    th: ThemePalette,
+    kind: &str,
+    body: &str,
+    max_width: Option<usize>,
+) -> Vec<Line<'static>> {
+    let body = body.trim();
+    if body.is_empty() {
+        return vec![Line::from(vec![
+            Span::raw("    "),
+            Span::styled("┊ ", Style::default().fg(th.border)),
+            meta_badge(th, kind),
+        ])];
+    }
+
+    if kind == "system" {
+        if let Some((id, date, title)) = parse_system_session_row(body) {
+            return vec![system_session_row_line(th, id, date, title)];
+        }
+    }
+
+    let rendered_body = if kind == "system" && body.contains('/') && body.contains(';') {
+        format_system_help_body(body)
+    } else {
+        body.to_string()
+    };
+
+    let content_style = Style::default()
+        .fg(th.muted)
+        .add_modifier(Modifier::ITALIC);
+    let badge_cols = kind.len() + 2;
+    let first_line_budget = max_width.map(|width| width.saturating_sub(6 + 2 + badge_cols + 1));
+    let content_lines = super::markdown::markdown_to_lines_in_width(
+        th,
+        &rendered_body,
+        content_style,
+        first_line_budget,
+    );
+    let content_lines = if let Some(mw) = first_line_budget {
+        super::markdown::wrap_content_lines(content_lines, mw)
+    } else {
+        content_lines
+    };
+
+    let bar = Span::styled("┊ ", Style::default().fg(th.border));
+    let badge = meta_badge(th, kind);
+    let indent = meta_message_indent();
+    let mut out = Vec::with_capacity(content_lines.len().max(1));
+    for (i, content) in content_lines.into_iter().enumerate() {
+        if i == 0 {
+            let mut spans = vec![Span::raw("    "), bar.clone(), badge.clone(), Span::raw(" ")];
+            spans.extend(content.spans);
+            out.push(Line::from(spans));
+        } else if content.spans.is_empty() {
+            out.push(Line::from(""));
+        } else {
+            let mut spans = vec![Span::raw(indent)];
+            spans.extend(content.spans);
+            out.push(Line::from(spans));
+        }
+    }
+    if out.is_empty() {
+        out.push(Line::from(vec![Span::raw("    "), bar, badge]));
+    }
+    out
 }
 
 /// Expand one stored chat row into styled terminal lines.
@@ -291,9 +415,7 @@ pub fn format_chat_lines(
             Span::styled("⚠ ", Style::default().fg(th.warn)),
             Span::styled(
                 rest.to_string(),
-                Style::default()
-                    .fg(th.warn)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(th.warn).add_modifier(Modifier::ITALIC),
             ),
         ])];
     }
@@ -328,6 +450,12 @@ pub fn format_chat_lines(
             Span::styled(rest.to_string(), Style::default().fg(th.err)),
         ])];
     }
+    if let Some(rest) = line.strip_prefix("system> ") {
+        return meta_message_lines(th, "system", rest, max_width);
+    }
+    if let Some(rest) = line.strip_prefix("chat> ") {
+        return meta_message_lines(th, "chat", rest, max_width);
+    }
     line.split('\n')
         .map(|part| Line::from(Span::styled(part.to_string(), Style::default().fg(th.text))))
         .collect()
@@ -341,31 +469,6 @@ pub fn format_assistant_message_lines(
 ) -> Vec<Line<'static>> {
     let body = normalize_message_layout(body);
     message_lines(th, "AI", th.accent, th.ai_bg, &body, true, max_width)
-}
-
-/// Assistant reply body for the tail status area (indented under a spinner header).
-pub fn format_assistant_tail_body_lines(
-    th: ThemePalette,
-    body: &str,
-    max_width: Option<usize>,
-) -> Vec<Line<'static>> {
-    let body = normalize_message_layout(body);
-    let content_style = Style::default().fg(th.assistant);
-    let content_lines =
-        super::markdown::markdown_to_lines_in_width(th, &body, content_style, max_width);
-    let indent = tail_body_indent();
-    content_lines
-        .into_iter()
-        .map(|content| {
-            if content.spans.is_empty() {
-                Line::from("")
-            } else {
-                let mut spans = vec![Span::raw(indent.clone())];
-                spans.extend(content.spans);
-                Line::from(spans)
-            }
-        })
-        .collect()
 }
 
 fn tail_body_indent() -> String {
@@ -390,6 +493,9 @@ pub fn normalize_message_layout(body: &str) -> String {
     s
 }
 
+/// Panel-background gap between the role badge and message body on the first line.
+const MESSAGE_BODY_GAP: &str = " ";
+
 fn message_lines(
     th: ThemePalette,
     role: &str,
@@ -400,7 +506,7 @@ fn message_lines(
     max_width: Option<usize>,
 ) -> Vec<Line<'static>> {
     let content_style = Style::default().fg(if role == "You" { th.user } else { th.assistant });
-    let content_lines = if markdown {
+    let mut content_lines = if markdown {
         super::markdown::markdown_to_lines_in_width(th, body, content_style, max_width)
     } else {
         body.split('\n')
@@ -413,15 +519,28 @@ fn message_lines(
             })
             .collect()
     };
+    if let Some(mw) = max_width.filter(|w| *w > 0) {
+        let first_budget = mw + message_indent_width().saturating_sub(first_line_prefix_width(role));
+        let mut wrapped = Vec::new();
+        for (i, line) in content_lines.into_iter().enumerate() {
+            let budget = if i == 0 { first_budget } else { mw };
+            wrapped.extend(super::markdown::wrap_content_lines(vec![line], budget));
+        }
+        content_lines = wrapped;
+    }
 
-    let indent = " ".repeat(message_indent_width());
+    let indent = message_continuation_indent(role);
     let bar = Span::styled("▌ ", Style::default().fg(accent));
     let badge = role_badge(th, role, badge_bg);
 
     let mut out = Vec::with_capacity(content_lines.len().max(1));
     for (i, content) in content_lines.into_iter().enumerate() {
         if i == 0 {
-            let mut spans = vec![bar.clone(), badge.clone()];
+            let mut spans = vec![
+                bar.clone(),
+                badge.clone(),
+                Span::raw(MESSAGE_BODY_GAP),
+            ];
             spans.extend(content.spans);
             out.push(Line::from(spans));
         } else if content.spans.is_empty() {
@@ -449,7 +568,22 @@ fn role_badge(th: ThemePalette, role: &str, bg: Color) -> Span<'static> {
 }
 
 fn message_indent_width() -> usize {
-    "▌  You ".width()
+    message_prefix_width("You")
+}
+
+fn message_prefix_width(role: &str) -> usize {
+    UnicodeWidthStr::width("▌ ")
+        + UnicodeWidthStr::width(format!(" {role} ").as_str())
+        + UnicodeWidthStr::width(MESSAGE_BODY_GAP)
+}
+
+fn first_line_prefix_width(role: &str) -> usize {
+    message_prefix_width(role)
+}
+
+fn message_continuation_indent(role: &str) -> String {
+    let cols = message_prefix_width(role).max(message_indent_width());
+    " ".repeat(cols)
 }
 
 pub fn ci_status_style(th: ThemePalette, summary: &str) -> Style {
@@ -544,7 +678,10 @@ pub fn format_tool_transcript_lines(
         Span::raw("      "),
         Span::styled("✓ ", Style::default().fg(th.ok)),
         Span::styled(name, Style::default().fg(th.muted)),
-        Span::styled(" (transcript)", Style::default().fg(th.muted).add_modifier(Modifier::ITALIC)),
+        Span::styled(
+            " (transcript)",
+            Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
+        ),
     ])];
     if body.is_empty() {
         return out;
@@ -579,42 +716,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn assistant_tail_body_uses_same_markdown_as_message() {
-        let th = ThemePalette::dark();
-        let body = "* **#1**: first item\n* **#2**: second";
-        let message = format_assistant_message_lines(th, body, None);
-        let tail = format_assistant_tail_body_lines(th, body, None);
-        assert_eq!(message.len(), tail.len());
-        let msg_text: Vec<String> = message
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        let tail_text: Vec<String> = tail
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        for (m, t) in msg_text.iter().zip(tail_text.iter()) {
-            assert!(
-                t.trim() == m.trim() || m.contains(t.trim()),
-                "tail {t:?} should match message body in {m:?}"
-            );
-        }
-    }
-
-    #[test]
     fn assistant_tool_transcript_uses_tool_style_not_ai_badge() {
         let th = ThemePalette::dark();
-        let raw = "assistant> tool_result(pr_list_changed_files, pr_number=19275):\n1 changed file(s)";
+        let raw =
+            "assistant> tool_result(pr_list_changed_files, pr_number=19275):\n1 changed file(s)";
         let rows = format_chat_lines(th, raw, None);
         let joined: String = rows
             .iter()
@@ -661,6 +766,58 @@ mod tests {
     }
 
     #[test]
+    fn system_message_uses_meta_badge() {
+        let th = ThemePalette::dark();
+        let rows = format_chat_lines(th, "system> exported to /tmp/chat.md", None);
+        let joined: String = rows
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains('┊'));
+        assert!(joined.contains("system"));
+        assert!(joined.contains("exported"));
+        assert!(!joined.starts_with("system>"));
+    }
+
+    #[test]
+    fn system_help_splits_into_bullets() {
+        let th = ThemePalette::dark();
+        let rows = format_chat_lines(
+            th,
+            "system> /clear /new — transcript; /sessions — list; /export — save",
+            None,
+        );
+        assert!(rows.len() >= 2, "expected bullet list, got {}", rows.len());
+        let joined: String = rows
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains("/clear"));
+        assert!(joined.contains("/sessions"));
+    }
+
+    #[test]
+    fn system_session_row_formats_columns() {
+        let th = ThemePalette::dark();
+        let rows = format_chat_lines(
+            th,
+            "system> 1080bda6-820d-4d72-907d-0be336b127aa  06-12 14:30  CI triage for PR #42",
+            None,
+        );
+        assert_eq!(rows.len(), 1);
+        let joined: String = rows[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains("1080bda6"));
+        assert!(joined.contains("06-12"));
+        assert!(joined.contains("CI triage"));
+    }
+
+    #[test]
     fn duplicate_tool_line_uses_warn_style() {
         let th = ThemePalette::dark();
         let row = format_chat_lines(
@@ -687,6 +844,58 @@ mod tests {
         assert_eq!(pr_ci_glyph("failing (1/3)"), "✗");
         assert_eq!(pr_review_glyph("review-required"), "◉");
         assert_eq!(pr_review_glyph("approved"), "✓");
+    }
+
+    #[test]
+    fn assistant_message_fits_narrow_panel_with_badge() {
+        let th = ThemePalette::dark();
+        let panel = 30u16;
+        let content_w = chat_content_max_width(panel);
+        let body = "The GitHub secretary will analyze CI failures and suggest reruns for flaky jobs.";
+        let rows = format_assistant_message_lines(th, body, Some(content_w));
+        assert!(!rows.is_empty());
+        for line in &rows {
+            assert!(
+                line.width() <= panel as usize,
+                "line wider than panel: {:?}",
+                line
+            );
+        }
+        let joined: String = rows
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains("GitHub"));
+        assert!(!joined.contains("isHu"));
+    }
+
+    #[test]
+    fn message_badge_has_body_gap() {
+        let th = ThemePalette::dark();
+        let rows = format_chat_lines(th, "you> hello", Some(40));
+        let first: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(first.contains("You"), "expected badge: {first:?}");
+        assert!(
+            first.contains("You hello") || first.contains("You  hello"),
+            "expected gap between badge and body: {first:?}"
+        );
+    }
+
+    #[test]
+    fn user_url_fits_split_pane_width() {
+        let th = ThemePalette::dark();
+        let panel = 50u16;
+        let content_w = chat_content_max_width(panel);
+        let url = "https://github.com/acme/widget/actions/runs/27400805815/job/12345678901?pr=19194";
+        let rows = format_chat_lines(th, &format!("you> Read this PR runs: {url}"), Some(content_w));
+        let fitted = crate::tui::markdown::ensure_chat_lines_fit_panel(rows, panel);
+        assert!(
+            fitted.iter().all(|line| {
+                crate::tui::markdown::line_display_width(line) <= panel as usize
+            }),
+            "long URLs must wrap inside the Messages pane"
+        );
     }
 
     #[test]

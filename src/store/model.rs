@@ -283,6 +283,8 @@ pub enum ChatRole {
     Assistant,
     Tool,
     Harness,
+    /// Materialized agent thinking summary (`[agent reasoning summary]` in LLM context).
+    Reasoning,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

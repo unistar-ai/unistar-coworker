@@ -95,7 +95,11 @@ pub async fn run_breaking_sniff(
             }
 
             hits += 1;
-            digest.push_report_line(&format!("### #{number} {title}", number = pr.number, title = pr.title));
+            digest.push_report_line(&format!(
+                "### #{number} {title}",
+                number = pr.number,
+                title = pr.title
+            ));
             for h in &rule_hits {
                 digest.push_report_line(&format!("- {h}"));
             }

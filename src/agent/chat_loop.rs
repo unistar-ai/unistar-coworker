@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use futures_util::future::join_all;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -11,8 +12,8 @@ use uuid::Uuid;
 use crate::agent::budget::TokenBudget;
 use crate::agent::context::{
     estimate_message_tokens, format_tool_approval_pending_message, format_tool_context_message,
-    harness_nudge_base, history_token_budget,
-    pack_session_history_with_llm, trim_llm_messages_with_llm, trim_system_content, truncate_chars,
+    harness_nudge_base, history_token_budget, pack_session_history_with_llm,
+    trim_llm_messages_with_llm, trim_system_content, truncate_chars,
 };
 use crate::agent::parse::parse_failing_runs;
 use crate::agent::tool_catalog;
@@ -24,13 +25,12 @@ use crate::engine::{
 use crate::error::{CoworkerError, Result};
 use crate::llm::chat::{
     reply_claims_cannot_see_changes, reply_premature_for_task, ChatAgentStep, LlmToolCall,
+    ResolvedToolCall,
 };
 use crate::llm::{ChatAgentAction, ChatStepOptions, LlmClient, LlmTurnMessage};
 use crate::mcp::helpers::lazy_tool;
 use crate::mcp::McpClient;
-use crate::store::{
-    Approval, ApprovalKind, ApprovalStatus, ChatMessage, ChatRole, Store,
-};
+use crate::store::{Approval, ApprovalKind, ApprovalStatus, ChatMessage, ChatRole, Store};
 
 const MUTATING_TOOLS: &[&str] = &["ci_rerun_workflow", "pr_create_backport", "pr_post_comment"];
 
@@ -116,6 +116,10 @@ pub enum ChatProgress {
         retry: u32,
         preview: String,
     },
+    /// Reasoning summary materialized and persisted to the session store.
+    ReasoningSummary {
+        preview: String,
+    },
 }
 
 /// Max harness-only LLM retries per user turn (missing args, malformed JSON, etc.).
@@ -189,6 +193,7 @@ impl ChatProgress {
             Self::HarnessNudge { retry, preview } => {
                 format!("  ⚠ harness retry {retry}: {preview}")
             }
+            Self::ReasoningSummary { preview } => format!("  … reasoning: {preview}"),
         }
     }
 
@@ -226,6 +231,7 @@ impl ChatProgress {
             Self::HarnessNudge { retry, .. } => {
                 format!("chat: harness correction {retry}")
             }
+            Self::ReasoningSummary { .. } => String::new(),
         }
     }
 }
@@ -277,7 +283,7 @@ pub fn build_context_snapshot(
             let display_body = crate::agent::context::format_llm_message_for_context_panel(m);
             let content = truncate_chars(&display_body, CONTEXT_MESSAGE_MAX_CHARS);
             ContextLine {
-                display_role: context_display_role(m.role, &display_body),
+                display_role: context_display_role(m.role, &m.content),
                 content,
                 tokens: estimate_message_tokens(m),
             }
@@ -355,6 +361,14 @@ fn emit_context_snapshot(
             token_budget.context_limit,
         )),
     );
+}
+
+fn append_assistant_to_llm_context(llm_messages: &mut Vec<LlmTurnMessage>, message: &str) {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    llm_messages.push(LlmTurnMessage::new("assistant", trimmed.to_string()));
 }
 
 #[derive(Debug, Clone)]
@@ -648,7 +662,6 @@ Reply in natural language when the answer is complete.",
         );
         let stream_opts = ChatStepOptions {
             compress_reasoning: config.chat.compress_reasoning,
-            reasoning_compress_min_chars: config.chat.reasoning_compress_min_chars,
             cancel: cancel.clone(),
         };
         let outcome = match chat_llm_step_timeout(config.chat.llm_step_timeout_secs) {
@@ -720,24 +733,25 @@ Reply in natural language when the answer is complete.",
                         &native_tools,
                         stream_opts,
                         |stream| {
-                        if !stream.reasoning.is_empty() {
-                            emit_progress(
-                                &progress,
-                                ChatProgress::ReasoningPartial {
-                                    text: stream.reasoning,
-                                },
-                            );
-                        }
-                        if let Some(label) = stream.tool_pending {
-                            emit_progress(&progress, ChatProgress::ToolPending { label });
-                        }
-                        if let Some(partial) = stream.reply_partial {
-                            emit_progress(
-                                &progress,
-                                ChatProgress::AssistantPartial { text: partial },
-                            );
-                        }
-                    }),
+                            if !stream.reasoning.is_empty() {
+                                emit_progress(
+                                    &progress,
+                                    ChatProgress::ReasoningPartial {
+                                        text: stream.reasoning,
+                                    },
+                                );
+                            }
+                            if let Some(label) = stream.tool_pending {
+                                emit_progress(&progress, ChatProgress::ToolPending { label });
+                            }
+                            if let Some(partial) = stream.reply_partial {
+                                emit_progress(
+                                    &progress,
+                                    ChatProgress::AssistantPartial { text: partial },
+                                );
+                            }
+                        },
+                    ),
                 )
                 .await??,
             ),
@@ -745,16 +759,27 @@ Reply in natural language when the answer is complete.",
         let Some(outcome) = outcome else {
             continue;
         };
-        if let Some(raw) = &outcome.reasoning_to_compress {
-            emit_progress(&progress, ChatProgress::ReasoningCompressing);
-            if let Some(summary) =
-                crate::llm::chat::compress_reasoning_for_context(llm.as_ref(), raw).await?
-            {
-                llm_messages.push(LlmTurnMessage::new(
-                    "user",
-                    format!("[agent reasoning summary]\n{summary}"),
-                ));
+        if let Some(raw) = &outcome.reasoning_for_context {
+            if crate::llm::chat::should_compress_reasoning(
+                config.chat.compress_reasoning,
+                raw,
+                config.chat.reasoning_compress_min_chars,
+            ) {
+                emit_progress(&progress, ChatProgress::ReasoningCompressing);
             }
+            let summary_body = crate::llm::chat::materialize_reasoning_for_context(
+                llm.as_ref(),
+                raw,
+                config.chat.compress_reasoning,
+                config.chat.reasoning_compress_min_chars,
+            )
+            .await?;
+            if !summary_body.trim().is_empty() {
+                let content = format!("[agent reasoning summary]\n\n{summary_body}");
+                llm_messages.push(LlmTurnMessage::new("user", content.clone()));
+                persist_reasoning_summary(store.as_ref(), &session.id, &progress, &content).await?;
+            }
+            emit_context_snapshot(&progress, &llm_messages, llm_rounds, &token_budget);
         }
         let step = outcome.step;
         tracing::debug!("chat llm round {llm_rounds}: {:?}", step.action);
@@ -826,6 +851,8 @@ not a tool-result transcript. Synthesize from tool results already in context.";
                     None,
                 )
                 .await?;
+                append_assistant_to_llm_context(&mut llm_messages, &message);
+                emit_context_snapshot(&progress, &llm_messages, llm_rounds, &token_budget);
                 return Ok(ChatTurnResult {
                     session_id: session.id,
                     assistant_message: message,
@@ -852,17 +879,14 @@ from tool results already in context.";
                     continue;
                 }
 
-                let tool_name = step.tool_name.as_deref().ok_or_else(|| {
-                    CoworkerError::Workflow("tool action missing tool_name".into())
-                })?;
-                if !crate::llm::chat::is_plausible_tool_name(tool_name) {
-                    let nudge = tool_catalog.format_invalid_tool_nudge(tool_name);
+                if step.tool_calls.is_empty() {
+                    let nudge = "Tool action missing tool_calls — call at least one tool via the native tool API.";
                     if harness_retry_or_stop(
                         &mut harness_corrections,
                         &progress,
                         store.as_ref(),
                         &session.id,
-                        &nudge,
+                        nudge,
                         &mut llm_messages,
                     )
                     .await?
@@ -871,69 +895,11 @@ from tool results already in context.";
                     }
                     continue;
                 }
-                if !tool_catalog.is_known_chat_tool(tool_name) {
-                    let nudge = tool_catalog.format_unknown_tool_nudge(tool_name);
-                    if harness_retry_or_stop(
-                        &mut harness_corrections,
-                        &progress,
-                        store.as_ref(),
-                        &session.id,
-                        &nudge,
-                        &mut llm_messages,
-                    )
-                    .await?
-                    {
-                        break;
-                    }
-                    continue;
-                }
-                let mut tool_args = step.tool_args.clone().unwrap_or_else(|| json!({}));
-                normalize_model_tool_args(tool_name, &mut tool_args);
-                coerce_numeric_tool_args(tool_name, &mut tool_args);
-                normalize_pr_tool_args(tool_name, &mut tool_args);
-                fill_default_diff_max_bytes(tool_name, &mut tool_args);
-                normalize_pr_tool_args(tool_name, &mut tool_args);
 
-                let fingerprint = tool_call_fingerprint(tool_name, &tool_args);
-                if let Some(block) =
-                    duplicate_tool_block_reason(tool_exec_records.get(&fingerprint))
-                {
-                    let nudge_count = duplicate_tool_nudges
-                        .entry(fingerprint.clone())
-                        .or_insert(0);
-                    *nudge_count += 1;
-                    if duplicate_ui_shown.insert(fingerprint.clone()) {
-                        emit_progress(
-                            &progress,
-                            ChatProgress::DuplicateToolBlocked {
-                                tool_name: tool_name.to_string(),
-                                args_short: format_tool_args_short(&tool_args),
-                                attempt: *nudge_count,
-                            },
-                        );
-                    }
-                    if *nudge_count >= 2 {
-                        if !duplicate_forced_reply_nudged {
-                            duplicate_forced_reply_nudged = true;
-                            duplicate_tool_nudges.remove(&fingerprint);
-                        }
-                        let nudge =
-                            forced_reply_after_duplicate_tools_nudge(user_task, &tool_calls);
-                        if harness_retry_or_stop(
-                            &mut harness_corrections,
-                            &progress,
-                            store.as_ref(),
-                            &session.id,
-                            &nudge,
-                            &mut llm_messages,
-                        )
-                        .await?
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-                    let nudge = duplicate_tool_nudge(tool_name, block);
+                let prepared: Vec<PreparedToolCall> =
+                    step.tool_calls.iter().map(prepare_tool_call).collect();
+
+                if let Some(nudge) = validate_prepared_tool_calls(&prepared, &tool_catalog) {
                     if harness_retry_or_stop(
                         &mut harness_corrections,
                         &progress,
@@ -949,197 +915,124 @@ from tool results already in context.";
                     continue;
                 }
 
-                push_native_assistant_tool_call(&mut llm_messages, &step, tool_name, &tool_args);
-
-                tools_used += 1;
-
-                if is_mutating_tool(tool_name) {
-                    let queued =
-                        queue_mutating_approval(store.as_ref(), tool_name, &tool_args).await?;
-                    if let Some(detail) =
-                        maybe_auto_approve_mutations(config, &store, &mcp, &queued).await?
-                    {
-                        emit_progress(
-                            &progress,
-                            ChatProgress::ApprovalResolved {
-                                approval_id: queued.id,
-                                tool_name: queued.tool_name.clone(),
-                                approved: true,
-                                detail: detail.clone(),
-                            },
-                        );
-                        tool_calls.push(ToolCallSummary {
-                            tool_name: format!("approval:{}", queued.tool_name),
-                            output: detail.clone(),
-                        });
-                        let ctx = format_tool_context_message(
-                            tool_name,
-                            &tool_args,
-                            true,
-                            &format!("Auto-approved: {detail}"),
-                        );
-                        llm_messages.push(LlmTurnMessage::tool_result(tool_name, ctx.clone()));
-                        append_message(
-                            store.as_ref(),
-                            &session.id,
-                            ChatRole::Tool,
-                            &ctx,
-                            Some(tool_name),
-                            Some(tool_args.to_string()),
-                        )
-                        .await?;
-                        continue;
-                    }
-                    persist_native_assistant_tool_call(
+                let batch_size = prepared.len() as u32;
+                if max_tools > 0 && tools_used.saturating_add(batch_size) > max_tools {
+                    let nudge = "Tool budget exhausted — reply with your best answer \
+from tool results already in context.";
+                    if harness_retry_or_stop(
+                        &mut harness_corrections,
+                        &progress,
                         store.as_ref(),
                         &session.id,
-                        &step,
-                        tool_name,
-                        &tool_args,
+                        nudge,
+                        &mut llm_messages,
+                    )
+                    .await?
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                if let Some(duplicate) = prepared.iter().find_map(|call| {
+                    duplicate_tool_block_reason(tool_exec_records.get(&call.fingerprint))
+                        .map(|block| (call.clone(), block))
+                }) {
+                    let (call, block) = duplicate;
+                    let mut round = ToolRoundState {
+                        harness_corrections: &mut harness_corrections,
+                        progress: &progress,
+                        store: store.as_ref(),
+                        session_id: &session.id,
+                        llm_messages: &mut llm_messages,
+                        duplicate_tool_nudges: &mut duplicate_tool_nudges,
+                        duplicate_ui_shown: &mut duplicate_ui_shown,
+                        duplicate_forced_reply_nudged: &mut duplicate_forced_reply_nudged,
+                        tool_calls: &mut tool_calls,
+                        tool_exec_records: &mut tool_exec_records,
+                        tool_catalog: &tool_catalog,
+                        configured_repos: &config.repos,
+                        user_task,
+                    };
+                    if maybe_block_duplicate_tool_call(&mut round, &call, block).await? {
+                        break;
+                    }
+                    continue;
+                }
+
+                push_native_assistant_tool_calls(&mut llm_messages, &step);
+
+                let (readonly, mutating): (Vec<_>, Vec<_>) = prepared
+                    .into_iter()
+                    .partition(|call| !is_mutating_tool(&call.name));
+
+                if !readonly.is_empty() {
+                    tools_used += readonly.len() as u32;
+                    let outcomes = execute_readonly_tools_parallel(
+                        store.clone(),
+                        mcp.clone(),
+                        cancel.clone(),
+                        progress.clone(),
+                        readonly,
                     )
                     .await?;
-                    emit_progress(
-                        &progress,
-                        ChatProgress::ApprovalQueued {
-                            approval_id: queued.id,
-                            session_id: session.id,
-                            tool_name: queued.tool_name.clone(),
-                            tool_args_json: tool_args.to_string(),
-                            description: queued.description.clone(),
+                    for outcome in outcomes {
+                        let mut round = ToolRoundState {
+                            harness_corrections: &mut harness_corrections,
+                            progress: &progress,
+                            store: store.as_ref(),
+                            session_id: &session.id,
+                            llm_messages: &mut llm_messages,
+                            duplicate_tool_nudges: &mut duplicate_tool_nudges,
+                            duplicate_ui_shown: &mut duplicate_ui_shown,
+                            duplicate_forced_reply_nudged: &mut duplicate_forced_reply_nudged,
+                            tool_calls: &mut tool_calls,
+                            tool_exec_records: &mut tool_exec_records,
+                            tool_catalog: &tool_catalog,
+                            configured_repos: &config.repos,
+                            user_task,
+                        };
+                        record_tool_outcome(&mut round, outcome).await?;
+                    }
+                    emit_context_snapshot(&progress, &llm_messages, llm_rounds, &token_budget);
+                }
+
+                if let Some(mut_call) = mutating.first().cloned() {
+                    if mutating.len() > 1 {
+                        tracing::warn!(
+                            "model returned {} mutating tool_calls; only the first runs per round",
+                            mutating.len()
+                        );
+                    }
+                    tools_used += 1;
+                    match handle_mutating_tool_call(
+                        MutatingToolContext {
+                            store: store.as_ref(),
+                            session_id: &session.id,
+                            step: &step,
+                            config,
+                            store_arc: &store,
+                            mcp: &mcp,
+                            progress: &progress,
+                            llm_messages: &mut llm_messages,
+                            tool_calls: &mut tool_calls,
+                            llm_rounds,
+                            token_budget: &token_budget,
                         },
-                    );
-                    tool_calls.push(ToolCallSummary {
-                        tool_name: format!("approval:{}", queued.tool_name),
-                        output: queued.summary.clone(),
-                    });
-                    let pending_body = format!(
-                        "Mutating tool awaiting approval. {}",
-                        queued.summary
-                    );
-                    let ctx = format_tool_approval_pending_message(
-                        tool_name,
-                        &tool_args,
-                        queued.id,
-                        &pending_body,
-                    );
-                    append_message(
-                        store.as_ref(),
-                        &session.id,
-                        ChatRole::Tool,
-                        &ctx,
-                        Some(tool_name),
-                        Some(tool_args.to_string()),
+                        &mut_call,
                     )
-                    .await?;
-                    return Ok(ChatTurnResult {
-                        session_id: session.id,
-                        assistant_message: String::new(),
-                        tool_calls,
-                        awaiting_approval: true,
-                    });
-                }
-
-                ensure_chat_not_cancelled(&cancel)?;
-                let args_short = format_tool_args_short(&tool_args);
-                emit_progress(
-                    &progress,
-                    ChatProgress::ToolStart {
-                        name: tool_name.to_string(),
-                        args_short,
-                    },
-                );
-                let tool_start = Instant::now();
-                let result = match race_chat_cancel(
-                    cancel.clone(),
-                    execute_readonly_tool(
-                        store.as_ref(),
-                        mcp.as_ref(),
-                        tool_name,
-                        tool_args.clone(),
-                    ),
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(e) => return Err(e),
-                };
-                let (output, ok) = match result {
-                    Ok(o) if tool_output_indicates_failure(tool_name, &o) => (o, false),
-                    Ok(o) => (o, true),
-                    Err(e) => (format!("tool error: {e}"), false),
-                };
-                let ctx = format_tool_context_message(tool_name, &tool_args, ok, &output);
-                let tool_elapsed = tool_start.elapsed().as_millis();
-                emit_progress(
-                    &progress,
-                    ChatProgress::ToolDone {
-                        name: tool_name.to_string(),
-                        args_short: format_tool_args_short(&tool_args),
-                        ok,
-                        elapsed_ms: tool_elapsed,
-                        output_preview: crate::agent::context::truncate_chars(&ctx, 6_000),
-                    },
-                );
-                tool_calls.push(ToolCallSummary {
-                    tool_name: tool_name.to_string(),
-                    output: ctx.clone(),
-                });
-                let record =
-                    tool_exec_records
-                        .entry(fingerprint.clone())
-                        .or_insert(ToolExecRecord {
-                            succeeded: false,
-                            fail_count: 0,
-                        });
-                if ok {
-                    record.succeeded = true;
-                    duplicate_tool_nudges.remove(&fingerprint);
-                    duplicate_ui_shown.remove(&fingerprint);
-                } else {
-                    record.fail_count += 1;
-                }
-                append_message(
-                    store.as_ref(),
-                    &session.id,
-                    ChatRole::Tool,
-                    &ctx,
-                    Some(tool_name),
-                    Some(tool_args.to_string()),
-                )
-                .await?;
-
-                llm_messages.push(LlmTurnMessage::tool_result(tool_name, ctx.clone()));
-                if ok {
-                    remove_satisfied_missing_arg_nudges(&mut llm_messages, tool_name, &tool_args);
-                    prune_stale_missing_arg_nudges(&mut llm_messages);
-                }
-                if !ok {
-                    let nudge = maybe_push_tool_failure_harness_nudge(
-                        &tool_catalog,
-                        tool_name,
-                        &tool_args,
-                        &output,
-                        &config.repos,
-                        &mut llm_messages,
-                    );
-                    append_message(
-                        store.as_ref(),
-                        &session.id,
-                        ChatRole::Harness,
-                        &nudge,
-                        None,
-                        None,
-                    )
-                    .await?;
-                }
-                emit_context_snapshot(&progress, &llm_messages, llm_rounds, &token_budget);
-
-                if ok && tool_name == "ci_analyze_pr_failures" && ci_analyze_lacks_runs(&output) {
-                    llm_messages.push(LlmTurnMessage::new(
-                        "user",
-                        "ci_analyze returned no actionable run IDs in this response \
-(pending checks or empty output).",
-                    ));
+                    .await?
+                    {
+                        MutatingToolOutcome::Continue => {}
+                        MutatingToolOutcome::AwaitingApproval => {
+                            return Ok(ChatTurnResult {
+                                session_id: session.id,
+                                assistant_message: String::new(),
+                                tool_calls,
+                                awaiting_approval: true,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -1162,6 +1055,8 @@ from tool results already in context.";
         None,
     )
     .await?;
+    append_assistant_to_llm_context(&mut llm_messages, &fallback);
+    emit_context_snapshot(&progress, &llm_messages, llm_rounds, &token_budget);
     Ok(ChatTurnResult {
         session_id: session.id,
         assistant_message: fallback,
@@ -1236,18 +1131,16 @@ async fn persist_native_assistant_tool_call(
     store: &dyn Store,
     session_id: &Uuid,
     step: &ChatAgentStep,
-    tool_name: &str,
-    tool_args: &Value,
 ) -> Result<()> {
-    let id = step
-        .tool_call_id
-        .clone()
-        .unwrap_or_else(|| format!("call_{}", Uuid::new_v4()));
-    let calls = vec![LlmToolCall {
-        id,
-        name: tool_name.to_string(),
-        arguments: tool_args.clone(),
-    }];
+    let calls: Vec<LlmToolCall> = step
+        .tool_calls
+        .iter()
+        .map(|call| LlmToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.args.clone(),
+        })
+        .collect();
     let tool_calls_json = serde_json::to_string(&calls)?;
     append_message(
         store,
@@ -1837,6 +1730,27 @@ fn prune_stale_missing_arg_nudges(messages: &mut Vec<LlmTurnMessage>) {
     });
 }
 
+async fn persist_reasoning_summary(
+    store: &dyn Store,
+    session_id: &Uuid,
+    progress: &Option<broadcast::Sender<AppEvent>>,
+    content: &str,
+) -> Result<()> {
+    append_message(store, session_id, ChatRole::Reasoning, content, None, None).await?;
+    let body = crate::agent::context::strip_reasoning_summary_marker(content);
+    let preview = body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(body);
+    emit_progress(
+        progress,
+        ChatProgress::ReasoningSummary {
+            preview: crate::agent::context::truncate_chars(preview, 120),
+        },
+    );
+    Ok(())
+}
+
 async fn persist_harness_nudge(
     store: &dyn Store,
     session_id: &Uuid,
@@ -1871,24 +1785,361 @@ async fn harness_retry_or_stop(
     Ok(*harness_corrections > MAX_HARNESS_CORRECTIONS)
 }
 
-fn push_native_assistant_tool_call(
-    messages: &mut Vec<LlmTurnMessage>,
-    step: &ChatAgentStep,
-    tool_name: &str,
-    tool_args: &Value,
-) {
-    let id = step
-        .tool_call_id
-        .clone()
-        .unwrap_or_else(|| format!("call_{}", Uuid::new_v4()));
+#[derive(Debug, Clone)]
+struct PreparedToolCall {
+    id: String,
+    name: String,
+    args: Value,
+    fingerprint: String,
+}
+
+struct ToolRoundState<'a> {
+    harness_corrections: &'a mut u32,
+    progress: &'a Option<broadcast::Sender<AppEvent>>,
+    store: &'a dyn Store,
+    session_id: &'a Uuid,
+    llm_messages: &'a mut Vec<LlmTurnMessage>,
+    duplicate_tool_nudges: &'a mut HashMap<String, u32>,
+    duplicate_ui_shown: &'a mut HashSet<String>,
+    duplicate_forced_reply_nudged: &'a mut bool,
+    tool_calls: &'a mut Vec<ToolCallSummary>,
+    tool_exec_records: &'a mut HashMap<String, ToolExecRecord>,
+    tool_catalog: &'a crate::agent::tool_catalog::ToolCatalog<'a>,
+    configured_repos: &'a [String],
+    user_task: &'a str,
+}
+
+#[derive(Debug, Clone)]
+struct ReadonlyToolOutcome {
+    call: PreparedToolCall,
+    output: String,
+    ok: bool,
+}
+
+enum MutatingToolOutcome {
+    Continue,
+    AwaitingApproval,
+}
+
+fn prepare_tool_call(call: &ResolvedToolCall) -> PreparedToolCall {
+    let mut args = call.args.clone();
+    normalize_model_tool_args(&call.name, &mut args);
+    coerce_numeric_tool_args(&call.name, &mut args);
+    normalize_pr_tool_args(&call.name, &mut args);
+    fill_default_diff_max_bytes(&call.name, &mut args);
+    normalize_pr_tool_args(&call.name, &mut args);
+    let fingerprint = tool_call_fingerprint(&call.name, &args);
+    PreparedToolCall {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        args,
+        fingerprint,
+    }
+}
+
+fn validate_prepared_tool_calls(
+    calls: &[PreparedToolCall],
+    tool_catalog: &crate::agent::tool_catalog::ToolCatalog<'_>,
+) -> Option<String> {
+    for call in calls {
+        if !crate::llm::chat::is_plausible_tool_name(&call.name) {
+            return Some(tool_catalog.format_invalid_tool_nudge(&call.name));
+        }
+        if !tool_catalog.is_known_chat_tool(&call.name) {
+            return Some(tool_catalog.format_unknown_tool_nudge(&call.name));
+        }
+    }
+    None
+}
+
+async fn maybe_block_duplicate_tool_call(
+    round: &mut ToolRoundState<'_>,
+    call: &PreparedToolCall,
+    block: DuplicateToolBlock,
+) -> Result<bool> {
+    let nudge_count = round
+        .duplicate_tool_nudges
+        .entry(call.fingerprint.clone())
+        .or_insert(0);
+    *nudge_count += 1;
+    if round.duplicate_ui_shown.insert(call.fingerprint.clone()) {
+        emit_progress(
+            round.progress,
+            ChatProgress::DuplicateToolBlocked {
+                tool_name: call.name.clone(),
+                args_short: format_tool_args_short(&call.args),
+                attempt: *nudge_count,
+            },
+        );
+    }
+    if *nudge_count >= 2 {
+        if !*round.duplicate_forced_reply_nudged {
+            *round.duplicate_forced_reply_nudged = true;
+            round.duplicate_tool_nudges.remove(&call.fingerprint);
+        }
+        let nudge = forced_reply_after_duplicate_tools_nudge(round.user_task, round.tool_calls);
+        return harness_retry_or_stop(
+            round.harness_corrections,
+            round.progress,
+            round.store,
+            round.session_id,
+            &nudge,
+            round.llm_messages,
+        )
+        .await;
+    }
+    let nudge = duplicate_tool_nudge(&call.name, block);
+    harness_retry_or_stop(
+        round.harness_corrections,
+        round.progress,
+        round.store,
+        round.session_id,
+        &nudge,
+        round.llm_messages,
+    )
+    .await
+}
+
+fn push_native_assistant_tool_calls(messages: &mut Vec<LlmTurnMessage>, step: &ChatAgentStep) {
+    let calls: Vec<LlmToolCall> = step
+        .tool_calls
+        .iter()
+        .map(|call| LlmToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.args.clone(),
+        })
+        .collect();
     messages.push(LlmTurnMessage::assistant_tool_call(
         step.message.clone(),
-        vec![LlmToolCall {
-            id,
-            name: tool_name.to_string(),
-            arguments: tool_args.clone(),
-        }],
+        calls,
     ));
+}
+
+async fn execute_readonly_tools_parallel(
+    store: Arc<dyn Store>,
+    mcp: Arc<dyn McpClient>,
+    cancel: Option<Arc<AtomicBool>>,
+    progress: Option<broadcast::Sender<AppEvent>>,
+    calls: Vec<PreparedToolCall>,
+) -> Result<Vec<ReadonlyToolOutcome>> {
+    let futures = calls.into_iter().map(|call| {
+        let store = Arc::clone(&store);
+        let mcp = Arc::clone(&mcp);
+        let cancel = cancel.clone();
+        let progress = progress.clone();
+        async move {
+            ensure_chat_not_cancelled(&cancel)?;
+            let args_short = format_tool_args_short(&call.args);
+            emit_progress(
+                &progress,
+                ChatProgress::ToolStart {
+                    name: call.name.clone(),
+                    args_short,
+                },
+            );
+            let tool_start = Instant::now();
+            let result = match race_chat_cancel(
+                cancel.clone(),
+                execute_readonly_tool(store.as_ref(), mcp.as_ref(), &call.name, call.args.clone()),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => return Err(e),
+            };
+            let (output, ok) = match result {
+                Ok(o) if tool_output_indicates_failure(&call.name, &o) => (o, false),
+                Ok(o) => (o, true),
+                Err(e) => (format!("tool error: {e}"), false),
+            };
+            let elapsed_ms = tool_start.elapsed().as_millis();
+            let ctx = format_tool_context_message(&call.name, &call.args, ok, &output);
+            emit_progress(
+                &progress,
+                ChatProgress::ToolDone {
+                    name: call.name.clone(),
+                    args_short: format_tool_args_short(&call.args),
+                    ok,
+                    elapsed_ms,
+                    output_preview: crate::agent::context::truncate_chars(&ctx, 6_000),
+                },
+            );
+            Ok(ReadonlyToolOutcome { call, output, ok })
+        }
+    });
+    join_all(futures).await.into_iter().collect()
+}
+
+async fn record_tool_outcome(
+    round: &mut ToolRoundState<'_>,
+    outcome: ReadonlyToolOutcome,
+) -> Result<()> {
+    let PreparedToolCall {
+        id,
+        name,
+        args,
+        fingerprint,
+    } = outcome.call;
+    let output = outcome.output;
+    let ok = outcome.ok;
+    let ctx = format_tool_context_message(&name, &args, ok, &output);
+    round.tool_calls.push(ToolCallSummary {
+        tool_name: name.clone(),
+        output: ctx.clone(),
+    });
+    let record = round
+        .tool_exec_records
+        .entry(fingerprint.clone())
+        .or_insert(ToolExecRecord {
+            succeeded: false,
+            fail_count: 0,
+        });
+    if ok {
+        record.succeeded = true;
+        round.duplicate_tool_nudges.remove(&fingerprint);
+        round.duplicate_ui_shown.remove(&fingerprint);
+    } else {
+        record.fail_count += 1;
+    }
+    append_message(
+        round.store,
+        round.session_id,
+        ChatRole::Tool,
+        &ctx,
+        Some(&name),
+        Some(args.to_string()),
+    )
+    .await?;
+    round.llm_messages.push(LlmTurnMessage::tool_result_with_id(
+        Some(id),
+        name.clone(),
+        ctx.clone(),
+    ));
+    if ok {
+        remove_satisfied_missing_arg_nudges(round.llm_messages, &name, &args);
+        prune_stale_missing_arg_nudges(round.llm_messages);
+    } else {
+        let nudge = maybe_push_tool_failure_harness_nudge(
+            round.tool_catalog,
+            &name,
+            &args,
+            &output,
+            round.configured_repos,
+            round.llm_messages,
+        );
+        append_message(
+            round.store,
+            round.session_id,
+            ChatRole::Harness,
+            &nudge,
+            None,
+            None,
+        )
+        .await?;
+    }
+    if ok && name == "ci_analyze_pr_failures" && ci_analyze_lacks_runs(&output) {
+        round.llm_messages.push(LlmTurnMessage::new(
+            "user",
+            "ci_analyze returned no actionable run IDs in this response \
+(pending checks or empty output).",
+        ));
+    }
+    Ok(())
+}
+
+struct MutatingToolContext<'a> {
+    store: &'a dyn Store,
+    session_id: &'a Uuid,
+    step: &'a ChatAgentStep,
+    config: &'a Config,
+    store_arc: &'a Arc<dyn Store>,
+    mcp: &'a Arc<dyn McpClient>,
+    progress: &'a Option<broadcast::Sender<AppEvent>>,
+    llm_messages: &'a mut Vec<LlmTurnMessage>,
+    tool_calls: &'a mut Vec<ToolCallSummary>,
+    llm_rounds: u32,
+    token_budget: &'a TokenBudget,
+}
+
+async fn handle_mutating_tool_call(
+    ctx: MutatingToolContext<'_>,
+    call: &PreparedToolCall,
+) -> Result<MutatingToolOutcome> {
+    let tool_name = call.name.as_str();
+    let tool_args = &call.args;
+    let queued = queue_mutating_approval(ctx.store, tool_name, tool_args).await?;
+    if let Some(detail) =
+        maybe_auto_approve_mutations(ctx.config, ctx.store_arc, ctx.mcp, &queued).await?
+    {
+        emit_progress(
+            ctx.progress,
+            ChatProgress::ApprovalResolved {
+                approval_id: queued.id,
+                tool_name: queued.tool_name.clone(),
+                approved: true,
+                detail: detail.clone(),
+            },
+        );
+        ctx.tool_calls.push(ToolCallSummary {
+            tool_name: format!("approval:{}", queued.tool_name),
+            output: detail.clone(),
+        });
+        let body = format_tool_context_message(
+            tool_name,
+            tool_args,
+            true,
+            &format!("Auto-approved: {detail}"),
+        );
+        ctx.llm_messages.push(LlmTurnMessage::tool_result_with_id(
+            Some(call.id.clone()),
+            tool_name,
+            body.clone(),
+        ));
+        append_message(
+            ctx.store,
+            ctx.session_id,
+            ChatRole::Tool,
+            &body,
+            Some(tool_name),
+            Some(tool_args.to_string()),
+        )
+        .await?;
+        return Ok(MutatingToolOutcome::Continue);
+    }
+    persist_native_assistant_tool_call(ctx.store, ctx.session_id, ctx.step).await?;
+    emit_progress(
+        ctx.progress,
+        ChatProgress::ApprovalQueued {
+            approval_id: queued.id,
+            session_id: *ctx.session_id,
+            tool_name: queued.tool_name.clone(),
+            tool_args_json: tool_args.to_string(),
+            description: queued.description.clone(),
+        },
+    );
+    ctx.tool_calls.push(ToolCallSummary {
+        tool_name: format!("approval:{}", queued.tool_name),
+        output: queued.summary.clone(),
+    });
+    let pending_body = format!("Mutating tool awaiting approval. {}", queued.summary);
+    let body = format_tool_approval_pending_message(tool_name, tool_args, queued.id, &pending_body);
+    append_message(
+        ctx.store,
+        ctx.session_id,
+        ChatRole::Tool,
+        &body,
+        Some(tool_name),
+        Some(tool_args.to_string()),
+    )
+    .await?;
+    emit_context_snapshot(
+        ctx.progress,
+        ctx.llm_messages,
+        ctx.llm_rounds,
+        ctx.token_budget,
+    );
+    Ok(MutatingToolOutcome::AwaitingApproval)
 }
 
 async fn execute_readonly_tool(
@@ -2193,14 +2444,8 @@ mod tests {
     #[test]
     fn stale_missing_arg_nudge_is_pruned_from_history_context() {
         let mut msgs = vec![
-            LlmTurnMessage::new(
-                "user",
-                "Tool `pr_get_overview` is missing required `repo`.",
-            ),
-            LlmTurnMessage::tool_result(
-                "pr_get_overview",
-                "PR #19263 in acme/widget",
-            ),
+            LlmTurnMessage::new("user", "Tool `pr_get_overview` is missing required `repo`."),
+            LlmTurnMessage::tool_result("pr_get_overview", "PR #19263 in acme/widget"),
         ];
         prune_stale_missing_arg_nudges(&mut msgs);
         assert_eq!(msgs.len(), 1);
@@ -2350,6 +2595,19 @@ mod tests {
     }
 
     #[test]
+    fn build_context_snapshot_includes_final_assistant_reply() {
+        use crate::llm::LlmTurnMessage;
+        let msgs = vec![
+            LlmTurnMessage::new("user", "What failed in CI?"),
+            LlmTurnMessage::new("assistant", "Run 123 failed due to a DB auth error."),
+        ];
+        let snap = build_context_snapshot(&msgs, 3, 40_000, 64_000);
+        let last = snap.messages.last().expect("assistant reply");
+        assert_eq!(last.display_role, "assistant");
+        assert!(last.content.contains("DB auth error"));
+    }
+
+    #[test]
     fn build_context_snapshot_counts_messages() {
         use crate::llm::LlmTurnMessage;
         let msgs = vec![
@@ -2417,6 +2675,13 @@ mod tests {
         assert_eq!(
             dup.status_text(),
             "chat: duplicate pr_get_overview (attempt 2)"
+        );
+        let reasoning = ChatProgress::ReasoningSummary {
+            preview: "Checked CI on PR #42".into(),
+        };
+        assert_eq!(
+            reasoning.display_line(),
+            "  … reasoning: Checked CI on PR #42"
         );
     }
 

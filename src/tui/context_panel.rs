@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation};
 
 use crate::agent::chat_loop::ContextSnapshot;
 use crate::app::AppState;
@@ -121,10 +121,11 @@ fn render_message_content(
     th: ThemePalette,
     display_role: &str,
     content: &str,
-    max_width: Option<usize>,
+    content_max_width: usize,
 ) -> Vec<Line<'static>> {
     let base = role_content_style(th, display_role);
-    markdown_to_lines_in_width(th, content, base, max_width)
+    let mw = content_max_width.max(1);
+    markdown_to_lines_in_width(th, content, base, Some(mw))
         .into_iter()
         .map(|line| {
             if line.spans.is_empty() {
@@ -141,7 +142,7 @@ fn render_message_content(
 fn build_message_lines(
     th: ThemePalette,
     snapshot: Option<&ContextSnapshot>,
-    max_width: Option<usize>,
+    content_max_width: usize,
 ) -> Vec<Line<'static>> {
     let Some(snap) = snapshot else {
         return vec![
@@ -176,7 +177,7 @@ fn build_message_lines(
             th,
             &msg.display_role,
             &msg.content,
-            max_width.map(|w| w.saturating_sub(2)),
+            content_max_width,
         ));
     }
     lines
@@ -209,10 +210,7 @@ fn draw_context_header(
     }
 
     let Some(snap) = snapshot else {
-        let line = Line::from(vec![Span::styled(
-            "  — / —",
-            Style::default().fg(th.muted),
-        )]);
+        let line = Line::from(vec![Span::styled("  — / —", Style::default().fg(th.muted))]);
         frame.render_widget(Paragraph::new(line), inner);
         return;
     };
@@ -237,14 +235,23 @@ fn draw_context_header(
             ),
         ]),
         Line::from(vec![Span::styled(
-            format!("  {}", token_bar(snap.tokens_used, snap.context_limit, bar_w)),
+            format!(
+                "  {}",
+                token_bar(snap.tokens_used, snap.context_limit, bar_w)
+            ),
             Style::default().fg(if over { th.err } else { th.accent }),
         )]),
         Line::from(vec![
             Span::styled("input cap ", Style::default().fg(th.muted)),
-            Span::styled(format_tokens(snap.input_budget), Style::default().fg(th.muted)),
+            Span::styled(
+                format_tokens(snap.input_budget),
+                Style::default().fg(th.muted),
+            ),
             Span::styled("  ·  ", Style::default().fg(th.muted)),
-            Span::styled(format!("{} msgs", snap.message_count), Style::default().fg(th.muted)),
+            Span::styled(
+                format!("{} msgs", snap.message_count),
+                Style::default().fg(th.muted),
+            ),
             Span::styled("  ·  ", Style::default().fg(th.muted)),
             Span::styled(format!("step {}", snap.turn), Style::default().fg(th.muted)),
         ]),
@@ -284,25 +291,23 @@ pub fn draw_context_panel(frame: &mut ratatui::Frame, area: Rect, state: &AppSta
     let inner = block.inner(body_area);
     frame.render_widget(block, body_area);
 
-    let lines = build_message_lines(
-        th,
-        state.chat_context.as_ref(),
-        Some(inner.width.max(1) as usize),
-    );
-    let width = inner.width.max(1);
-    let paragraph = Paragraph::new(Text::from(lines))
-        .style(Style::default().bg(th.panel))
-        .wrap(Wrap { trim: false });
+    let panel_w = inner.width.max(1);
+    let content_w = theme::context_content_max_width(panel_w);
+    let raw_lines = build_message_lines(th, state.chat_context.as_ref(), content_w);
+    let lines = crate::tui::markdown::reflow_chat_lines_to_width(raw_lines, panel_w);
 
     let visible = inner.height.max(1);
-    let total = paragraph.line_count(width) as u16;
+    let total = lines.len().min(u16::MAX as usize) as u16;
     let max_scroll = total.saturating_sub(visible);
-    let scroll_from_bottom = state
-        .chat_context_scroll_from_bottom
-        .min(max_scroll);
+    let scroll_from_bottom = state.chat_context_scroll_from_bottom.min(max_scroll);
     let scroll_y = max_scroll.saturating_sub(scroll_from_bottom);
 
-    frame.render_widget(paragraph.scroll((scroll_y, 0)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(Style::default().bg(th.panel))
+            .scroll((scroll_y, 0)),
+        inner,
+    );
 
     if total > visible {
         let mut sb_state = paragraph_scrollbar_state(total, visible, scroll_y);
@@ -326,7 +331,10 @@ mod tests {
 
     #[test]
     fn format_context_usage_shows_limit_and_pct() {
-        assert_eq!(format_context_usage(12_400, 64_000), "12.4k / 64.0k (19.4%)");
+        assert_eq!(
+            format_context_usage(12_400, 64_000),
+            "12.4k / 64.0k (19.4%)"
+        );
     }
 
     #[test]
@@ -350,7 +358,11 @@ mod tests {
                 tokens: 42,
             }],
         };
-        let lines = build_message_lines(th, Some(&snap), Some(72));
+        let lines = build_message_lines(
+            th,
+            Some(&snap),
+            theme::context_content_max_width(72),
+        );
         let joined = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -375,7 +387,6 @@ mod tests {
 
     #[test]
     fn context_panel_wraps_long_plain_text() {
-        use ratatui::widgets::{Paragraph, Wrap};
         let th = theme::ThemePalette::dark();
         let snap = ContextSnapshot {
             turn: 1,
@@ -390,18 +401,23 @@ mod tests {
             }],
         };
         let width = 48u16;
-        let lines = build_message_lines(th, Some(&snap), Some(width as usize));
-        let p = Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false });
+        let content_w = theme::context_content_max_width(width);
+        let raw = build_message_lines(th, Some(&snap), content_w);
+        let lines = crate::tui::markdown::reflow_chat_lines_to_width(raw, width);
         assert!(
-            p.line_count(width) > 1,
+            lines.len() > 1,
             "non-table context body should wrap in the panel"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|l| crate::tui::markdown::line_display_width_for_test(l) <= width as usize),
+            "each context row must fit panel width"
         );
     }
 
     #[test]
     fn context_panel_wraps_long_markdown() {
-        use ratatui::widgets::{Paragraph, Wrap};
         let th = theme::ThemePalette::dark();
         let snap = ContextSnapshot {
             turn: 1,
@@ -416,18 +432,17 @@ mod tests {
             }],
         };
         let width = 48u16;
-        let lines = build_message_lines(th, Some(&snap), Some(width as usize));
-        let p = Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false });
+        let content_w = theme::context_content_max_width(width);
+        let raw = build_message_lines(th, Some(&snap), content_w);
+        let lines = crate::tui::markdown::reflow_chat_lines_to_width(raw, width);
         assert!(
-            p.line_count(width) > 1,
+            lines.len() > 1,
             "markdown paragraphs should wrap in the panel"
         );
     }
 
     #[test]
     fn context_panel_table_rows_stay_single_line() {
-        use ratatui::widgets::{Paragraph, Wrap};
         let th = theme::ThemePalette::dark();
         let snap = ContextSnapshot {
             turn: 1,
@@ -442,7 +457,9 @@ mod tests {
             }],
         };
         let width = 36u16;
-        let lines = build_message_lines(th, Some(&snap), Some(width as usize));
+        let content_w = theme::context_content_max_width(width);
+        let raw = build_message_lines(th, Some(&snap), content_w);
+        let lines = crate::tui::markdown::reflow_chat_lines_to_width(raw, width);
         let table_line_count = lines
             .iter()
             .filter(|l| {
@@ -452,11 +469,78 @@ mod tests {
             })
             .count();
         assert!(table_line_count >= 2, "expected formatted table rows");
-        let p = Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false });
+        for line in &lines {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let t = text.trim();
+            if t.starts_with('│') || (t.starts_with('├') && t.ends_with('┤')) {
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(text.as_str()) <= width as usize,
+                    "table row wider than panel: {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn context_tool_log_fits_panel_width() {
+        let th = theme::ThemePalette::dark();
+        let snap = ContextSnapshot {
+            turn: 1,
+            tokens_used: 50,
+            input_budget: 40_000,
+            context_limit: 64_000,
+            message_count: 1,
+            messages: vec![ContextLine {
+                display_role: "tool".into(),
+                content: "tool_result(ci_get_failed_logs):\n##[error]Process completed with exit code 1.\nrun / unit tests / test\tUNKNOWN STEP\t        AssertionError: expected 1 to equal 2".into(),
+                tokens: 10,
+            }],
+        };
+        let width = 30u16;
+        let content_w = theme::context_content_max_width(width);
+        let raw = build_message_lines(th, Some(&snap), content_w);
+        let lines = crate::tui::markdown::reflow_chat_lines_to_width(raw, width);
         assert!(
-            p.line_count(width) >= table_line_count,
-            "table rows should not be word-wrapped into extra lines"
+            lines.iter().all(|l| {
+                crate::tui::markdown::line_display_width_for_test(l) <= width as usize
+            }),
+            "CI log lines must fit narrow context panel"
+        );
+    }
+
+    #[test]
+    fn context_panel_shows_reasoning_summary_role() {
+        let th = theme::ThemePalette::dark();
+        let snap = ContextSnapshot {
+            turn: 1,
+            tokens_used: 120,
+            input_budget: 40_000,
+            context_limit: 64_000,
+            message_count: 1,
+            messages: vec![ContextLine {
+                display_role: "reasoning".into(),
+                content: "- checked CI on PR #42\n- will fetch diff".into(),
+                tokens: 30,
+            }],
+        };
+        let lines = build_message_lines(
+            th,
+            Some(&snap),
+            theme::context_content_max_width(72),
+        );
+        let joined = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.clone())
+            .collect::<String>();
+        assert!(
+            joined.contains("[reasoning]"),
+            "expected reasoning role label"
+        );
+        assert!(joined.contains("PR #42"), "expected summary body");
+        assert!(
+            !joined.contains("[agent reasoning summary]"),
+            "marker should be stripped from context panel body"
         );
     }
 }

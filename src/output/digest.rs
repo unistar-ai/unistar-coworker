@@ -11,7 +11,7 @@ use crate::engine::AgentSpec;
 use crate::error::Result;
 use crate::llm::ClassifyVerdict;
 use crate::output::export::maybe_export_digest;
-use crate::store::{Digest, DigestSummary, Store, format_duration};
+use crate::store::{format_duration, Digest, DigestSummary, Store};
 
 /// Builds and publishes a digest incrementally during daily-work.
 pub struct IncrementalDigest {
@@ -49,38 +49,93 @@ impl IncrementalDigest {
         } else {
             agent.name.clone()
         };
-        let (title, attention_header, ok_header, policy_header, summary_mode) = match agent_name.as_str() {
-            "review-radar" => (
-                "Review Radar",
-                "Needs attention",
-                "Waiting for review",
-                "Policy gates",
-                SummaryMode::Waiting,
-            ),
-            "main-guard" => ("Main Guard", "Main alerts", "Clear", "Policy gates", SummaryMode::Alerts),
-            "flaky-govern" => ("Flaky Govern", "Report", "Notes", "Policy gates", SummaryMode::Report),
-            "oncall-handoff" => ("On-call Handoff", "Handoff pack", "Notes", "Policy gates", SummaryMode::Report),
-            "my-pr-brief" => (
-                "My PR Brief",
-                "CI failing",
-                "Waiting for review",
-                "Ready to merge",
-                SummaryMode::MyBrief,
-            ),
-            "ci-efficiency" => ("CI Efficiency", "Report", "Notes", "Policy gates", SummaryMode::Report),
-            "security-digest" => ("Security Digest", "Alerts", "Notes", "Policy gates", SummaryMode::Report),
-            "pr-hygiene" | "merge-health" => ("PR Hygiene", "Findings", "Notes", "Policy gates", SummaryMode::Report),
-            "release-notes" | "regression-link" => ("Release Notes", "Report", "Notes", "Policy gates", SummaryMode::Report),
-            "comment-assist" => ("Comment Assist", "Drafts", "Notes", "Policy gates", SummaryMode::Report),
-            "light-review" | "breaking-sniff" => ("Light Review", "Risks", "Notes", "Policy gates", SummaryMode::Report),
-            _ => (
-                "Daily Digest",
-                "Needs attention",
-                "OK / ignorable",
-                "Policy gates",
-                SummaryMode::Daily,
-            ),
-        };
+        let (title, attention_header, ok_header, policy_header, summary_mode) =
+            match agent_name.as_str() {
+                "review-radar" => (
+                    "Review Radar",
+                    "Needs attention",
+                    "Waiting for review",
+                    "Policy gates",
+                    SummaryMode::Waiting,
+                ),
+                "main-guard" => (
+                    "Main Guard",
+                    "Main alerts",
+                    "Clear",
+                    "Policy gates",
+                    SummaryMode::Alerts,
+                ),
+                "flaky-govern" => (
+                    "Flaky Govern",
+                    "Report",
+                    "Notes",
+                    "Policy gates",
+                    SummaryMode::Report,
+                ),
+                "oncall-handoff" => (
+                    "On-call Handoff",
+                    "Handoff pack",
+                    "Notes",
+                    "Policy gates",
+                    SummaryMode::Report,
+                ),
+                "my-pr-brief" => (
+                    "My PR Brief",
+                    "CI failing",
+                    "Waiting for review",
+                    "Ready to merge",
+                    SummaryMode::MyBrief,
+                ),
+                "ci-efficiency" => (
+                    "CI Efficiency",
+                    "Report",
+                    "Notes",
+                    "Policy gates",
+                    SummaryMode::Report,
+                ),
+                "security-digest" => (
+                    "Security Digest",
+                    "Alerts",
+                    "Notes",
+                    "Policy gates",
+                    SummaryMode::Report,
+                ),
+                "pr-hygiene" | "merge-health" => (
+                    "PR Hygiene",
+                    "Findings",
+                    "Notes",
+                    "Policy gates",
+                    SummaryMode::Report,
+                ),
+                "release-notes" | "regression-link" => (
+                    "Release Notes",
+                    "Report",
+                    "Notes",
+                    "Policy gates",
+                    SummaryMode::Report,
+                ),
+                "comment-assist" => (
+                    "Comment Assist",
+                    "Drafts",
+                    "Notes",
+                    "Policy gates",
+                    SummaryMode::Report,
+                ),
+                "light-review" | "breaking-sniff" => (
+                    "Light Review",
+                    "Risks",
+                    "Notes",
+                    "Policy gates",
+                    SummaryMode::Report,
+                ),
+                _ => (
+                    "Daily Digest",
+                    "Needs attention",
+                    "OK / ignorable",
+                    "Policy gates",
+                    SummaryMode::Daily,
+                ),
+            };
         Self {
             id: Uuid::new_v4(),
             date: Utc::now().date_naive(),
@@ -106,8 +161,7 @@ impl IncrementalDigest {
     }
 
     pub fn begin_repo(&mut self, repo: &str) {
-        self.attention_section
-            .push_str(&format!("### {repo}\n\n"));
+        self.attention_section.push_str(&format!("### {repo}\n\n"));
         self.flaky_section.push_str(&format!("### {repo}\n\n"));
         self.policy_section.push_str(&format!("### {repo}\n\n"));
         self.ok_section.push_str(&format!("### {repo}\n\n"));
@@ -221,9 +275,7 @@ impl IncrementalDigest {
         self.ignorable += 1;
         self.processed_prs += 1;
         let url = format!("https://github.com/{repo}/pull/{number}");
-        let author_suffix = author
-            .map(|a| format!(" (@{a})"))
-            .unwrap_or_default();
+        let author_suffix = author.map(|a| format!(" (@{a})")).unwrap_or_default();
         self.ok_section.push_str(&format!(
             "- [#{number} {title}]({url}){author_suffix} — waiting for review (CI: {ci})\n"
         ));
@@ -393,11 +445,7 @@ async fn maybe_notify_slack(config: &Config, digest: &Digest) {
         digest.summary.ignorable,
     );
     let body = serde_json::json!({ "text": text });
-    let _ = reqwest::Client::new()
-        .post(url)
-        .json(&body)
-        .send()
-        .await;
+    let _ = reqwest::Client::new().post(url).json(&body).send().await;
 }
 
 #[cfg(test)]
@@ -466,10 +514,14 @@ mod tests {
         assert_eq!(digest.summary.flaky_candidates, 1);
         assert_eq!(digest.summary.needs_attention, 0);
         assert!(digest.body_md.contains("## Policy gates"));
-        assert!(digest.body_md.contains("approval checker — obtain approval"));
+        assert!(digest
+            .body_md
+            .contains("approval checker — obtain approval"));
         assert!(!digest.body_md.contains("Diagnosis:"));
         assert!(digest.body_md.contains("build → flaky"));
-        assert!(!digest.body_md.contains("## Needs attention\n\n### acme/widget\n\n- #1"));
+        assert!(!digest
+            .body_md
+            .contains("## Needs attention\n\n### acme/widget\n\n- #1"));
     }
 
     #[test]

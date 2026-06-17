@@ -112,7 +112,11 @@ impl Engine {
                 format!(
                     "chat: resuming after approval {} ({})",
                     resume.approval_id,
-                    if resume.approved { "approved" } else { "denied" }
+                    if resume.approved {
+                        "approved"
+                    } else {
+                        "denied"
+                    }
                 ),
             );
             s.status = "chat: resuming after approval…".into();

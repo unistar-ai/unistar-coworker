@@ -39,7 +39,11 @@ struct ClassifyResponse {
 impl ClassifyResponse {
     fn sanitized(mut self) -> Self {
         self.reason = sanitize_llm_field(&self.reason);
-        self.diagnosis = self.diagnosis.as_deref().map(sanitize_llm_field).filter(|s| !s.is_empty());
+        self.diagnosis = self
+            .diagnosis
+            .as_deref()
+            .map(sanitize_llm_field)
+            .filter(|s| !s.is_empty());
         self.recommended_action = self
             .recommended_action
             .as_deref()
@@ -461,10 +465,7 @@ Failed logs (this page only):\n{logs}"
 
         let base_limit = self.chat_output_limit();
         let attempts: [(Option<bool>, u32); 3] = [
-            (
-                if self.cfg.think { None } else { Some(false) },
-                base_limit,
-            ),
+            (if self.cfg.think { None } else { Some(false) }, base_limit),
             (Some(false), base_limit.saturating_mul(2).min(8192)),
             (Some(false), 8192),
         ];
@@ -476,10 +477,10 @@ Failed logs (this page only):\n{logs}"
             if i > 0 {
                 let nudge = if last.content.trim().is_empty() && last.tool_calls.is_empty() {
                     "Your last turn returned no assistant text and no tool_calls. \
-Either call exactly one tool or reply to the user in plain text."
+Call one or more tools or reply to the user in plain text."
                         .to_string()
                 } else {
-                    "Your last turn was incomplete. Call one tool or reply with a complete answer."
+                    "Your last turn was incomplete. Call tool(s) or reply with a complete answer."
                         .to_string()
                 };
                 msgs.as_array_mut().unwrap().push(serde_json::json!({
@@ -773,7 +774,10 @@ later context. Keep PR numbers, decisions, tool outcomes, and open questions. No
             { "role": "user", "content": user },
         ]);
         let limit = self.cfg.history_summary_tokens.clamp(128, 400);
-        match self.chat_plain_messages(&messages, limit, Some(false)).await {
+        match self
+            .chat_plain_messages(&messages, limit, Some(false))
+            .await
+        {
             Ok(summary) if !summary.trim().is_empty() => Ok(summary.trim().to_string()),
             Ok(_) => {
                 tracing::warn!(
@@ -860,9 +864,7 @@ fn log_ollama_thinking_budget(v: &serde_json::Value, max_thinking_tokens: u32, t
     };
     let est = estimate_tokens(thinking);
     if est > max_thinking_tokens {
-        tracing::info!(
-            "ollama thinking ~{est} tokens (soft budget {max_thinking_tokens})"
-        );
+        tracing::info!("ollama thinking ~{est} tokens (soft budget {max_thinking_tokens})");
     } else {
         tracing::debug!("ollama thinking ~{est} tokens");
     }
@@ -929,9 +931,9 @@ fn extract_ollama_plain_content(v: &serde_json::Value) -> Result<String> {
 }
 
 fn extract_openai_chat_content(v: &serde_json::Value) -> Result<String> {
-    let msg = v.pointer("/choices/0/message").ok_or_else(|| {
-        CoworkerError::Other(anyhow::anyhow!("llm missing choices[0].message"))
-    })?;
+    let msg = v
+        .pointer("/choices/0/message")
+        .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm missing choices[0].message")))?;
 
     if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
         let trimmed = content.trim();
@@ -1059,13 +1061,16 @@ fn parse_native_tool_calls_from_array(arr: &[serde_json::Value]) -> Vec<super::c
         let Some(name) = func.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        let arguments = func.get("arguments").map(|a| {
-            if let Some(s) = a.as_str() {
-                serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({ "raw": s }))
-            } else {
-                a.clone()
-            }
-        }).unwrap_or_else(|| serde_json::json!({}));
+        let arguments = func
+            .get("arguments")
+            .map(|a| {
+                if let Some(s) = a.as_str() {
+                    serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({ "raw": s }))
+                } else {
+                    a.clone()
+                }
+            })
+            .unwrap_or_else(|| serde_json::json!({}));
         let id = if id == "call" {
             format!("call_{idx}")
         } else {
@@ -1147,11 +1152,7 @@ pub(crate) fn strip_template_tokens(text: &str) -> String {
 
 fn trim_trailing_template_junk(s: &str) -> String {
     let mut s = s.trim().to_string();
-    while s.ends_with('{')
-        || s.ends_with(',')
-        || s.ends_with(':')
-        || s.ends_with('"')
-    {
+    while s.ends_with('{') || s.ends_with(',') || s.ends_with(':') || s.ends_with('"') {
         s.pop();
         s = s.trim_end().to_string();
     }
@@ -1207,7 +1208,9 @@ pub(crate) fn sanitize_llm_field(text: &str) -> String {
 }
 
 /// Strip markdown fences and parse classify JSON from model output.
-fn parse_classify_response(content: &str) -> std::result::Result<ClassifyResponse, serde_json::Error> {
+fn parse_classify_response(
+    content: &str,
+) -> std::result::Result<ClassifyResponse, serde_json::Error> {
     if let Ok(v) = try_parse_classify_json(content) {
         return Ok(v.sanitized());
     }
@@ -1228,7 +1231,9 @@ fn parse_classify_response(content: &str) -> std::result::Result<ClassifyRespons
     try_parse_classify_json(content).map(ClassifyResponse::sanitized)
 }
 
-fn try_parse_classify_json(content: &str) -> std::result::Result<ClassifyResponse, serde_json::Error> {
+fn try_parse_classify_json(
+    content: &str,
+) -> std::result::Result<ClassifyResponse, serde_json::Error> {
     let trimmed = content.trim();
     if let Ok(v) = serde_json::from_str::<ClassifyResponse>(trimmed) {
         return Ok(v);
@@ -1268,9 +1273,11 @@ fn salvage_truncated_classify(content: &str) -> Option<ClassifyResponse> {
 
     Some(ClassifyResponse {
         verdict,
-        reason: mark_partial_llm_output(reason
-            .or(diagnosis.clone())
-            .unwrap_or_else(|| "truncated LLM response (partial JSON recovered)".into())),
+        reason: mark_partial_llm_output(
+            reason
+                .or(diagnosis.clone())
+                .unwrap_or_else(|| "truncated LLM response (partial JSON recovered)".into()),
+        ),
         diagnosis,
         recommended_action,
         test_name,
@@ -1376,7 +1383,11 @@ fn extract_json_string_field(s: &str, key: &str) -> Option<String> {
     }
 
     let out = out.trim().to_string();
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn parse_verdict_str(s: &str) -> Option<ClassifyVerdict> {
@@ -1457,7 +1468,11 @@ pub fn format_classify_digest_lines(
     classify: &ClassifyResult,
 ) -> Vec<String> {
     let verdict = verdict_label(classify.verdict);
-    let source = if classify.used_llm { "llm" } else { "heuristic" };
+    let source = if classify.used_llm {
+        "llm"
+    } else {
+        "heuristic"
+    };
     let run_url = github_actions_run_url(repo, run_id);
     let run_ref = format!("[{run_id}]({run_url})");
     let mut lines = vec![format!(
@@ -1492,12 +1507,7 @@ pub fn format_classify_digest_lines(
 }
 
 /// One-line policy entry for the digest (no Diagnosis/Action blocks).
-pub fn format_policy_digest_line(
-    repo: &str,
-    run_id: i64,
-    workflow: &str,
-    hint: &str,
-) -> String {
+pub fn format_policy_digest_line(repo: &str, run_id: i64, workflow: &str, hint: &str) -> String {
     let hint = sanitize_llm_field(hint);
     let hint = if hint.is_empty() {
         "resolve policy gate".to_string()
@@ -1537,17 +1547,18 @@ fn verdict_label(v: ClassifyVerdict) -> &'static str {
 }
 
 pub fn llm_reason_text(classify: &ClassifyResult) -> String {
-    let diagnosis = classify
-        .diagnosis
-        .as_deref()
-        .unwrap_or(&classify.reason);
+    let diagnosis = classify.diagnosis.as_deref().unwrap_or(&classify.reason);
     let action = classify
         .recommended_action
         .as_deref()
         .unwrap_or("(no action given)");
     format!(
         "{diagnosis} | Action: {action} ({})",
-        if classify.used_llm { "llm" } else { "heuristic" }
+        if classify.used_llm {
+            "llm"
+        } else {
+            "heuristic"
+        }
     )
 }
 
@@ -1839,7 +1850,8 @@ mod tests {
         apply_structured_format(&mut body, true);
         assert!(body.get("format").unwrap().get("properties").is_some());
         assert_eq!(
-            body.pointer("/response_format/type").and_then(|v| v.as_str()),
+            body.pointer("/response_format/type")
+                .and_then(|v| v.as_str()),
             Some("json_schema")
         );
     }
@@ -1886,7 +1898,8 @@ mod tests {
 
     #[test]
     fn sanitize_llm_field_strips_thought_process_leak() {
-        let raw = "Missing approval for this PR, or thethought_process: The user wants me to triage";
+        let raw =
+            "Missing approval for this PR, or thethought_process: The user wants me to triage";
         let clean = sanitize_llm_field(raw);
         assert!(!clean.contains("thought_process"));
         assert!(clean.starts_with("Missing approval"));
@@ -1901,8 +1914,14 @@ mod tests {
 "#;
         let r = parse_classify_response(raw).unwrap();
         assert_eq!(r.verdict, ClassifyVerdict::Unknown);
-        assert!(r.diagnosis.as_ref().is_some_and(|d| d.contains("backport checker")));
-        assert!(r.recommended_action.as_ref().is_some_and(|a| a.contains("author should")));
+        assert!(r
+            .diagnosis
+            .as_ref()
+            .is_some_and(|d| d.contains("backport checker")));
+        assert!(r
+            .recommended_action
+            .as_ref()
+            .is_some_and(|a| a.contains("author should")));
         assert!(r.reason.contains("Backport approval missing"));
     }
 
@@ -1924,7 +1943,9 @@ mod tests {
             "Backport PR manager approval checker",
             &c,
         );
-        assert!(line.contains("[27400805815](https://github.com/acme/widget/actions/runs/27400805815)"));
+        assert!(
+            line.contains("[27400805815](https://github.com/acme/widget/actions/runs/27400805815)")
+        );
         assert!(line.contains("Obtain manager approval"));
         assert!(!line.contains("Diagnosis:"));
     }
@@ -1959,8 +1980,10 @@ mod tests {
             pages_read: 1,
             page_summary: None,
         };
-        let lines = format_classify_digest_lines("acme/widget", 27400326361, "Package & Release", &c);
-        assert!(lines[0].contains("[27400326361](https://github.com/acme/widget/actions/runs/27400326361)"));
+        let lines =
+            format_classify_digest_lines("acme/widget", 27400326361, "Package & Release", &c);
+        assert!(lines[0]
+            .contains("[27400326361](https://github.com/acme/widget/actions/runs/27400326361)"));
 
         let policy = ClassifyResult {
             verdict: ClassifyVerdict::Policy,
@@ -1974,6 +1997,7 @@ mod tests {
         };
         let policy_lines =
             format_classify_digest_lines("acme/widget", 27400805815, "Backport checker", &policy);
-        assert!(policy_lines[0].contains("[27400805815](https://github.com/acme/widget/actions/runs/27400805815)"));
+        assert!(policy_lines[0]
+            .contains("[27400805815](https://github.com/acme/widget/actions/runs/27400805815)"));
     }
 }

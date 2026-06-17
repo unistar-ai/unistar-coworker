@@ -11,8 +11,7 @@ use crate::agent::context::harness_nudge_base;
 use crate::error::{CoworkerError, Result};
 use crate::store::{
     Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, ChatSession,
-    Classification,
-    Digest, FlakyIncident, FlakyQuery, FlakyTestRollup, IssueSnapshot, MainAlert,
+    Classification, Digest, FlakyIncident, FlakyQuery, FlakyTestRollup, IssueSnapshot, MainAlert,
     MainAlertQuery, PrSnapshot, RegressionLink, RerunOutcome, Store, Transcript, WorkflowRun,
 };
 use async_trait::async_trait;
@@ -52,9 +51,7 @@ impl JsonStore {
             .write(true)
             .truncate(true)
             .open(self.lock_path())?;
-        lock_file
-            .lock_exclusive()
-            .map_err(CoworkerError::Io)?;
+        lock_file.lock_exclusive().map_err(CoworkerError::Io)?;
         let result = f();
         let _ = lock_file.unlock();
         result
@@ -93,9 +90,7 @@ impl JsonStore {
         let new_base = harness_nudge_base(&msg.content);
         if let Some(last) = lines.last() {
             if let Ok(prev) = serde_json::from_str::<ChatMessage>(last) {
-                if prev.role == ChatRole::Harness
-                    && harness_nudge_base(&prev.content) == new_base
-                {
+                if prev.role == ChatRole::Harness && harness_nudge_base(&prev.content) == new_base {
                     lines.pop();
                 }
             }
@@ -203,8 +198,12 @@ impl Store for JsonStore {
         let mut out = Vec::new();
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
-            if repo.is_some_and(|r| !entry.file_name().to_string_lossy().contains(&Self::repo_file(r)))
-            {
+            if repo.is_some_and(|r| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(&Self::repo_file(r))
+            }) {
                 continue;
             }
             let map: HashMap<u32, PrSnapshot> = read_json(&entry.path())?;
@@ -499,10 +498,7 @@ impl Store for JsonStore {
     }
 
     async fn get_chat_session(&self, id: &Uuid) -> Result<Option<ChatSession>> {
-        let path = self
-            .root
-            .join("chat/sessions")
-            .join(format!("{id}.json"));
+        let path = self.root.join("chat/sessions").join(format!("{id}.json"));
         if !path.exists() {
             return Ok(None);
         }
@@ -569,7 +565,11 @@ impl Store for JsonStore {
         Ok(())
     }
 
-    async fn list_chat_messages(&self, session_id: &Uuid, limit: usize) -> Result<Vec<ChatMessage>> {
+    async fn list_chat_messages(
+        &self,
+        session_id: &Uuid,
+        limit: usize,
+    ) -> Result<Vec<ChatMessage>> {
         let path = self
             .root
             .join("chat/messages")
@@ -672,7 +672,11 @@ impl Store for JsonStore {
         Ok(list)
     }
 
-    async fn reclassify_flaky(&self, fingerprint: &str, classification: Classification) -> Result<u32> {
+    async fn reclassify_flaky(
+        &self,
+        fingerprint: &str,
+        classification: Classification,
+    ) -> Result<u32> {
         self.with_lock(|| {
             let path = self.root.join("flaky/incidents.jsonl");
             if !path.exists() {

@@ -12,14 +12,14 @@ mod theme;
 
 use theme::ThemePalette;
 
-use approval_modal::{draw_approval_modal, handle_approval_modal_key, handle_approval_modal_mouse, spawn_approval_decision};
-use chat::{draw_chat, focus_pane_at, scroll_page_down, scroll_page_up};
-use context_panel::{
-    context_status_note, scroll_context_page_down, scroll_context_page_up,
+use approval_modal::{
+    draw_approval_modal, handle_approval_modal_key, handle_approval_modal_mouse,
+    spawn_approval_decision,
 };
+use chat::{draw_chat, focus_pane_at, scroll_page_down, scroll_page_up};
+use context_panel::{context_status_note, scroll_context_page_down, scroll_context_page_up};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
-use std::io::{stdout, Write};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -27,6 +27,7 @@ use ratatui::widgets::{
     Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, Wrap,
 };
 use ratatui::DefaultTerminal;
+use std::io::{stdout, Write};
 use tokio::sync::broadcast;
 use unicode_width::UnicodeWidthStr;
 
@@ -155,10 +156,7 @@ async fn apply_event(state: &SharedState, ev: AppEvent) {
                 format!("error: {message}")
             };
             s.status = status;
-            s.push_log(
-                "info",
-                format!("{workflow_id} finished: {message}"),
-            );
+            s.push_log("info", format!("{workflow_id} finished: {message}"));
         }
         AppEvent::StatusMessage(m) => {
             s.status = m.clone();
@@ -201,10 +199,7 @@ async fn apply_event(state: &SharedState, ev: AppEvent) {
                     s.set_chat_tool_running(Some(name.clone()));
                     s.push_chat_line(p.display_line());
                 }
-                ChatProgress::ToolDone {
-                    output_preview,
-                    ..
-                } => {
+                ChatProgress::ToolDone { output_preview, .. } => {
                     s.set_chat_tool_pending(None);
                     s.set_chat_reasoning(None);
                     s.set_chat_reasoning_compressing(false);
@@ -256,6 +251,13 @@ async fn apply_event(state: &SharedState, ev: AppEvent) {
                     s.push_chat_line(p.display_line());
                     s.close_approval_dialog();
                     s.resolve_chat_approval(*approval_id, *approved, detail);
+                }
+                ChatProgress::ReasoningSummary { .. } => {
+                    s.set_chat_streaming(None);
+                    s.set_chat_tool_pending(None);
+                    s.set_chat_reasoning(None);
+                    s.set_chat_reasoning_compressing(false);
+                    s.set_chat_tool_running(None);
                 }
                 _ if p.show_in_log() => {
                     s.push_chat_line(p.display_line());
@@ -310,10 +312,12 @@ async fn handle_key(
 
     match key.code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Char('0') if {
-            let s = state.read().await;
-            s.config.chat.enabled
-        } => {
+        KeyCode::Char('0')
+            if {
+                let s = state.read().await;
+                s.config.chat.enabled
+            } =>
+        {
             set_tab(state, Tab::Chat, list_state).await;
         }
         KeyCode::Char('1') => set_tab(state, Tab::Dashboard, list_state).await,
@@ -568,17 +572,21 @@ async fn handle_key(
         KeyCode::Char('n') => {
             try_decide_approval(state, engine, false).await;
         }
-        KeyCode::Char('{') if {
-            let s = state.read().await;
-            s.tab != Tab::Chat && s.tab != Tab::Flaky
-        } => {
+        KeyCode::Char('{')
+            if {
+                let s = state.read().await;
+                s.tab != Tab::Chat && s.tab != Tab::Flaky
+            } =>
+        {
             let mut s = state.write().await;
             s.detail_scroll_line = s.detail_scroll_line.saturating_add(DETAIL_SCROLL_PAGE);
         }
-        KeyCode::Char('}') if {
-            let s = state.read().await;
-            s.tab != Tab::Chat && s.tab != Tab::Flaky
-        } => {
+        KeyCode::Char('}')
+            if {
+                let s = state.read().await;
+                s.tab != Tab::Chat && s.tab != Tab::Flaky
+            } =>
+        {
             let mut s = state.write().await;
             s.detail_scroll_line = s.detail_scroll_line.saturating_sub(DETAIL_SCROLL_PAGE);
         }
@@ -682,27 +690,39 @@ async fn handle_chat_key(
                 s.scroll_focused_chat_pane_page_down();
             }
         }
-        KeyCode::Left if {
-            let s = state.read().await;
-            s.chat_context_visible && s.chat_input.is_empty()
-        } => {
+        KeyCode::Left
+            if {
+                let s = state.read().await;
+                s.chat_context_visible && s.chat_input.is_empty()
+            } =>
+        {
             let mut s = state.write().await;
             s.chat_pane_focus = ChatPaneFocus::Messages;
         }
-        KeyCode::Right if {
-            let s = state.read().await;
-            s.chat_context_visible && s.chat_input.is_empty()
-        } => {
+        KeyCode::Right
+            if {
+                let s = state.read().await;
+                s.chat_context_visible && s.chat_input.is_empty()
+            } =>
+        {
             let mut s = state.write().await;
             s.chat_pane_focus = ChatPaneFocus::Context;
         }
-        KeyCode::Up if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
+        KeyCode::Up
+            if key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+        {
             let mut s = state.write().await;
             if s.chat_busy || s.chat_input.is_empty() {
                 s.scroll_focused_chat_pane_page_up();
             }
         }
-        KeyCode::Down if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
+        KeyCode::Down
+            if key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+        {
             let mut s = state.write().await;
             if s.chat_busy || s.chat_input.is_empty() {
                 s.scroll_focused_chat_pane_page_down();
@@ -724,36 +744,44 @@ async fn handle_chat_key(
                 s.recall_chat_history_down();
             }
         }
-        KeyCode::Char('j') if {
-            let s = state.read().await;
-            (s.chat_busy || s.chat_input.is_empty())
-                && !key.modifiers.contains(KeyModifiers::CONTROL)
-        } => {
+        KeyCode::Char('j')
+            if {
+                let s = state.read().await;
+                (s.chat_busy || s.chat_input.is_empty())
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+            } =>
+        {
             let mut s = state.write().await;
             s.chat_pane_focus = ChatPaneFocus::Messages;
             scroll_page_up(&mut s);
         }
-        KeyCode::Char('k') if {
-            let s = state.read().await;
-            (s.chat_busy || s.chat_input.is_empty())
-                && !key.modifiers.contains(KeyModifiers::CONTROL)
-        } => {
+        KeyCode::Char('k')
+            if {
+                let s = state.read().await;
+                (s.chat_busy || s.chat_input.is_empty())
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+            } =>
+        {
             let mut s = state.write().await;
             s.chat_pane_focus = ChatPaneFocus::Messages;
             scroll_page_down(&mut s);
         }
-        KeyCode::Char('[') if {
-            let s = state.read().await;
-            s.chat_busy || s.chat_input.is_empty()
-        } => {
+        KeyCode::Char('[')
+            if {
+                let s = state.read().await;
+                s.chat_busy || s.chat_input.is_empty()
+            } =>
+        {
             let mut s = state.write().await;
             s.chat_pane_focus = ChatPaneFocus::Messages;
             scroll_page_up(&mut s);
         }
-        KeyCode::Char(']') if {
-            let s = state.read().await;
-            s.chat_busy || s.chat_input.is_empty()
-        } => {
+        KeyCode::Char(']')
+            if {
+                let s = state.read().await;
+                s.chat_busy || s.chat_input.is_empty()
+            } =>
+        {
             let mut s = state.write().await;
             s.chat_pane_focus = ChatPaneFocus::Messages;
             scroll_page_down(&mut s);
@@ -768,18 +796,22 @@ async fn handle_chat_key(
             let mut s = state.write().await;
             s.toggle_chat_context_panel();
         }
-        KeyCode::Char('{') if {
-            let s = state.read().await;
-            s.chat_context_visible && (s.chat_busy || s.chat_input.is_empty())
-        } => {
+        KeyCode::Char('{')
+            if {
+                let s = state.read().await;
+                s.chat_context_visible && (s.chat_busy || s.chat_input.is_empty())
+            } =>
+        {
             let mut s = state.write().await;
             s.chat_pane_focus = ChatPaneFocus::Context;
             scroll_context_page_up(&mut s);
         }
-        KeyCode::Char('}') if {
-            let s = state.read().await;
-            s.chat_context_visible && (s.chat_busy || s.chat_input.is_empty())
-        } => {
+        KeyCode::Char('}')
+            if {
+                let s = state.read().await;
+                s.chat_context_visible && (s.chat_busy || s.chat_input.is_empty())
+            } =>
+        {
             let mut s = state.write().await;
             s.chat_pane_focus = ChatPaneFocus::Context;
             scroll_context_page_down(&mut s);
@@ -799,10 +831,12 @@ async fn handle_chat_key(
             let mut s = state.write().await;
             s.status = "chat: cancelling…".into();
         }
-        KeyCode::Char('o') | KeyCode::Char('O') if {
-            let s = state.read().await;
-            !s.chat_busy && s.chat_input.is_empty() && !s.chat_pane_focus_is_context()
-        } => {
+        KeyCode::Char('o') | KeyCode::Char('O')
+            if {
+                let s = state.read().await;
+                !s.chat_busy && s.chat_input.is_empty() && !s.chat_pane_focus_is_context()
+            } =>
+        {
             let mut s = state.write().await;
             if s.toggle_last_chat_tool_expand() {
                 s.status = "chat: toggled tool output".into();
@@ -814,7 +848,9 @@ async fn handle_chat_key(
                 s.chat_input.pop();
             }
         }
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && c != '\\' && c != '＼' => {
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL) && c != '\\' && c != '＼' =>
+        {
             let mut s = state.write().await;
             if !s.chat_busy {
                 s.chat_input.push(c);
@@ -1007,13 +1043,16 @@ async fn handle_chat_slash_command(
                         let mut s = state.write().await;
                         match matches.len() {
                             0 => s.status = format!("no session matching `{prefix}`"),
-                            1 => match load_chat_session_ui(&mut s, store.as_ref(), matches[0].id).await
+                            1 => match load_chat_session_ui(&mut s, store.as_ref(), matches[0].id)
+                                .await
                             {
                                 Ok(()) => s.status = format!("loaded session {}", matches[0].id),
                                 Err(e) => s.status = format!("load failed: {e}"),
                             },
                             n => {
-                                s.push_chat_line(format!("system> {n} sessions match `{prefix}` — be more specific"));
+                                s.push_chat_line(format!(
+                                    "system> {n} sessions match `{prefix}` — be more specific"
+                                ));
                                 s.status = "ambiguous session id".into();
                             }
                         }
@@ -1095,11 +1134,9 @@ fn list_len(s: &AppState) -> usize {
     match s.tab {
         Tab::Chat => s.chat_lines.len().max(1),
         Tab::Dashboard => {
-            dashboard_alert_count(s)
-                + dashboard_security_count(s)
-                + s.digest_history.len()
+            { dashboard_alert_count(s) + dashboard_security_count(s) + s.digest_history.len() }
+                .max(1)
         }
-            .max(1),
         Tab::Prs => s.sorted_filtered_prs().len().max(1),
         Tab::Approvals => s.approvals.len().max(1),
         Tab::Logs => s.filtered_logs().len().max(1),
@@ -1173,10 +1210,7 @@ async fn handle_mouse(
 
 fn draw_ui(frame: &mut ratatui::Frame, state: &AppState, list_state: &mut ListState) {
     let th = ThemePalette::from_mode(state.config.tui.theme);
-    frame.render_widget(
-        Clear,
-        frame.area(),
-    );
+    frame.render_widget(Clear, frame.area());
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(th.bg)),
         frame.area(),
@@ -1363,9 +1397,7 @@ fn draw_list(
                             ),
                             Span::styled(
                                 format!("#{} ", p.number),
-                                Style::default()
-                                    .fg(th.accent)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(trunc(&p.title, 24), Style::default().fg(th.text)),
                             Span::styled(format!(" [{}] ", p.repo), Style::default().fg(th.muted)),
@@ -1468,7 +1500,11 @@ fn draw_list(
                     .map(|i| {
                         ListItem::new(format!(
                             "{}#{} {} @{} [{}]",
-                            i.repo, i.number, trunc(&i.title, 32), i.author, i.labels
+                            i.repo,
+                            i.number,
+                            trunc(&i.title, 32),
+                            i.author,
+                            i.labels
                         ))
                     })
                     .collect()

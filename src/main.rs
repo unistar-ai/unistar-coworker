@@ -21,7 +21,10 @@ use error::Result;
 use store::open_store;
 
 #[derive(Parser)]
-#[command(name = "unistar-coworker", about = "Local GitHub ops secretary with TUI")]
+#[command(
+    name = "unistar-coworker",
+    about = "Local GitHub ops secretary with TUI"
+)]
 struct Cli {
     /// Attach to daemon store only — do not start a local cron scheduler
     #[arg(long)]
@@ -141,7 +144,11 @@ async fn main() -> Result<()> {
         Some(Commands::Daemon) => {
             run_daemon(config, store).await?;
         }
-        Some(Commands::Chat { once, session, list_sessions }) => {
+        Some(Commands::Chat {
+            once,
+            session,
+            list_sessions,
+        }) => {
             if list_sessions {
                 list_chat_sessions(store.as_ref()).await?;
             } else {
@@ -207,7 +214,8 @@ async fn run_report(config: &Config, store: &dyn store::Store, kind: ReportKind)
         }
         ReportKind::Ci { since_days: _ } => {
             let mcp = mcp::spawn_mcp(config).await;
-            let md = agent::ci_efficiency::build_ci_efficiency_markdown(config, mcp.as_ref()).await?;
+            let md =
+                agent::ci_efficiency::build_ci_efficiency_markdown(config, mcp.as_ref()).await?;
             print!("{md}");
         }
     }
@@ -240,7 +248,8 @@ async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<()> {
             let to = parse_storage_backend(&to)?;
             let source_path = expand_tilde(&source);
             let dest_path = expand_tilde(&dest);
-            let stats = migrate(from, to, source_path, dest_path.clone(), config.storage.wal).await?;
+            let stats =
+                migrate(from, to, source_path, dest_path.clone(), config.storage.wal).await?;
             println!("{}", format_migrate_summary(&stats));
             eprintln!(
                 "Update coworker.yaml storage.backend to {:?} and storage.path to {}",
@@ -567,18 +576,16 @@ async fn run_tui(
         s.push_log("info", "unistar-coworker v0.3 started");
     }
 
-    let engine = Arc::new(Engine::new(
-        config,
-        Arc::clone(&store),
-        tx.clone(),
-        Arc::clone(&state),
-    )
-    .await);
+    let engine =
+        Arc::new(Engine::new(config, Arc::clone(&store), tx.clone(), Arc::clone(&state)).await);
     engine.clone().spawn_background();
     if attach {
         {
             let mut s = state.write().await;
-            s.push_log("info", "attach mode — scheduler disabled (shared store with daemon)");
+            s.push_log(
+                "info",
+                "attach mode — scheduler disabled (shared store with daemon)",
+            );
         }
     } else {
         engine.clone().spawn_scheduler();

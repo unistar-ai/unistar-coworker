@@ -77,10 +77,7 @@ pub async fn run_merge_health(
             } else {
                 reason
             };
-            digest.push_report_line(&format!(
-                "#{} {} — {}",
-                pr.number, pr.title, detail
-            ));
+            digest.push_report_line(&format!("#{} {} — {}", pr.number, pr.title, detail));
         }
     }
 

@@ -31,15 +31,17 @@ impl SubprocessMcp {
         for (k, v) in &cfg.env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn().map_err(|e| {
-            CoworkerError::Other(anyhow::anyhow!("spawn {}: {e}", cfg.command))
-        })?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            CoworkerError::Other(anyhow::anyhow!("mcp stdin missing"))
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            CoworkerError::Other(anyhow::anyhow!("mcp stdout missing"))
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("spawn {}: {e}", cfg.command)))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("mcp stdin missing")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("mcp stdout missing")))?;
         let client = Self {
             stdin: Mutex::new(stdin),
             reader: Mutex::new(BufReader::new(stdout)),
@@ -134,10 +136,7 @@ impl SubprocessMcp {
                 if let Some(err) = v.get("error") {
                     return Err(CoworkerError::Other(anyhow::anyhow!("mcp error: {err}")));
                 }
-                return Ok(v
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null));
+                return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
             }
         }
     }
@@ -167,7 +166,9 @@ impl McpClient for SubprocessMcp {
 fn extract_tool_text(result: &serde_json::Value) -> Result<String> {
     let text = collect_tool_text(result)?;
     if result.get("isError").and_then(|v| v.as_bool()) == Some(true) {
-        return Err(CoworkerError::Other(anyhow::anyhow!(text.trim().to_string())));
+        return Err(CoworkerError::Other(anyhow::anyhow!(text
+            .trim()
+            .to_string())));
     }
     Ok(text)
 }

@@ -244,8 +244,9 @@ impl Store for SqliteStore {
     async fn get_pending_approval(&self, id: &Uuid) -> Result<Approval> {
         let id = *id;
         self.with_conn(move |conn| {
-            let mut stmt =
-                conn.prepare("SELECT payload_json FROM approvals WHERE id = ?1 AND status = 'pending'")?;
+            let mut stmt = conn.prepare(
+                "SELECT payload_json FROM approvals WHERE id = ?1 AND status = 'pending'",
+            )?;
             let mut rows = stmt.query([id.to_string()])?;
             if let Some(row) = rows.next()? {
                 Ok(serde_json::from_str(&row.get::<_, String>(0)?)?)
@@ -322,7 +323,8 @@ impl Store for SqliteStore {
                 params![serde_json::to_string(&incident)?, incident_id.to_string()],
             )?;
 
-            let mut stmt = conn.prepare("SELECT payload_json FROM flaky_tests WHERE fingerprint = ?1")?;
+            let mut stmt =
+                conn.prepare("SELECT payload_json FROM flaky_tests WHERE fingerprint = ?1")?;
             let mut rows = stmt.query([&incident.fingerprint])?;
             if let Some(row) = rows.next()? {
                 let mut rollup: FlakyTestRollup = serde_json::from_str(&row.get::<_, String>(0)?)?;
@@ -423,7 +425,8 @@ impl Store for SqliteStore {
         let id = *id;
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare("SELECT payload_json FROM main_alerts WHERE id = ?1")?;
-            let mut rows = stmt.query_map(params![id.to_string()], |row| row.get::<_, String>(0))?;
+            let mut rows =
+                stmt.query_map(params![id.to_string()], |row| row.get::<_, String>(0))?;
             let Some(json) = rows.next().transpose()? else {
                 return Ok(());
             };
@@ -587,7 +590,11 @@ impl Store for SqliteStore {
         .map_err(|e| CoworkerError::Store(format!("update chat message: {e}")))
     }
 
-    async fn list_chat_messages(&self, session_id: &Uuid, limit: usize) -> Result<Vec<ChatMessage>> {
+    async fn list_chat_messages(
+        &self,
+        session_id: &Uuid,
+        limit: usize,
+    ) -> Result<Vec<ChatMessage>> {
         let sid = session_id.to_string();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
@@ -701,7 +708,11 @@ impl Store for SqliteStore {
         })
     }
 
-    async fn reclassify_flaky(&self, fingerprint: &str, classification: Classification) -> Result<u32> {
+    async fn reclassify_flaky(
+        &self,
+        fingerprint: &str,
+        classification: Classification,
+    ) -> Result<u32> {
         let fp = fingerprint.to_string();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare("SELECT id, payload_json FROM flaky_incidents")?;
@@ -727,8 +738,8 @@ impl Store for SqliteStore {
 
     async fn list_chat_sessions(&self, limit: usize) -> Result<Vec<ChatSession>> {
         self.with_conn(move |conn| {
-            let mut stmt =
-                conn.prepare("SELECT payload_json FROM chat_sessions ORDER BY rowid DESC LIMIT ?1")?;
+            let mut stmt = conn
+                .prepare("SELECT payload_json FROM chat_sessions ORDER BY rowid DESC LIMIT ?1")?;
             let rows = stmt.query_map([limit as i64], |row| row.get::<_, String>(0))?;
             let mut out = Vec::new();
             for row in rows {
@@ -748,7 +759,8 @@ fn row_to_digest(row: &rusqlite::Row<'_>) -> rusqlite::Result<Digest> {
     let created_at: String = row.get(4)?;
     let skill: Option<String> = row.get(5).ok();
     Ok(Digest {
-        id: Uuid::parse_str(&id).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+        id: Uuid::parse_str(&id)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
         date: NaiveDate::parse_from_str(&date, "%Y-%m-%d")
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
         summary: serde_json::from_str(&summary_json)

@@ -72,12 +72,18 @@ pub async fn run_review_radar(
 
     let mut digest = IncrementalDigest::begin(agent);
     publish_digest(config, store, events, &digest.to_digest()).await?;
-    log("info", "review-radar digest export started (in progress)".into());
+    log(
+        "info",
+        "review-radar digest export started (in progress)".into(),
+    );
 
     let mut prs = Vec::new();
 
     for repo in config.repos.clone() {
-        log("info", format!("review-radar: waiting-for-review PRs in {repo}"));
+        log(
+            "info",
+            format!("review-radar: waiting-for-review PRs in {repo}"),
+        );
         let list_text = lazy_tool(
             mcp,
             "pr_list_waiting_review",
@@ -101,14 +107,11 @@ pub async fn run_review_radar(
                 title: pr.title.clone(),
                 author: pr.author.clone(),
             };
-            log("info", format!("waiting for review: {}", blocked.one_liner()));
-            digest.push_waiting_review(
-                &repo,
-                pr.number,
-                &pr.title,
-                &pr.ci,
-                Some(&pr.author),
+            log(
+                "info",
+                format!("waiting for review: {}", blocked.one_liner()),
             );
+            digest.push_waiting_review(&repo, pr.number, &pr.title, &pr.ci, Some(&pr.author));
             store
                 .upsert_pr_snapshot(&PrSnapshot {
                     repo: repo.clone(),

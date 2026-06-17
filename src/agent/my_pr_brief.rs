@@ -90,7 +90,13 @@ pub async fn run_my_pr_brief(
                 }
                 MyPrCategory::WaitingReview => {
                     waiting += 1;
-                    digest.push_waiting_review(&repo, pr.number, &pr.title, &pr.ci, Some(&pr.author));
+                    digest.push_waiting_review(
+                        &repo,
+                        pr.number,
+                        &pr.title,
+                        &pr.ci,
+                        Some(&pr.author),
+                    );
                     Some("my pr: waiting review".into())
                 }
                 MyPrCategory::Ready => {

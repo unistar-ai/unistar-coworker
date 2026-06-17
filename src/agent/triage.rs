@@ -67,13 +67,7 @@ pub async fn triage_pr(
     .await?;
 
     let mut outcome = TriageOutcome {
-        preamble: vec![
-            overview
-                .lines()
-                .next()
-                .unwrap_or("PR overview")
-                .to_string(),
-        ],
+        preamble: vec![overview.lines().next().unwrap_or("PR overview").to_string()],
         ..Default::default()
     };
 
@@ -88,9 +82,7 @@ pub async fn triage_pr(
         {
             Ok(t) => t,
             Err(e) => {
-                outcome
-                    .preamble
-                    .push(format!("CI analyze skipped: {e}"));
+                outcome.preamble.push(format!("CI analyze skipped: {e}"));
                 outcome.fallback_attention = ci_needs_attention(&pr.ci);
                 save_snapshot(store, repo, pr, &outcome.full_note()).await?;
                 return Ok(outcome);
@@ -98,7 +90,10 @@ pub async fn triage_pr(
         },
     };
 
-    if analyze_text.to_ascii_lowercase().contains("no failing github actions") {
+    if analyze_text
+        .to_ascii_lowercase()
+        .contains("no failing github actions")
+    {
         outcome
             .preamble
             .push(analyze_text.lines().next().unwrap_or("").to_string());
@@ -159,11 +154,12 @@ pub async fn triage_pr(
         }
 
         let page_lines = config.llm.log_page_lines.max(1);
-        let max_pages = config
-            .llm
-            .max_log_pages
-            .max(1)
-            .min(config.policy.max_tool_calls_per_pr.saturating_sub(tool_calls));
+        let max_pages = config.llm.max_log_pages.max(1).min(
+            config
+                .policy
+                .max_tool_calls_per_pr
+                .saturating_sub(tool_calls),
+        );
 
         let mut offset = 0u32;
         let mut combined_logs = String::new();
@@ -389,12 +385,7 @@ pub async fn triage_pr(
     Ok(outcome)
 }
 
-async fn save_snapshot(
-    store: &dyn Store,
-    repo: &str,
-    pr: &ParsedPrLine,
-    note: &str,
-) -> Result<()> {
+async fn save_snapshot(store: &dyn Store, repo: &str, pr: &ParsedPrLine, note: &str) -> Result<()> {
     store
         .upsert_pr_snapshot(&PrSnapshot {
             repo: repo.to_string(),
