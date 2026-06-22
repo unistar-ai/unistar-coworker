@@ -7,6 +7,8 @@ use crate::agent::budget::TokenBudget;
 use crate::agent::context::truncate_chars;
 
 const WEB_CONTEXT_MSG_CHARS: usize = 4_000;
+/// Tool output bodies in WS chat patches (full snapshot may still be large on first load).
+const WEB_CHAT_PATCH_TOOL_OUTPUT_CHARS: usize = 8_000;
 
 #[derive(Serialize)]
 pub struct WebSnapshot {
@@ -374,7 +376,12 @@ pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
         chat_tool_outputs: s
             .chat_tool_outputs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    truncate_chars(v, WEB_CHAT_PATCH_TOOL_OUTPUT_CHARS),
+                )
+            })
             .collect(),
         chat_history_revision: s.chat_history_revision,
         chat_context_revision: s.chat_context_revision,

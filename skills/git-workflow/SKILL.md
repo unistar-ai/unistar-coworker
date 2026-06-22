@@ -1,31 +1,42 @@
 ---
 name: git-workflow
-description: Safe local git operations — branch, status, commit; never force-push main.
+description: "Safe local git operations — status, diff, branch, commit. Use when the user asks about git state, commits, or branches. Never force-push main."
+argument-hint: "What git operation or branch"
 intent_keywords: [git, commit, branch, merge, push, pull, rebase, stash, diff]
 tools:
   - bash_run
   - read_file
 ---
 
-## Safe defaults
+# Git Workflow
 
-- **`git status`** / **`git diff`** before proposing commits.
-- Create feature branches for non-trivial work; avoid committing directly to `main` unless the user asks.
-- Write clear, focused commit messages describing *why*.
+Inspect before mutating. Clear commits describe *why*; never compromise shared branches without explicit user intent.
 
-## Hard limits
+## Scope
 
-- **Never** `git push --force` to `main` or `master`.
-- **Never** amend or force-push without explicit user request.
-- Do not commit secrets (`.env`, tokens, credentials).
+Use for:
+- `git status`, `git diff`, branch creation, staged commits when user intent is clear
 
-## Typical flow
+Hard limits:
+- **Never** `git push --force` to `main` or `master`
+- **Never** amend or force-push without explicit user request
+- **Never** commit secrets (`.env`, tokens, credentials)
 
-1. `bash_run git status` — understand dirty state.
-2. Make code changes (via approved `edit_file` / `write_file`).
-3. `bash_run git add … && git commit -m "…"` only after user intent is clear.
+## Workflow
 
-## Anti-patterns
+1. **`git status` / `git diff`** — understand dirty state and scope.
+2. **Branch** — feature branches for non-trivial work unless user wants direct commits.
+3. **Code changes** — via approved `edit_file` / `write_file` (load `code-edit`).
+4. **Commit** — `git add … && git commit -m "…"` only when intent is clear; focused messages.
+5. **Push** — check branch and remote; warn before anything destructive.
 
-- Large unrelated commits bundling many files.
-- Pushing without checking branch and remote state.
+## Output template
+
+### State
+Branch, clean/dirty summary
+
+### Proposed action
+Commands you ran or recommend (if any)
+
+### Result
+Exit codes and relevant output

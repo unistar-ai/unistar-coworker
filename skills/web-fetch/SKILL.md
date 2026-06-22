@@ -1,53 +1,44 @@
 ---
 name: web-fetch
-description: Fetch live web pages or built HTML for the agent to read (not for GitHub or repo source).
-intent_keywords: [web, url, http, page, site, preview, localhost, docs online, zhihu, spa, javascript]
+description: "Fetch live web pages for reading — docs, APIs, SPAs, localhost previews. Use for public URLs and dev-server HTML. Not for GitHub PR/CI data or repo source files."
+argument-hint: "URL and what to extract"
+intent_keywords: [web, url, http, page, site, preview, localhost, docs online, spa, javascript]
 tools:
   - web_browser
 ---
 
-## When to use `web_browser`
+# Web Fetch
+
+Fetch pages the harness can render. Prefer the right tool for the job — GitHub PRs belong on harness/MCP, repo source on `read_file`.
+
+## Scope
 
 | Goal | Tool |
 |------|------|
-| Read a public URL or API JSON | `web_browser` |
-| Preview `dist/index.html` or dev server | `web_browser` (`allow_localhost` for `localhost:PORT`) |
-| JS-heavy SPA or sites with anti-scraping | `web_browser` with **`browser: true`** |
-| Read `.tsx` / `.html` **source** in repo | `read_file` |
-| GitHub PR / CI data | **Prefer** MCP (`pr_get_*`, `ci_get_*`) or `bash_run gh …`; web_browser HTML is a fallback only |
+| Public URL or API JSON | `web_browser` |
+| Local `dist/` or dev server | `web_browser` (`allow_localhost` for `localhost:PORT`) |
+| JS-heavy SPA / anti-bot sites | `web_browser` with **`browser: true`** |
+| `.tsx` / `.html` **in repo** | `read_file` |
+| GitHub PR / CI | `pr_get_*`, `ci_get_*`, or `gh` — not HTML scrape |
 | POST / custom headers | `bash_run curl` |
 
-## Modes
+## Workflow
 
-1. **`metadata`** — cheap first pass: title, description, headings, links.
-2. **`links`** — link list only (explore a docs site).
-3. **`full`** — metadata + body text (default).
-
-## Browser mode (`browser: true`)
-
-If the site uses anti-scraping (blocks bots, requires JS to render, or needs cookies/login in a real browser), retry with **`browser: true`** on the tool call — headless Chromium loads the page like a normal browser.
-
-Optional tuning in `coworker.yaml`:
-
-```yaml
-chat:
-  web_browser:
-    browser_timeout_secs: 60
-    browser_wait_ms: 3000
-    # chromium_path: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
-```
-
-Example: `{ "url": "https://www.zhihu.com/question/123", "mode": "full", "browser": true }`
+1. **Cheap pass** — `mode: metadata` on large or unknown pages.
+2. **Full body** — `mode: full` when metadata is enough to proceed.
+3. **Links only** — `mode: links` to explore doc sites.
+4. **Blocked or empty** — retry **once** with `browser: true`; then stop looping.
+5. **Still empty** — `read_file` on source or ask user to paste.
 
 ## Rules
 
-- Prefer `mode=metadata` on large or unknown pages before `full`.
-- If plain HTTP is blocked or the body is useless, retry once with `browser: true` — do not loop.
-- If body is still empty after browser mode, use `read_file` on source or ask user to paste.
-- For localhost dev servers, ensure `chat.web_browser.allow_localhost: true` in config.
+- Do not scrape `github.com/.../pull/...` when PR tools exist.
+- Ensure `chat.web_browser.allow_localhost: true` for local dev servers.
 
-## Anti-patterns
+## Output template
 
-- Scraping github.com/pull/… when `pr_get_overview` or `gh pr view` is available.
-- Using `web_browser` when `read_file` on local HTML source is enough.
-- Fetching the same URL repeatedly without switching to `browser: true` when the site resists scraping.
+### Page
+Title, URL, mode used
+
+### Content
+Relevant excerpt or summary — not a full dump unless asked

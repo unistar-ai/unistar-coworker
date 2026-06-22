@@ -20,8 +20,7 @@
 | `oncall-store/` | Local digest, approvals, handoff |
 | `_base/TOOLS.md` | Full tool reference (workflows / native mode) |
 
-Skills declare **`tools:`** in frontmatter — chat warms those schemas on load (`skill_load` too).  
-Use **`skill_search`** in auto mode for techniques not matched by intent.
+Each `SKILL.md` follows a consistent shape: **Scope**, **Workflow**, **Output template**, plus YAML `description` / `argument-hint` / `tools:` / intent metadata for `skill_search`.
 
 Chat loads skills from **`agents/chat/AGENT.md`** `skills:` list unless `chat.skills` overrides in yaml.
 

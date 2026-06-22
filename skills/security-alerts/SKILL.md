@@ -1,6 +1,7 @@
 ---
 name: security-alerts
-description: Dependabot and code-scanning alerts. Use when user asks about security, dependabot, vulnerabilities, CVE, or alert severity.
+description: "Dependabot and code-scanning alerts — open summary and detail. Use when the user asks about vulnerabilities, CVEs, Dependabot, or alert severity."
+argument-hint: "Repo or severity filter"
 intent_keywords: [security, dependabot, vulnerabilit, cve, alert, scanning]
 tools:
   - alert_summarize_open
@@ -8,16 +9,29 @@ tools:
   - repo_get_info
 ---
 
-## Tool chains
+# Security Alerts
 
-| Task | Chain |
-|------|--------|
-| Dashboard rollup | `alert_summarize_open` |
-| Full list | `alert_summarize_open` → `alert_list_open` if details needed |
+Read-only. Lead with severity counts; no dismiss or auto-fix actions.
 
-## Rules
+## Scope
 
-- Lead with severity counts (critical/high/medium/low) from summarize output.
-- No dismiss, fix, or auto-PR actions — read-only.
-- If zero alerts, say repo is clean per tool output (not “probably fine”).
-- Link or name the package/CVE when the tool provides it.
+Use for:
+- Open alert dashboards and detailed lists
+
+## Workflow
+
+1. **Rollup** — `alert_summarize_open` (critical/high/medium/low).
+2. **Detail** — `alert_list_open` when the user needs full list.
+3. Cite package/CVE names when tools provide them.
+4. If zero alerts, report clean **per tool output** — not “probably fine”.
+
+## Output template
+
+### Summary
+Severity counts from tools
+
+### Top alerts (if listed)
+Package/CVE — severity — one line each
+
+### Next step
+Patch, ignore policy, or escalate — only if user asks

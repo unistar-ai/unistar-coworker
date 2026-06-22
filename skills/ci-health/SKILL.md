@@ -1,6 +1,7 @@
 ---
 name: ci-health
-description: Branch and workflow CI health — not PR-specific. Use when user asks about main branch CI, workflow stats, recent runs, or regression after a deploy.
+description: "Branch and workflow CI health — not PR-specific. Use when the user asks about main/trunk CI, workflow noise, recent runs, or regressions after deploy."
+argument-hint: "Branch name or workflow to inspect"
 intent_keywords: [main, branch, workflow, ci, master, trunk, noisy, regression, deploy]
 intent_phrases: [main branch ci, default branch, workflow stat, workflow stats]
 intent_penalty_keywords: [pr, pull request]
@@ -14,18 +15,34 @@ tools:
   - repo_get_info
 ---
 
-## Tool chains
+# CI Health
 
-| Task | Chain |
-|------|--------|
-| Default branch health | `ci_branch_health` |
-| Recent runs | `ci_list_runs` (optional `branch`) |
-| Noisy workflows | `ci_workflow_stats` |
-| Workflow names | `ci_list_workflows` |
-| Who broke main | `ci_list_runs` (failing run) → `ci_correlate_prs` |
+Roll up branch and workflow trends. PR-specific triage belongs in `ci-triage`.
 
-## Rules
+## Scope
 
-- Branch omitted → repo default branch from `repo_get_info` or tool default.
-- Prefer `ci_branch_health` rollup over manually counting `ci_list_runs` lines.
-- PR-specific CI belongs in `ci-triage`, not here.
+Use for:
+- Default branch health, noisy workflows, “who broke main?”
+
+Not for:
+- Single PR check diagnosis → `ci-triage`
+
+## Workflow
+
+1. **Default branch** — `repo_get_info` if branch unknown; omit branch to use default.
+2. **Rollup** — `ci_branch_health` over manually counting runs.
+3. **Recent runs** — `ci_list_runs` (optional `branch`).
+4. **Noisy workflows** — `ci_workflow_stats`.
+5. **Workflow names** — `ci_list_workflows` when catalog is needed.
+6. **Correlate** — failing run from `ci_list_runs` → `ci_correlate_prs`.
+
+## Output template
+
+### Branch health
+Pass/fail trend, failing workflows (from tools)
+
+### Recent failures
+Run ID, workflow, time — one line each
+
+### Suspected PRs (if correlated)
+`#N` or “none from tools”

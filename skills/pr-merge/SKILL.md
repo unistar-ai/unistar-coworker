@@ -1,6 +1,7 @@
 ---
 name: pr-merge
-description: Interpret merge blockers and review state. Use when user asks about merge, review, approval, or blocked PRs.
+description: "Interpret merge blockers and review state. Use when the user asks if a PR can merge, who must approve, or why merge is blocked."
+argument-hint: "PR number or merge-blocked list"
 intent_keywords: [merge, block, approve, review]
 intent_phrases: [needs to approve, merge blocked, waiting for review]
 tools:
@@ -12,17 +13,34 @@ tools:
   - pr_get_overview
 ---
 
-## Merge blockers
+# PR Merge
 
-- Use `pr_get_merge_blockers` output **verbatim** for blocker reasons — do not invent checks or reviewers.
-- Distinguish: failing CI vs missing approvals vs branch conflicts vs policy labels.
+Report blockers verbatim from tools. Distinguish CI, approvals, conflicts, and policy labels.
 
-## Review state
+## Scope
 
-- **Waiting for review**: CI green but review not satisfied.
-- **Approved** with red CI: engineering work still needed.
-- Draft PRs are out of scope for merge-ready scans.
+Use for:
+- Merge readiness, review satisfaction, blocked vs waiting lists
+- Draft PRs are out of scope for merge-ready scans
 
-## Reporting
+States to separate:
+- **Waiting for review** — CI green, review not satisfied
+- **Approved + red CI** — engineering work still needed
+- **Blocked** — use `pr_get_merge_blockers` reasons as returned
 
-- Include PR link, structured blocker list, and a one-line summary.
+## Workflow
+
+1. **One PR** — `pr_get_merge_blockers` + `pr_get_review_state` (+ `pr_get_overview` for context).
+2. **Repo scan** — `pr_list_merge_blocked`, `pr_list_waiting_review`, or `pr_list_merge_ready` as asked.
+3. Summarize with PR link, structured blocker list, one-line headline.
+
+## Output template
+
+### Status
+Merge-ready | blocked | waiting
+
+### Blockers
+Bullet list from tool output only
+
+### Review state
+Approvals, requested reviewers, CI summary

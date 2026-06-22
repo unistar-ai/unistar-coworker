@@ -1,6 +1,7 @@
 ---
 name: debug
-description: Trace errors from output to source — read, grep, reproduce, verify fix.
+description: "Trace errors from output to source and verify fixes. Use when tests fail, builds break, panics occur, or the user pastes a stack trace."
+argument-hint: "Error message, command, or stack trace"
 intent_keywords: [bug, error, panic, fail, debug, crash, stack, exception, broken]
 tools:
   - read_file
@@ -8,20 +9,35 @@ tools:
   - bash_run
 ---
 
-## Debug loop
+# Debug
 
-1. **Capture the error** — compiler output, test failure, panic message, or stack trace (from user or `bash_run`).
-2. **Locate** — `grep` for symbols/messages; `read_file` the cited file and line.
-3. **Hypothesize minimally** — change the smallest plausible fix.
-4. **Reproduce** — rerun the failing command via `bash_run` to confirm.
+Follow evidence from symptom to root cause. Hypothesize minimally; confirm with reruns.
 
-## Rules
+## Scope
 
-- Preserve error text in your reasoning; do not paraphrase away file paths or line numbers.
-- If the root cause is unclear, gather more evidence before editing.
-- One mutating change per approval round when fixing.
+Use for:
+- Compiler/test/runtime failures in the local workspace
+- Tracing symbols and messages to source lines
 
-## Anti-patterns
+Do not:
+- Guess file contents without reading
+- Patch unrelated files without following the call chain
 
-- Guessing file contents without reading.
-- Fixing symptoms in unrelated files without tracing the call chain.
+## Workflow
+
+1. **Capture** — preserve exact error text, paths, and line numbers from user or `bash_run`.
+2. **Locate** — `grep` symbols/messages; `read_file` cited locations.
+3. **Hypothesize** — smallest change that explains the failure.
+4. **Fix** — one mutating change per approval round (load `code-edit` if needed).
+5. **Reproduce** — rerun the **same** failing command via `bash_run`.
+
+## Output template
+
+### Symptom
+Exact error excerpt
+
+### Root cause
+One paragraph with file:line evidence
+
+### Fix / next step
+What changed or what to gather next

@@ -1,6 +1,7 @@
 ---
 name: code-edit
-description: Small, safe file edits — read before write, prefer precise patches over rewrites.
+description: "Make small, safe file edits in the workspace. Use when the user wants a targeted fix, patch, rename, or new file — read before write, prefer edit_file over full rewrites."
+argument-hint: "File path and what to change"
 intent_keywords: [edit, fix, change, patch, refactor, rename, update, modify]
 tools:
   - read_file
@@ -10,40 +11,40 @@ tools:
   - bash_run
 ---
 
-## Principles
+# Code Edit
 
-- **Read first** — always `read_file` the target region before `edit_file` or `write_file`.
-- **Small steps** — one logical change per edit; avoid rewriting entire files when a patch suffices.
-- **Exact match** — `edit_file` `old_string` must match the file (whitespace matters; LF/CRLF is normalized automatically when you copy from `read_file`).
-- **Verify** — after mutating, run relevant tests or build commands via `bash_run`.
+Change code in minimal, verifiable steps. Correctness beats speed; one logical change per edit round when mutating.
 
-## `edit_file`
+## Scope
 
-Required: `path`, `old_string`, `new_string`.
+Use for:
+- Targeted fixes and small refactors in tracked files
+- Creating new files with explicit intent
 
-Optional:
+Do not:
+- Blind `write_file` over existing files without reading
+- Large speculative rewrites when a patch suffices
+- Multiple mutating tools in one turn (harness allows one; plan ahead)
 
-- **`replace_all`** (boolean, default `false`) — replace every occurrence of `old_string`. Use when the same snippet appears many times and you intend to change all of them (e.g. rename a symbol). When `false`, the match must be **unique** or the tool returns `FILE_AMBIGUOUS_EDIT`; add surrounding lines to `old_string` or set `replace_all: true`.
+## Workflow
 
-`new_string` line endings are adjusted to match the file (CRLF repos stay CRLF). Binary / non-UTF-8 files are rejected — use `bash_run` instead.
+1. **Locate** — `grep` / `glob` if path is unclear.
+2. **Read** — `read_file` the exact region; match whitespace when copying into `old_string`.
+3. **Patch** — `edit_file` with unique `old_string` → `new_string`; use `replace_all` only when intentional.
+4. **Create** — `write_file` with `create_only: true` for new files.
+5. **Verify** — `bash_run` the relevant test, build, or lint command.
 
-## `write_file`
+## Tool notes
 
-Required: `path`, `content`.
+- **`edit_file`**: `old_string` must be unique unless `replace_all: true`. LF/CRLF normalized when copied from `read_file`. Binary rejected.
+- **`write_file`**: preserves line endings on overwrite; adds trailing newline on create. UTF-8 text only.
 
-Optional:
+## Output template
 
-- **`create_only`** (boolean, default `false`) — if `true`, fail with `FILE_EXISTS` when the path already exists. Use for new files to avoid accidental overwrites; use `edit_file` for changes to existing files.
+### Change
+- Path(s) and what changed (one line each)
 
-On **overwrite**, `write_file` preserves the file’s line-ending style (LF vs CRLF) and trailing newline. On **create**, a trailing newline is added if missing. UTF-8 text only.
+### Verification
+- Command run and result (exit code / pass-fail)
 
-## Anti-patterns
-
-- Blind `write_file` over an existing file without reading it.
-- Large speculative rewrites when the user asked for a targeted fix.
-- Multiple mutating tools in one turn (harness allows only one; plan accordingly).
-
-## When to use `write_file`
-
-- Creating a new file — prefer `create_only: true` so a typo in `path` does not clobber an existing file.
-- Replacing a file only when a full rewrite is clearly simpler than several `edit_file` calls (omit `create_only` or set `create_only: false` to overwrite intentionally).
+If blocked (ambiguous edit, binary file): state the blocker and the smallest next read or command.

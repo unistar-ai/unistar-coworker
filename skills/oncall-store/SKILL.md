@@ -1,6 +1,7 @@
 ---
 name: oncall-store
-description: Local Store — digests, pending approvals, on-call handoff. Use when user asks about pending approvals, latest digest, handoff, or what the coworker already recorded.
+description: "Read local coworker store — latest digest, pending approvals, on-call handoff. Use when the user asks what was recorded, what's queued for approval, or shift handoff context."
+argument-hint: "Digest, approvals, or handoff"
 intent_keywords: [oncall, on-call, handoff]
 intent_phrases: [pending approval, approval queue, latest digest, stored digest]
 tools:
@@ -9,16 +10,31 @@ tools:
   - store_get_oncall_handoff
 ---
 
-## Tool chains
+# Oncall Store
 
-| Task | Chain |
-|------|--------|
-| Morning context | `store_get_latest_digest` |
-| Approval queue | `store_list_pending_approvals` |
-| Shift handoff | `store_get_oncall_handoff` |
+Local store may lag live GitHub. Say so when the user expects real-time CI.
 
-## Rules
+## Scope
 
-- Store is local — may lag live GitHub; say so when user expects real-time CI.
-- Pending approvals need human action in TUI — list kind, repo, and description.
-- If no digest yet, suggest running `daily-work` workflow.
+Use for:
+- Latest stored digest
+- Pending approval queue (human action in TUI/Web UI)
+- On-call handoff notes
+
+## Workflow
+
+1. **Morning context** — `store_get_latest_digest`.
+2. **Approval queue** — `store_list_pending_approvals` (kind, repo, description).
+3. **Shift handoff** — `store_get_oncall_handoff`.
+4. If no digest exists, suggest running the `daily-work` workflow.
+
+## Output template
+
+### Store snapshot
+What was found (or empty)
+
+### Pending actions
+Bullets for approvals the human must resolve
+
+### Staleness note
+If live GitHub may differ from store

@@ -1,6 +1,7 @@
 ---
 name: repo-explore
-description: Find code in the workspace with glob and grep before reading large files.
+description: "Find code and structure in the workspace before reading large files. Use when the user asks where something lives, which files match a pattern, or how the repo is organized."
+argument-hint: "Symbol, path hint, or feature name to locate"
 intent_keywords: [find, search, where, locate, explore, show, list, which]
 tools:
   - glob
@@ -8,19 +9,31 @@ tools:
   - read_file
 ---
 
-## Search strategy
+# Repo Explore
 
-1. **`glob`** — narrow file candidates (`**/*.rs`, `src/**/*.ts`, etc.).
-2. **`grep`** — search content within a directory or file pattern; prefer scoped paths over repo root.
-3. **`read_file`** — read only the lines you need (`start_line`, `max_lines`).
+Search narrowly, then read surgically. Avoid loading whole trees into context.
 
-## Rules
+## Scope
 
-- Do not read entire large files when grep/glob can pinpoint the location.
-- Prefer relative paths under `chat.workspace`; all paths are sandboxed.
-- When explaining structure, cite paths and line ranges from tool output.
+Use for:
+- Finding files, symbols, and references under `chat.workspace`
+- Answering “where is X?” with paths and line ranges
 
-## Anti-patterns
+Do not:
+- Read entire large files when `grep` can pinpoint a region
+- Grepping the whole repo without a pattern when the user named a module
 
-- Reading every file in a directory sequentially.
-- Grepping the whole repo without a pattern or path hint when the user named a module.
+## Workflow
+
+1. **`glob`** — narrow candidates (`**/*.rs`, `src/**/*.ts`, etc.).
+2. **`grep`** — content search with scoped path or pattern.
+3. **`read_file`** — only needed lines (`start_line`, `max_lines`).
+4. **Explain** — cite paths and line ranges from tool output.
+
+## Output template
+
+### Locations
+- `path:line` — one-line why it matters
+
+### Structure (if asked)
+Short map of relevant dirs/files only — no exhaustive listing.

@@ -67,11 +67,96 @@ const TOOL_META = {
   edit_file: { icon: "✎", label: "Edit" },
   grep: { icon: "🔍", label: "Grep" },
   glob: { icon: "📁", label: "Glob" },
+  skill_search: { icon: "📚", label: "Skill search" },
+  skill_load: { icon: "📚", label: "Load skill" },
+  tool_search: { icon: "🔎", label: "Tool search" },
+  tool_call: { icon: "⚡", label: "Tool call" },
+  pr_get_diff: { icon: "⎇", label: "PR diff" },
+  pr_get_overview: { icon: "◫", label: "PR overview" },
+  pr_list_changed_files: { icon: "📋", label: "Changed files" },
+  pr_diff_risk_scan: { icon: "⚠", label: "Diff risk" },
+  pr_get_ci_snapshot: { icon: "◎", label: "CI snapshot" },
+  pr_get_review_routing: { icon: "👥", label: "Review routing" },
+  pr_get_review_state: { icon: "✓", label: "Review state" },
 };
 
 function toolMeta(name) {
   const key = (name || "").toLowerCase();
   return TOOL_META[key] || { icon: "⚙", label: name || "tool" };
+}
+
+function parseToolArgsString(args) {
+  if (!args?.trim()) return [];
+  const out = [];
+  for (const part of args.split(",")) {
+    const t = part.trim();
+    if (!t) continue;
+    const eq = t.indexOf("=");
+    if (eq > 0) {
+      out.push({ key: t.slice(0, eq).trim(), value: t.slice(eq + 1).trim() });
+    } else {
+      out.push({ key: t, value: "" });
+    }
+  }
+  return out;
+}
+
+function formatToolArgValue(key, value) {
+  const k = key.toLowerCase();
+  if (!value) return "";
+  if (k === "pr_number" || k === "pr") return `#${value}`;
+  if (k === "max_bytes") {
+    const n = Number.parseInt(value, 10);
+    if (Number.isFinite(n) && n >= 1000) return `${Math.round(n / 1000)}k`;
+    return value;
+  }
+  if (k === "repo") return truncateMiddle(value, 28);
+  return truncateMiddle(value, 20);
+}
+
+function appendToolArgChips(parent, argsString) {
+  const pairs = parseToolArgsString(argsString);
+  if (!pairs.length) return;
+  const chips = el("div", "tool-arg-chips");
+  for (const { key, value } of pairs) {
+    const chip = el("span", "tool-arg-chip");
+    chip.appendChild(el("span", "tool-arg-k", key));
+    const display = formatToolArgValue(key, value);
+    if (display) chip.appendChild(el("span", "tool-arg-v", display));
+    chips.appendChild(chip);
+  }
+  parent.appendChild(chips);
+}
+
+function buildToolCardHeader(meta, toolName, args, status, { pending = false, ms = null, collapsible = false } = {}) {
+  const header = el("div", "tool-card-header" + (collapsible ? " clickable" : ""));
+  header.appendChild(el("span", "tool-card-icon tool-glyph", meta.icon));
+  const titleWrap = el("span", "tool-card-title-wrap");
+  const displayTitle = meta.label || toolName;
+  titleWrap.appendChild(el("span", "tool-card-title", displayTitle));
+  if (toolName && displayTitle !== toolName) {
+    titleWrap.appendChild(el("span", "tool-card-fn", toolName));
+  }
+  if (args) {
+    appendToolArgChips(titleWrap, args);
+  } else if (status === "running" || status === "pending") {
+    titleWrap.appendChild(
+      el("span", "tool-card-status-hint", pending ? "Queued" : "Running…"),
+    );
+  }
+  header.appendChild(titleWrap);
+  const trail = el("span", "tool-card-trail");
+  if (ms) trail.appendChild(el("span", "tool-card-ms", `${ms}ms`));
+  if (status === "ok" || status === "err" || status === "pending") {
+    const badge = status === "ok" ? "✓" : status === "err" ? "✗" : "⏳";
+    trail.appendChild(el("span", `tool-status-badge status-${status}`, badge));
+  }
+  if (status === "running") trail.appendChild(el("span", "tool-spinner", ""));
+  if (collapsible && status !== "running" && status !== "pending") {
+    trail.appendChild(el("span", "tool-card-chevron", "▾"));
+  }
+  if (trail.childNodes.length) header.appendChild(trail);
+  return header;
 }
 
 const PHASE_META = {
@@ -256,8 +341,14 @@ function paintStreamingBody(body, text) {
 }
 
 /** Lightweight markdown → HTML (assistant / digest / overview). */
+const MARKDOWN_MAX_CHARS = 24_000;
+
 function renderMarkdown(text) {
   if (!text) return "";
+  if (text.length > MARKDOWN_MAX_CHARS) {
+    const cut = text.slice(0, MARKDOWN_MAX_CHARS);
+    return `<pre class="md-plain">${escapeHtml(cut)}\n… [${text.length - MARKDOWN_MAX_CHARS} more chars]</pre>`;
+  }
 
   const fences = [];
   let src = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
@@ -298,7 +389,7 @@ function renderMarkdown(text) {
       continue;
     }
 
-    const hm = lines[i].match(/^(#{1,3})\s+(.+)$/);
+    const hm = lines[i].match(/^(#{1,6})\s+(.+)$/);
     if (hm) {
       const level = hm[1].length;
       out.push(`<h${level}>${inlineMarkdown(hm[2])}</h${level}>`);
@@ -360,7 +451,7 @@ function renderMarkdown(text) {
       i < lines.length &&
       !isBlank(lines[i]) &&
       !isFence(lines[i]) &&
-      !/^#{1,3}\s/.test(lines[i]) &&
+      !/^#{1,6}\s/.test(lines[i]) &&
       !/^-{3,}$/.test(lines[i].trim()) &&
       !lines[i].startsWith("&gt;") &&
       !/^[-*] /.test(lines[i]) &&
@@ -878,15 +969,9 @@ function renderReasoningHistoryBlock(parent, block, domId) {
 }
 
 function renderCompactTool(parent, block, meta, blockId) {
-  const done = block.steps.find((s) => s.kind === "done");
-  const detail = block.args
-    ? truncateMiddle(block.args, 56)
-    : done
-      ? truncateMiddle(formatStepText(done), 56)
-      : meta.label;
   const outHint = toolOutputSummary(block);
   const chip = el("div", `tool-chip status-${block.status} clickable`);
-  chip.title = [block.toolName, block.args || detail, outHint].filter(Boolean).join("\n");
+  chip.title = [block.toolName, block.args, outHint].filter(Boolean).join("\n");
   chip.onclick = (e) => {
     e.stopPropagation();
     ui.expandedToolGroups.add(blockId);
@@ -897,8 +982,8 @@ function renderCompactTool(parent, block, meta, blockId) {
   chip.appendChild(el("span", "tool-chip-icon tool-glyph", meta.icon));
   const main = el("span", "tool-chip-main");
   main.appendChild(el("span", "tool-chip-name", meta.label));
-  if (detail && detail !== meta.label) {
-    main.appendChild(el("span", "tool-chip-detail", detail));
+  if (block.args) {
+    appendToolArgChips(main, block.args);
   }
   chip.appendChild(main);
   const trail = el("span", "tool-chip-trail");
@@ -911,7 +996,6 @@ function renderCompactTool(parent, block, meta, blockId) {
 }
 
 function renderToolGroup(parent, block, blockId) {
-  const hasOutput = block.steps.some((s) => s.output);
   const meta = toolMeta(block.toolName);
 
   if (shouldCompactTool(block, blockId)) {
@@ -920,7 +1004,10 @@ function renderToolGroup(parent, block, blockId) {
   }
 
   const card = el("div", `tool-card status-${block.status} is-expanded-view`);
-  const header = el("div", "tool-card-header clickable");
+  const header = buildToolCardHeader(meta, block.toolName, block.args, block.status, {
+    ms: block.ms,
+    collapsible: true,
+  });
   header.onclick = () => {
     if (block.status !== "running" && block.status !== "pending") {
       ui.expandedToolGroups.delete(blockId);
@@ -929,37 +1016,13 @@ function renderToolGroup(parent, block, blockId) {
       scheduleRender(true);
     }
   };
-  const icon = el("span", "tool-card-icon tool-glyph", meta.icon);
-  const titleWrap = el("span", "tool-card-title-wrap");
-  titleWrap.appendChild(el("span", "tool-card-title", meta.label));
-  if (block.toolName && meta.label !== block.toolName) {
-    titleWrap.appendChild(el("span", "tool-card-subtitle", block.toolName));
-  } else if (block.args) {
-    titleWrap.appendChild(el("span", "tool-card-subtitle", truncateMiddle(block.args, 88)));
-  }
-  header.append(icon, titleWrap);
-  const trail = el("span", "tool-card-trail");
-  if (block.ms) trail.appendChild(el("span", "tool-card-ms", `${block.ms}ms`));
-  if (block.status === "ok" || block.status === "err" || block.status === "pending") {
-    const badge = block.status === "ok" ? "✓" : block.status === "err" ? "✗" : "⏳";
-    trail.appendChild(el("span", `tool-status-badge status-${block.status}`, badge));
-  }
-  if (block.status === "running") trail.appendChild(el("span", "tool-spinner", ""));
-  if (block.status !== "running" && block.status !== "pending") {
-    trail.appendChild(el("span", "tool-card-chevron", "▾"));
-  }
-  if (trail.childNodes.length) header.appendChild(trail);
   card.appendChild(header);
 
   const body = el("div", "tool-card-body");
   const reasoning = block.steps.filter((s) => s.kind === "reasoning");
   const actionSteps = block.steps.filter((s) => s.kind !== "reasoning" && !(s.kind === "done" && s.output));
-  const showTimeline =
-    actionSteps.length > 2 || (actionSteps.length > 0 && block.status !== "ok" && block.status !== "err");
+  const showTimeline = actionSteps.length > 1;
 
-  if (block.args && !hasOutput) {
-    body.appendChild(el("div", "tool-card-args", truncateMiddle(block.args, 200)));
-  }
   if (reasoning.length) {
     renderToolReasoningNote(body, blockId, reasoning.map((s) => s.text));
   }
@@ -976,15 +1039,18 @@ function renderToolGroup(parent, block, blockId) {
   for (const step of block.steps) {
     if (step.kind === "done" && step.output) {
       const outWrap = el("div", "tool-output-wrap");
-      const outputs = block.steps.filter((s) => s.output);
-      if (outputs.length > 1 || block.args) {
+      if (block.steps.filter((s) => s.output).length > 1) {
         outWrap.appendChild(el("div", "tool-output-label", formatStepText(step)));
       }
       renderToolOutput(outWrap, step.output, step.index, blockId);
       body.appendChild(outWrap);
     }
   }
-  card.appendChild(body);
+  if (body.childNodes.length) {
+    card.appendChild(body);
+  } else {
+    card.classList.add("is-compact");
+  }
 
   parent.appendChild(card);
 }
@@ -1127,21 +1193,9 @@ function liveFingerprint() {
 
 function buildLiveToolCard(name, detail, pending) {
   const meta = toolMeta(name);
-  const card = el("div", "tool-card status-running live-tool");
-  const header = el("div", "tool-card-header");
-  header.appendChild(el("span", "tool-card-icon tool-glyph", meta.icon));
-  const titleWrap = el("span", "tool-card-title-wrap");
-  titleWrap.appendChild(el("span", "tool-card-title", meta.label));
-  titleWrap.appendChild(el("span", "tool-card-subtitle", pending ? "queued" : "running…"));
-  const trail = el("span", "tool-card-trail");
-  trail.appendChild(el("span", "tool-spinner", ""));
-  header.append(titleWrap, trail);
+  const card = el("div", "tool-card status-running live-tool is-compact");
+  const header = buildToolCardHeader(meta, name, detail, "running", { pending });
   card.appendChild(header);
-  if (detail) {
-    const body = el("div", "tool-card-body");
-    body.appendChild(el("div", "tool-card-args", truncateMiddle(detail, 160)));
-    card.appendChild(body);
-  }
   return card;
 }
 
@@ -1231,16 +1285,14 @@ function syncLiveZone(liveEl) {
     !state.chat_reasoning &&
     !state.chat_streaming
   ) {
-    const argsEl = liveEl.querySelector(".live-tool .tool-card-args");
+    const card = liveEl.querySelector(".live-tool");
     const detail = state.chat_tool_running_detail;
-    if (detail) {
-      if (argsEl) {
-        argsEl.textContent = truncateMiddle(detail, 160);
-      } else {
-        const card = liveEl.querySelector(".live-tool");
-        const body = el("div", "tool-card-body");
-        body.appendChild(el("div", "tool-card-args", truncateMiddle(detail, 160)));
-        card?.appendChild(body);
+    if (card && detail) {
+      const titleWrap = card.querySelector(".tool-card-title-wrap");
+      const existing = titleWrap?.querySelector(".tool-arg-chips");
+      if (titleWrap && !existing) {
+        titleWrap.querySelector(".tool-card-status-hint")?.remove();
+        appendToolArgChips(titleWrap, detail);
       }
     }
     liveEl.dataset.fp = fp;
@@ -1390,7 +1442,29 @@ function ctxStatsHtml(c) {
 }
 
 function ctxMsgKey(m, i) {
-  return `ctx-${i}-${m.role}-${m.tokens}`;
+  return `ctx-${i}-${m.role}`;
+}
+
+function contextMessagesFingerprint(messages) {
+  const msgs = messages || [];
+  if (!msgs.length) return "0";
+  return msgs
+    .map((m, i) => `${i}:${m.role}:${m.tokens}:${m.content?.length ?? 0}:${(m.content || "").slice(0, 48)}`)
+    .join("|");
+}
+
+function fillCtxBlockContent(contentEl, content, renderMd) {
+  const raw = content || "";
+  if (!renderMd) {
+    contentEl.textContent = raw;
+    contentEl.classList.remove("md-rendered");
+    delete contentEl.dataset.mdSrc;
+    return;
+  }
+  if (contentEl.dataset.mdSrc === raw && contentEl.classList.contains("md-rendered")) return;
+  contentEl.dataset.mdSrc = raw;
+  contentEl.classList.add("md-rendered");
+  contentEl.innerHTML = renderMarkdown(raw);
 }
 
 function ctxMsgFingerprint(m) {
@@ -1423,6 +1497,8 @@ function applyCtxBlockExpandState(block, m, i) {
   const { collapsible, previewChars } = ctxBlockCollapsePolicy(m);
   if (!collapsible) {
     block.classList.remove("collapsible", "collapsed");
+    const content = block.querySelector(".ctx-content");
+    if (content) fillCtxBlockContent(content, m.content, true);
     return;
   }
   const expandKey = ctxBlockExpandKey(i);
@@ -1434,7 +1510,10 @@ function applyCtxBlockExpandState(block, m, i) {
   const preview = block.querySelector(".ctx-preview");
   const content = block.querySelector(".ctx-content");
   if (preview) preview.classList.toggle("hidden", expanded);
-  if (content) content.classList.toggle("hidden", !expanded);
+  if (content) {
+    content.classList.toggle("hidden", !expanded);
+    fillCtxBlockContent(content, m.content, expanded);
+  }
   if (preview && !expanded) {
     preview.textContent = ctxBlockPreview(m.content, previewChars);
   }
@@ -1477,7 +1556,7 @@ function buildCtxBlock(m, i) {
   }
 
   const content = el("div", "ctx-content md");
-  content.innerHTML = renderMarkdown(m.content);
+  fillCtxBlockContent(content, m.content, !collapsible || expanded);
   if (collapsible && !expanded) content.classList.add("hidden");
 
   block.append(head, preview, content);
@@ -1522,6 +1601,15 @@ function syncContextMessages(ctxMsgs, messages) {
   }
 }
 
+async function setContextVisible(visible) {
+  if (state?.chat_context_visible === visible) return;
+  await apiFetch("/api/chat/context", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ visible }),
+  });
+}
+
 function ensureContextPane(layout) {
   let pane = layout.querySelector(".context-pane");
   if (!state.chat_context_visible) {
@@ -1533,8 +1621,15 @@ function ensureContextPane(layout) {
   if (!pane) {
     pane = el("div", "context-pane");
     const header = el("div", "context-header");
-    header.appendChild(el("span", "", "LLM Context"));
+    const title = el("span", "context-header-title", "LLM Context");
+    header.appendChild(title);
     header.appendChild(el("span", "ctx-rev-badge hidden"));
+    const closeBtn = el("button", "ctx-close", "×");
+    closeBtn.type = "button";
+    closeBtn.title = "Close";
+    closeBtn.setAttribute("aria-label", "Close context panel");
+    closeBtn.onclick = () => setContextVisible(false);
+    header.appendChild(closeBtn);
     pane.appendChild(header);
     pane.appendChild(el("div", "context-stats"));
     pane.appendChild(el("div", "ctx-tools hidden"));
@@ -1712,8 +1807,12 @@ function syncContextPane(layout) {
   syncContextSkills(pane.querySelector(".ctx-skills"), c.skill_blocks);
   const ctxMsgs = pane.querySelector(".context-messages");
   const ctxRev = state.chat_context_revision;
-  if (ctxRev !== ui.lastContextRevision) {
-    syncContextMessages(ctxMsgs, c.messages);
+  const msgsFp = contextMessagesFingerprint(c.messages);
+  if (ctxRev !== ui.lastContextRevision || pane.dataset.msgsFp !== msgsFp) {
+    if (pane.dataset.msgsFp !== msgsFp) {
+      syncContextMessages(ctxMsgs, c.messages);
+      pane.dataset.msgsFp = msgsFp;
+    }
     ui.lastContextRevision = ctxRev;
   } else {
     refreshCtxBlockExpandStates(ctxMsgs, c.messages);
@@ -1760,6 +1859,15 @@ function updateMessagesHeader(shell) {
   const hasHistory = (state.chat_lines || []).length > 0;
   clearBtn.classList.toggle("hidden", !hasHistory || state.chat_busy);
 
+  let ctxBtn = actions.querySelector(".btn-header-ctx");
+  if (!ctxBtn) {
+    ctxBtn = el("button", "btn-header-action btn-header-ctx", "Context");
+    ctxBtn.type = "button";
+    ctxBtn.onclick = () => setContextVisible(true);
+    actions.appendChild(ctxBtn);
+  }
+  ctxBtn.classList.toggle("hidden", state.chat_context_visible);
+
   let live = actions.querySelector(".messages-live");
   if (!live) {
     live = el("span", "messages-live hidden");
@@ -1779,7 +1887,6 @@ function updateChatInput(shell) {
   const textarea = shell.querySelector(".chat-input textarea");
   const sendBtn = shell.querySelector(".chat-input .btn-primary");
   const cancelBtn = shell.querySelector(".chat-input .btn-cancel");
-  const ctxBtn = shell.querySelector(".chat-input .btn-ctx");
   if (!textarea) return;
   const pos = textarea.selectionStart;
   if (textarea.value !== ui.chatDraft) textarea.value = ui.chatDraft;
@@ -1794,7 +1901,6 @@ function updateChatInput(shell) {
   }
   if (sendBtn) sendBtn.disabled = state.chat_busy;
   if (cancelBtn) cancelBtn.disabled = !state.chat_busy;
-  if (ctxBtn) ctxBtn.textContent = state.chat_context_visible ? "Hide ctx" : "Context";
   autoResizeTextarea(textarea);
 }
 
@@ -1839,13 +1945,6 @@ function bindChatShell(shell) {
   shell.querySelector(".chat-input .btn-cancel")?.addEventListener("click", () => {
     apiFetch("/api/chat/cancel", { method: "POST" });
   });
-  shell.querySelector(".chat-input .btn-ctx")?.addEventListener("click", async () => {
-    await apiFetch("/api/chat/context", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ visible: !state.chat_context_visible }),
-    });
-  });
 }
 
 function buildChatShell() {
@@ -1868,13 +1967,7 @@ function buildChatShell() {
   const fab = el("button", "scroll-fab hidden", "↓ Bottom");
   messagesPane.appendChild(fab);
   const ctxFab = el("button", "ctx-fab hidden", "Context");
-  ctxFab.onclick = async () => {
-    await apiFetch("/api/chat/context", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ visible: !state.chat_context_visible }),
-    });
-  };
+  ctxFab.onclick = () => setContextVisible(!state.chat_context_visible);
   messagesPane.appendChild(ctxFab);
   layout.appendChild(messagesPane);
   shell.appendChild(layout);
@@ -1882,9 +1975,8 @@ function buildChatShell() {
   const textarea = document.createElement("textarea");
   textarea.rows = 1;
   const sendBtn = el("button", "btn btn-primary", "Send");
-  const ctxBtn = el("button", "btn btn-ghost btn-ctx", "Context");
   const cancelBtn = el("button", "btn btn-ghost btn-cancel", "Cancel");
-  inputRow.append(textarea, sendBtn, ctxBtn, cancelBtn);
+  inputRow.append(textarea, sendBtn, cancelBtn);
   shell.appendChild(inputRow);
   bindChatShell(shell);
   return shell;
@@ -2089,8 +2181,17 @@ function updateChat(main, mode = "full") {
   updateMessagesHeader(shell);
 
   let ctxMsgs = null;
-  if (mode !== "live" && state.chat_context_visible) {
+  if (mode !== "live") {
     ctxMsgs = syncContextPane(layout);
+  } else {
+    ensureContextPane(layout);
+    if (state.chat_context_visible) {
+      const pane = layout.querySelector(".context-pane");
+      if (pane) {
+        const narrow = window.matchMedia("(max-width: 900px)").matches;
+        pane.classList.toggle("mobile-open", narrow);
+      }
+    }
   }
   updateChatInput(shell);
   if (fab) fab.classList.toggle("hidden", ui.chatStickBottom);
@@ -2098,7 +2199,8 @@ function updateChat(main, mode = "full") {
   if (ctxFab) {
     const narrow = window.matchMedia("(max-width: 900px)").matches;
     ctxFab.classList.toggle("hidden", !narrow);
-    ctxFab.textContent = state.chat_context_visible ? "Hide ctx" : "Context";
+    ctxFab.textContent = state.chat_context_visible ? "Close" : "Context";
+    ctxFab.setAttribute("aria-label", state.chat_context_visible ? "Close context panel" : "Show context panel");
   }
   if (ctxMsgs && ui.ctxStickBottom) {
     ctxMsgs.scrollTop = ctxMsgs.scrollHeight;
@@ -2722,6 +2824,7 @@ function applyChatPatch(patch) {
 
 let liveRenderQueued = false;
 let chatRenderQueued = false;
+let chatRenderTimer = null;
 
 function scheduleLiveRender() {
   if (liveRenderQueued) return;
@@ -2734,11 +2837,24 @@ function scheduleLiveRender() {
 
 function scheduleChatRender() {
   if (chatRenderQueued) return;
-  chatRenderQueued = true;
-  requestAnimationFrame(() => {
-    chatRenderQueued = false;
-    applyChatStructuralRender();
-  });
+  const run = () => {
+    chatRenderQueued = true;
+    requestAnimationFrame(() => {
+      chatRenderQueued = false;
+      chatRenderTimer = null;
+      applyChatStructuralRender();
+    });
+  };
+  if (state?.chat_busy) {
+    if (chatRenderTimer) return;
+    chatRenderTimer = setTimeout(run, 120);
+    return;
+  }
+  if (chatRenderTimer) {
+    clearTimeout(chatRenderTimer);
+    chatRenderTimer = null;
+  }
+  run();
 }
 
 function connectWs() {
