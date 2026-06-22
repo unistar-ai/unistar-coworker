@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>unistar-coworker</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot" id="conn-dot" title="connection"></span>
+      unistar-coworker
+    </div>
+    <nav id="tabs" class="tabs" aria-label="main tabs"></nav>
+    <div class="topbar-meta">
+      <div id="ctx-usage" class="ctx-usage hidden" title="LLM context usage"></div>
+      <div id="status" class="status">connecting…</div>
+    </div>
+  </header>
+  <main id="main" class="main">
+    <div class="loading-shell">
+      <div class="spinner"></div>
+      <span>Loading…</span>
+    </div>
+  </main>
+  <footer class="footer" id="footer"></footer>
+  <script src="/app.js"></script>
+</body>
+</html>

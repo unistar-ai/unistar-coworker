@@ -1,7 +1,28 @@
 ---
 name: ci-triage
-description: Classify CI failures — flaky, real bug, or policy gate.
+description: Classify CI failures — flaky, real bug, or policy gate. Use when user asks about CI, builds, failing checks, tests, or PR status.
+intent_keywords: [ci, fail, flaky, build, workflow, test]
+intent_bonus_keywords: [pr, pull, "#"]
+tools:
+  - pr_get_ci_snapshot
+  - pr_get_overview
+  - ci_get_failure_digest
+  - ci_get_failed_logs
+  - ci_analyze_pr_failures
+  - ci_get_run_summary
+  - ci_failure_fingerprint
+  - policy_classify_failure
+  - harness_triage_pr
 ---
+
+## Tool chains (names only — params via tool_call or warmed schema)
+
+| Task | Chain |
+|------|--------|
+| PR CI overview | `pr_get_ci_snapshot` or `resource_read` `github://pull/{owner}/{repo}/{n}/ci-snapshot` |
+| Failure analysis | `ci_get_failure_digest` → (if needed) `ci_get_failed_logs` |
+| PR + failing runs | `ci_analyze_pr_failures` → `ci_get_run_summary` |
+| Flaky check | `ci_failure_fingerprint` → `policy_classify_failure` |
 
 ## Verdicts
 
@@ -17,5 +38,6 @@ Do **not** use verdict `real` for those — they belong in `policy`.
 
 - `action_required` is approval-waiting, not a code failure.
 - External CI: if status fails but GitHub Actions analyze finds no runs, say so explicitly.
-- Read `ci_get_run_summary` before full logs; page through logs before concluding `unknown`.
+- Prefer `pr_get_ci_snapshot` or `ci_get_failure_digest` before paged `ci_get_failed_logs`.
+- Read `ci_get_run_summary` when you need run metadata before deeper logs.
 - When explaining CI to users: distinguish flaky vs real vs policy in plain language.

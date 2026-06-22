@@ -31,7 +31,7 @@ impl Engine {
         let result = run_chat_turn(
             &self.config,
             Arc::clone(&self.store),
-            Arc::clone(&self.mcp),
+            Arc::clone(&self.github),
             Arc::clone(&self.llm),
             ChatTurnInput {
                 session_id,
@@ -50,6 +50,7 @@ impl Engine {
             s.set_chat_tool_pending(None);
             s.set_chat_tool_running(None);
             s.set_chat_reasoning(None);
+            s.set_chat_activity_flow(None);
             s.set_chat_reasoning_compressing(false);
             match &result {
                 Ok(r) if r.awaiting_approval => {
@@ -128,7 +129,7 @@ impl Engine {
         let result = resume_chat_after_approval(
             &self.config,
             Arc::clone(&self.store),
-            Arc::clone(&self.mcp),
+            Arc::clone(&self.github),
             Arc::clone(&self.llm),
             session_id,
             resume,
@@ -144,6 +145,7 @@ impl Engine {
             s.set_chat_tool_pending(None);
             s.set_chat_tool_running(None);
             s.set_chat_reasoning(None);
+            s.set_chat_activity_flow(None);
             s.set_chat_reasoning_compressing(false);
             match &result {
                 Ok(r) if r.awaiting_approval => {

@@ -1,18 +1,17 @@
-//! SQLite store — enable with `cargo build --features sqlite`.
+//! SQLite store backend.
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
 use crate::agent::context::harness_nudge_base;
 use crate::error::{CoworkerError, Result};
 use crate::store::{
-    Approval, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, ChatSession, Classification,
-    Digest, DigestMeta, FlakyIncident, FlakyQuery, FlakyTestRollup, IssueSnapshot, MainAlert,
-    MainAlertQuery, PrSnapshot, RegressionLink, RerunOutcome, Store, Transcript, WorkflowRun,
+    Approval, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, ChatRuntimeState, ChatSession,
+    Digest, PrSnapshot, Store, Transcript, WorkflowRun,
 };
 
 pub struct SqliteStore {
@@ -70,24 +69,12 @@ fn migrate(conn: &Connection) -> Result<()> {
             event TEXT NOT NULL,
             message TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS flaky_incidents (
-            id TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS flaky_tests (
-            fingerprint TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL
-        );
         CREATE TABLE IF NOT EXISTS workflow_runs (
             id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             payload_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS backport_queue (
-            id TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS main_alerts (
             id TEXT PRIMARY KEY,
             payload_json TEXT NOT NULL
         );
@@ -102,19 +89,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             payload_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, ts);
-        CREATE TABLE IF NOT EXISTS issue_snapshots (
-            repo TEXT NOT NULL,
-            issue_number INTEGER NOT NULL,
-            snapshot_json TEXT NOT NULL,
-            fetched_at TEXT NOT NULL,
-            PRIMARY KEY (repo, issue_number)
-        );
         CREATE TABLE IF NOT EXISTS transcripts (
-            id TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS regression_links (
             id TEXT PRIMARY KEY,
             payload_json TEXT NOT NULL,
             created_at TEXT NOT NULL
@@ -151,21 +126,6 @@ impl Store for SqliteStore {
                 "SELECT id, date, summary_json, body_md, created_at, skill FROM digests ORDER BY date DESC LIMIT 1",
             )?;
             let mut rows = stmt.query([])?;
-            if let Some(row) = rows.next()? {
-                Ok(Some(row_to_digest(row)?))
-            } else {
-                Ok(None)
-            }
-        })
-    }
-
-    async fn get_digest_by_skill(&self, skill: &str) -> Result<Option<Digest>> {
-        let skill = skill.to_string();
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, date, summary_json, body_md, created_at, skill FROM digests WHERE skill = ?1 ORDER BY date DESC LIMIT 1",
-            )?;
-            let mut rows = stmt.query([&skill])?;
             if let Some(row) = rows.next()? {
                 Ok(Some(row_to_digest(row)?))
             } else {
@@ -295,74 +255,6 @@ impl Store for SqliteStore {
         })
     }
 
-    async fn record_flaky_incident(&self, incident: &FlakyIncident) -> Result<()> {
-        let incident = incident.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT INTO flaky_incidents (id, payload_json) VALUES (?1,?2)",
-                params![incident.id.to_string(), serde_json::to_string(&incident)?],
-            )?;
-            upsert_flaky_rollup(conn, &incident)?;
-            Ok(())
-        })
-    }
-
-    async fn update_flaky_rerun(&self, incident_id: &Uuid, outcome: RerunOutcome) -> Result<()> {
-        let incident_id = *incident_id;
-        self.with_conn(move |conn| {
-            let mut stmt =
-                conn.prepare("SELECT payload_json FROM flaky_incidents WHERE id = ?1")?;
-            let mut rows = stmt.query([incident_id.to_string()])?;
-            let row = rows
-                .next()?
-                .ok_or_else(|| CoworkerError::Store(format!("incident {incident_id} not found")))?;
-            let mut incident: FlakyIncident = serde_json::from_str(&row.get::<_, String>(0)?)?;
-            incident.rerun_outcome = Some(outcome);
-            conn.execute(
-                "UPDATE flaky_incidents SET payload_json = ?1 WHERE id = ?2",
-                params![serde_json::to_string(&incident)?, incident_id.to_string()],
-            )?;
-
-            let mut stmt =
-                conn.prepare("SELECT payload_json FROM flaky_tests WHERE fingerprint = ?1")?;
-            let mut rows = stmt.query([&incident.fingerprint])?;
-            if let Some(row) = rows.next()? {
-                let mut rollup: FlakyTestRollup = serde_json::from_str(&row.get::<_, String>(0)?)?;
-                rollup.rerun_attempts += 1;
-                if outcome == RerunOutcome::Succeeded {
-                    rollup.rerun_successes += 1;
-                }
-                conn.execute(
-                    "UPDATE flaky_tests SET payload_json = ?1 WHERE fingerprint = ?2",
-                    params![
-                        serde_json::to_string(&rollup)?,
-                        incident.fingerprint.clone()
-                    ],
-                )?;
-            }
-            Ok(())
-        })
-    }
-
-    async fn list_flaky_tests(&self, q: FlakyQuery) -> Result<Vec<FlakyTestRollup>> {
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare("SELECT payload_json FROM flaky_tests")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            let since = q
-                .since_days
-                .map(|d| Utc::now() - Duration::days(i64::from(d)));
-            let mut list: Vec<FlakyTestRollup> = rows
-                .filter_map(|r| r.ok())
-                .filter_map(|j| serde_json::from_str(&j).ok())
-                .filter(|t: &FlakyTestRollup| q.repo.as_ref().is_none_or(|r| &t.repo == r))
-                .filter(|t| since.is_none_or(|s| t.last_seen >= s))
-                .collect();
-            list.sort_by_key(|b| std::cmp::Reverse(b.incident_count));
-            list.truncate(q.limit);
-            Ok(list)
-        })
-    }
-
     async fn upsert_backport_queue(&self, item: &BackportQueueItem) -> Result<()> {
         let item = item.clone();
         self.with_conn(move |conn| {
@@ -386,57 +278,6 @@ impl Store for SqliteStore {
                 .collect();
             list.sort_by_key(|b| std::cmp::Reverse(b.created_at));
             Ok(list)
-        })
-    }
-
-    async fn record_main_alert(&self, alert: &MainAlert) -> Result<()> {
-        let alert = alert.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO main_alerts (id, payload_json) VALUES (?1,?2)",
-                params![alert.id.to_string(), serde_json::to_string(&alert)?],
-            )?;
-            Ok(())
-        })
-    }
-
-    async fn list_main_alerts(&self, q: MainAlertQuery) -> Result<Vec<MainAlert>> {
-        let q = q.clone();
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare("SELECT payload_json FROM main_alerts")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            let since = q
-                .since_hours
-                .map(|h| Utc::now() - Duration::hours(i64::from(h)));
-            let mut list: Vec<MainAlert> = rows
-                .filter_map(|r| r.ok())
-                .filter_map(|j| serde_json::from_str(&j).ok())
-                .filter(|a: &MainAlert| !q.unacknowledged_only || !a.acknowledged)
-                .filter(|a| q.repo.as_ref().is_none_or(|r| &a.repo == r))
-                .filter(|a| since.is_none_or(|s| a.ts >= s))
-                .collect();
-            list.sort_by_key(|a| std::cmp::Reverse(a.ts));
-            list.truncate(q.limit);
-            Ok(list)
-        })
-    }
-
-    async fn acknowledge_main_alert(&self, id: &Uuid) -> Result<()> {
-        let id = *id;
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare("SELECT payload_json FROM main_alerts WHERE id = ?1")?;
-            let mut rows =
-                stmt.query_map(params![id.to_string()], |row| row.get::<_, String>(0))?;
-            let Some(json) = rows.next().transpose()? else {
-                return Ok(());
-            };
-            let mut alert: MainAlert = serde_json::from_str(&json)?;
-            alert.acknowledged = true;
-            conn.execute(
-                "UPDATE main_alerts SET payload_json = ?1 WHERE id = ?2",
-                params![serde_json::to_string(&alert)?, id.to_string()],
-            )?;
-            Ok(())
         })
     }
 
@@ -497,6 +338,7 @@ impl Store for SqliteStore {
             created_at: Utc::now(),
             title: title.unwrap_or("Chat").to_string(),
             repo_scope: repo_scope.map(str::to_string),
+            runtime_state: ChatRuntimeState::default(),
         };
         let payload = serde_json::to_string(&session)?;
         let id = session.id;
@@ -519,6 +361,18 @@ impl Store for SqliteStore {
                 return Ok(Some(serde_json::from_str(&json)?));
             }
             Ok(None)
+        })
+    }
+
+    async fn update_chat_session(&self, session: &ChatSession) -> Result<()> {
+        let payload = serde_json::to_string(session)?;
+        let id = session.id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE chat_sessions SET payload_json = ?1 WHERE id = ?2",
+                params![payload, id],
+            )?;
+            Ok(())
         })
     }
 
@@ -583,7 +437,7 @@ impl Store for SqliteStore {
                 params![payload, ts, id],
             )?;
             if updated == 0 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
+                return Err(rusqlite::Error::QueryReturnedNoRows.into());
             }
             Ok(())
         })
@@ -609,44 +463,6 @@ impl Store for SqliteStore {
                 msgs = msgs.split_off(msgs.len() - limit);
             }
             Ok(msgs)
-        })
-    }
-
-    async fn upsert_issue_snapshot(&self, snap: &IssueSnapshot) -> Result<()> {
-        let payload = serde_json::to_string(snap)?;
-        let repo = snap.repo.clone();
-        let number = snap.number;
-        let fetched = snap.fetched_at.to_rfc3339();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO issue_snapshots (repo, issue_number, snapshot_json, fetched_at) VALUES (?1,?2,?3,?4)",
-                params![repo, number, payload, fetched],
-            )?;
-            Ok(())
-        })
-    }
-
-    async fn list_issue_snapshots(&self, repo: Option<&str>) -> Result<Vec<IssueSnapshot>> {
-        let repo_filter = repo.map(str::to_string);
-        self.with_conn(move |conn| {
-            let mut out = Vec::new();
-            if let Some(r) = repo_filter {
-                let mut stmt = conn.prepare(
-                    "SELECT snapshot_json FROM issue_snapshots WHERE repo = ?1 ORDER BY fetched_at DESC",
-                )?;
-                let rows = stmt.query_map([&r], |row| row.get::<_, String>(0))?;
-                for row in rows {
-                    out.push(serde_json::from_str(&row?)?);
-                }
-            } else {
-                let mut stmt = conn
-                    .prepare("SELECT snapshot_json FROM issue_snapshots ORDER BY fetched_at DESC")?;
-                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-                for row in rows {
-                    out.push(serde_json::from_str(&row?)?);
-                }
-            }
-            Ok(out)
         })
     }
 
@@ -676,63 +492,6 @@ impl Store for SqliteStore {
                 out.push(serde_json::from_str(&row?)?);
             }
             Ok(out)
-        })
-    }
-
-    async fn save_regression_link(&self, link: &RegressionLink) -> Result<()> {
-        let link = link.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO regression_links (id, payload_json, created_at) VALUES (?1,?2,?3)",
-                params![
-                    link.id.to_string(),
-                    serde_json::to_string(&link)?,
-                    link.created_at.to_rfc3339(),
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
-    async fn list_regression_links(&self, limit: usize) -> Result<Vec<RegressionLink>> {
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT payload_json FROM regression_links ORDER BY created_at DESC LIMIT ?1",
-            )?;
-            let rows = stmt.query_map([limit as i64], |row| row.get::<_, String>(0))?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(serde_json::from_str(&row?)?);
-            }
-            Ok(out)
-        })
-    }
-
-    async fn reclassify_flaky(
-        &self,
-        fingerprint: &str,
-        classification: Classification,
-    ) -> Result<u32> {
-        let fp = fingerprint.to_string();
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare("SELECT id, payload_json FROM flaky_incidents")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            let mut updated = 0u32;
-            for row in rows {
-                let (id, json) = row?;
-                let mut incident: FlakyIncident = serde_json::from_str(&json)?;
-                if incident.fingerprint == fp {
-                    incident.classification = classification;
-                    conn.execute(
-                        "UPDATE flaky_incidents SET payload_json = ?1 WHERE id = ?2",
-                        params![serde_json::to_string(&incident)?, id],
-                    )?;
-                    updated += 1;
-                }
-            }
-            Ok(updated)
         })
     }
 
@@ -771,40 +530,4 @@ fn row_to_digest(row: &rusqlite::Row<'_>) -> rusqlite::Result<Digest> {
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
         skill,
     })
-}
-
-fn upsert_flaky_rollup(conn: &Connection, incident: &FlakyIncident) -> Result<()> {
-    let fp = &incident.fingerprint;
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT payload_json FROM flaky_tests WHERE fingerprint = ?1",
-            [fp],
-            |row| row.get(0),
-        )
-        .ok();
-    let mut rollup = if let Some(json) = existing {
-        serde_json::from_str(&json)?
-    } else {
-        FlakyTestRollup {
-            fingerprint: incident.fingerprint.clone(),
-            repo: incident.repo.clone(),
-            workflow: incident.workflow.clone(),
-            job: incident.job.clone(),
-            test_name: incident.test_name.clone(),
-            first_seen: incident.ts,
-            last_seen: incident.ts,
-            incident_count: 0,
-            rerun_attempts: 0,
-            rerun_successes: 0,
-            last_error_signature: incident.log_excerpt.chars().take(200).collect(),
-        }
-    };
-    rollup.last_seen = incident.ts;
-    rollup.incident_count += 1;
-    rollup.last_error_signature = incident.log_excerpt.chars().take(200).collect();
-    conn.execute(
-        "INSERT OR REPLACE INTO flaky_tests (fingerprint, payload_json) VALUES (?1,?2)",
-        params![fp, serde_json::to_string(&rollup)?],
-    )?;
-    Ok(())
 }

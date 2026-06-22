@@ -1,9 +1,10 @@
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders};
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::TuiThemeMode;
+use crate::config::{TuiConfig, TuiThemeMode};
 
 /// Full TUI color palette (dark or light).
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +38,8 @@ pub struct ThemePalette {
     pub heading_h2: Color,
     pub heading_h3: Color,
     pub heading_h4: Color,
+    /// When true, markdown links use OSC 8 escape sequences (modern terminals).
+    pub osc8_links: bool,
 }
 
 impl ThemePalette {
@@ -44,7 +47,26 @@ impl ThemePalette {
         match mode {
             TuiThemeMode::Dark => Self::dark(),
             TuiThemeMode::Light => Self::light(),
+            TuiThemeMode::None => Self::none(),
         }
+    }
+
+    pub fn from_tui(tui: &TuiConfig) -> Self {
+        let mut palette = Self::from_mode(tui.theme);
+        palette.osc8_links = tui.osc8_links;
+        if tui.theme != TuiThemeMode::None {
+            if let Some(accent) = tui
+                .accent
+                .as_deref()
+                .and_then(parse_hex_rgb)
+            {
+                palette.accent = accent;
+                palette.accent_dim = dim_rgb(accent);
+                palette.link = accent;
+                palette.heading_h2 = accent;
+            }
+        }
+        palette
     }
 
     /// Catppuccin-inspired dark (default).
@@ -79,6 +101,7 @@ impl ThemePalette {
             heading_h2: Color::Rgb(137, 180, 250),
             heading_h3: Color::Rgb(250, 179, 135),
             heading_h4: Color::Rgb(166, 200, 240),
+            osc8_links: false,
         }
     }
 
@@ -114,7 +137,66 @@ impl ThemePalette {
             heading_h2: Color::Rgb(30, 64, 175),
             heading_h3: Color::Rgb(194, 65, 12),
             heading_h4: Color::Rgb(29, 78, 216),
+            osc8_links: false,
         }
+    }
+
+    /// Minimal styling — respects the terminal's own color scheme.
+    pub fn none() -> Self {
+        Self {
+            bg: Color::Reset,
+            surface: Color::Reset,
+            panel: Color::Reset,
+            input_bg: Color::Reset,
+            border: Color::Reset,
+            border_active: Color::Cyan,
+            accent: Color::Cyan,
+            accent_dim: Color::DarkGray,
+            muted: Color::DarkGray,
+            text: Color::Reset,
+            user: Color::Green,
+            user_bg: Color::Reset,
+            assistant: Color::Reset,
+            ai_bg: Color::Reset,
+            tool: Color::Yellow,
+            ok: Color::Green,
+            err: Color::Red,
+            warn: Color::Yellow,
+            title_bg: Color::Reset,
+            tab_active_bg: Color::Reset,
+            badge_fg: Color::Reset,
+            link: Color::Cyan,
+            code_fg: Color::Yellow,
+            code_bg: Color::Reset,
+            pr_ref: Color::Magenta,
+            heading_h1: Color::Reset,
+            heading_h2: Color::Cyan,
+            heading_h3: Color::Yellow,
+            heading_h4: Color::Blue,
+            osc8_links: false,
+        }
+    }
+}
+
+fn parse_hex_rgb(hex: &str) -> Option<Color> {
+    let s = hex.trim().trim_start_matches('#');
+    if s.len() != 6 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some(Color::Rgb(r, g, b))
+}
+
+fn dim_rgb(c: Color) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (u16::from(r) * 2 / 3) as u8,
+            (u16::from(g) * 2 / 3) as u8,
+            (u16::from(b) * 2 / 3) as u8,
+        ),
+        other => other,
     }
 }
 
@@ -194,7 +276,7 @@ pub fn status_line(
     th: ThemePalette,
     busy: bool,
     status: &str,
-    mcp_ok: bool,
+    github_ok: bool,
     llm_ok: bool,
     alert_note: &str,
 ) -> Line<'static> {
@@ -211,11 +293,11 @@ pub fn status_line(
             status.to_string(),
             Style::default().fg(th.text).bg(th.surface),
         ),
-        Span::styled(" │ mcp ", Style::default().fg(th.border).bg(th.surface)),
+        Span::styled(" │ gh ", Style::default().fg(th.border).bg(th.surface)),
         Span::styled(
-            if mcp_ok { "ok" } else { "off" },
+            if github_ok { "ok" } else { "off" },
             Style::default()
-                .fg(if mcp_ok { th.ok } else { th.err })
+                .fg(if github_ok { th.ok } else { th.err })
                 .bg(th.surface),
         ),
         Span::styled(" │ llm ", Style::default().fg(th.border).bg(th.surface)),
@@ -254,6 +336,40 @@ pub fn tab_separator(th: ThemePalette) -> Span<'static> {
     Span::styled("│", Style::default().fg(th.border).bg(th.surface))
 }
 
+/// Map a column (relative to header inner left) to a tab label hit target.
+pub fn tab_at_column(tabs: &[crate::app::Tab], rel_x: usize) -> Option<crate::app::Tab> {
+    let mut x = 0usize;
+    for (i, tab) in tabs.iter().enumerate() {
+        if i > 0 {
+            x += UnicodeWidthStr::width("│");
+        }
+        let label = format!(" {} ", tab.label());
+        let w = UnicodeWidthStr::width(label.as_str());
+        if rel_x < x + w {
+            return Some(*tab);
+        }
+        x += w;
+    }
+    None
+}
+
+pub fn header_inner_area(full: Rect) -> Rect {
+    let header = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(full)[0];
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" unistar-coworker ")
+        .inner(header)
+}
+
 /// Usable markdown width inside the Messages pane (continuation indent).
 pub fn chat_content_max_width(panel_width: u16) -> usize {
     content_max_width(panel_width, message_indent_width())
@@ -271,20 +387,6 @@ pub fn tail_content_max_width(panel_width: u16) -> usize {
 
 fn content_max_width(panel_width: u16, indent_cols: usize) -> usize {
     panel_width.saturating_sub(indent_cols as u16).max(1) as usize
-}
-
-fn meta_message_indent() -> &'static str {
-    "               "
-}
-
-fn meta_badge(th: ThemePalette, kind: &str) -> Span<'static> {
-    Span::styled(
-        format!(" {kind} "),
-        Style::default()
-            .fg(th.muted)
-            .bg(th.title_bg)
-            .add_modifier(Modifier::BOLD),
-    )
 }
 
 fn format_system_help_body(body: &str) -> String {
@@ -310,9 +412,9 @@ fn parse_system_session_row(body: &str) -> Option<(&str, &str, &str)> {
 
 fn system_session_row_line(th: ThemePalette, id: &str, date: &str, title: &str) -> Line<'static> {
     let short_id = crate::agent::context::truncate_chars(id, 8);
+    let indent = message_continuation_indent("system");
     Line::from(vec![
-        Span::raw("      "),
-        Span::styled("┊ ", Style::default().fg(th.border)),
+        Span::raw(indent),
         Span::styled(
             short_id,
             Style::default()
@@ -334,13 +436,6 @@ fn meta_message_lines(
     max_width: Option<usize>,
 ) -> Vec<Line<'static>> {
     let body = body.trim();
-    if body.is_empty() {
-        return vec![Line::from(vec![
-            Span::raw("    "),
-            Span::styled("┊ ", Style::default().fg(th.border)),
-            meta_badge(th, kind),
-        ])];
-    }
 
     if kind == "system" {
         if let Some((id, date, title)) = parse_system_session_row(body) {
@@ -353,45 +448,16 @@ fn meta_message_lines(
     } else {
         body.to_string()
     };
-
-    let content_style = Style::default()
-        .fg(th.muted)
-        .add_modifier(Modifier::ITALIC);
-    let badge_cols = kind.len() + 2;
-    let first_line_budget = max_width.map(|width| width.saturating_sub(6 + 2 + badge_cols + 1));
-    let content_lines = super::markdown::markdown_to_lines_in_width(
+    let markdown = rendered_body.contains("• ");
+    message_lines(
         th,
+        kind,
+        th.muted,
+        th.title_bg,
         &rendered_body,
-        content_style,
-        first_line_budget,
-    );
-    let content_lines = if let Some(mw) = first_line_budget {
-        super::markdown::wrap_content_lines(content_lines, mw)
-    } else {
-        content_lines
-    };
-
-    let bar = Span::styled("┊ ", Style::default().fg(th.border));
-    let badge = meta_badge(th, kind);
-    let indent = meta_message_indent();
-    let mut out = Vec::with_capacity(content_lines.len().max(1));
-    for (i, content) in content_lines.into_iter().enumerate() {
-        if i == 0 {
-            let mut spans = vec![Span::raw("    "), bar.clone(), badge.clone(), Span::raw(" ")];
-            spans.extend(content.spans);
-            out.push(Line::from(spans));
-        } else if content.spans.is_empty() {
-            out.push(Line::from(""));
-        } else {
-            let mut spans = vec![Span::raw(indent)];
-            spans.extend(content.spans);
-            out.push(Line::from(spans));
-        }
-    }
-    if out.is_empty() {
-        out.push(Line::from(vec![Span::raw("    "), bar, badge]));
-    }
-    out
+        markdown,
+        max_width,
+    )
 }
 
 /// Expand one stored chat row into styled terminal lines.
@@ -475,7 +541,7 @@ fn tail_body_indent() -> String {
     "        ".to_string()
 }
 pub fn normalize_message_layout(body: &str) -> String {
-    let body = body.replace("\r\n", "\n");
+    let body = crate::terminal::sanitize_terminal_output(body);
     if body.contains('\n') {
         return body;
     }
@@ -505,7 +571,11 @@ fn message_lines(
     markdown: bool,
     max_width: Option<usize>,
 ) -> Vec<Line<'static>> {
-    let content_style = Style::default().fg(if role == "You" { th.user } else { th.assistant });
+    let content_style = Style::default().fg(match role {
+        "You" => th.user,
+        "system" | "chat" => th.text,
+        _ => th.assistant,
+    });
     let mut content_lines = if markdown {
         super::markdown::markdown_to_lines_in_width(th, body, content_style, max_width)
     } else {
@@ -520,10 +590,15 @@ fn message_lines(
             .collect()
     };
     if let Some(mw) = max_width.filter(|w| *w > 0) {
-        let first_budget = mw + message_indent_width().saturating_sub(first_line_prefix_width(role));
+        let panel = mw + message_indent_width();
         let mut wrapped = Vec::new();
         for (i, line) in content_lines.into_iter().enumerate() {
-            let budget = if i == 0 { first_budget } else { mw };
+            let prefix_w = if i == 0 {
+                first_line_prefix_width(role)
+            } else {
+                message_prefix_width(role)
+            };
+            let budget = panel.saturating_sub(prefix_w).max(1);
             wrapped.extend(super::markdown::wrap_content_lines(vec![line], budget));
         }
         content_lines = wrapped;
@@ -654,6 +729,7 @@ pub fn log_level_style(th: ThemePalette, level: &str) -> Style {
 pub fn format_tool_detail_lines(th: ThemePalette, body: &str) -> Vec<Line<'static>> {
     const MAX_LINES: usize = 80;
     let style = Style::default().fg(th.muted);
+    let body = crate::terminal::sanitize_terminal_output(body);
     body.lines()
         .take(MAX_LINES)
         .map(|line| {
@@ -716,6 +792,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bash_tool_transcript_strips_curl_carriage_returns() {
+        let th = ThemePalette::dark();
+        let curl_stderr = "  % Total    % Received % Xferd  Average Speed\r  0     0    0     0\r100  116k  100  116k    0     0   101k      0  0:00:01  0:00:01 --:--:--  101k\n";
+        let body = format!(
+            "tool_result(bash_run):\nbash_run: `curl -L https://example.com -o out.html`\nexit: 0 (1200ms)\n\nstderr:\n{curl_stderr}"
+        );
+        let rows = format_tool_transcript_lines(th, &body, Some(60));
+        let joined: String = rows
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!joined.contains('\r'), "carriage returns must not reach TUI spans");
+        assert!(joined.contains("100  116k"));
+        assert!(!joined.contains("% Total"));
+    }
+
+    #[test]
     fn assistant_tool_transcript_uses_tool_style_not_ai_badge() {
         let th = ThemePalette::dark();
         let raw =
@@ -766,7 +860,20 @@ mod tests {
     }
 
     #[test]
-    fn system_message_uses_meta_badge() {
+    fn system_and_user_messages_share_badge_layout() {
+        let th = ThemePalette::dark();
+        let system = format_chat_lines(th, "system> recent sessions:", None);
+        let user = format_chat_lines(th, "you> hello", None);
+        let sys_first: String = system[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let you_first: String = user[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(sys_first.starts_with('▌'), "system should use solid bar: {sys_first:?}");
+        assert!(you_first.starts_with('▌'), "user should use solid bar: {you_first:?}");
+        assert!(sys_first.contains(" system "), "expected system badge: {sys_first:?}");
+        assert!(you_first.contains(" You "), "expected You badge: {you_first:?}");
+    }
+
+    #[test]
+    fn system_message_uses_role_layout() {
         let th = ThemePalette::dark();
         let rows = format_chat_lines(th, "system> exported to /tmp/chat.md", None);
         let joined: String = rows
@@ -774,7 +881,7 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(joined.contains('┊'));
+        assert!(joined.contains('▌'));
         assert!(joined.contains("system"));
         assert!(joined.contains("exported"));
         assert!(!joined.starts_with("system>"));
@@ -836,6 +943,26 @@ mod tests {
     fn light_palette_differs_from_dark() {
         assert_ne!(ThemePalette::dark().bg, ThemePalette::light().bg);
         assert_ne!(ThemePalette::dark().text, ThemePalette::light().text);
+    }
+
+    #[test]
+    fn none_palette_uses_terminal_defaults() {
+        let th = ThemePalette::none();
+        assert_eq!(th.bg, Color::Reset);
+        assert_eq!(th.surface, Color::Reset);
+        assert_eq!(th.accent, Color::Cyan);
+        assert_ne!(th.bg, ThemePalette::dark().bg);
+    }
+
+    #[test]
+    fn custom_accent_from_tui_config() {
+        let tui = crate::config::TuiConfig {
+            accent: Some("#ff5500".into()),
+            ..Default::default()
+        };
+        let th = ThemePalette::from_tui(&tui);
+        assert_eq!(th.accent, Color::Rgb(255, 85, 0));
+        assert_eq!(th.accent_dim, Color::Rgb(170, 56, 0));
     }
 
     #[test]
@@ -904,5 +1031,14 @@ mod tests {
         let rows = format_tool_detail_lines(th, "line one\nline two");
         assert_eq!(rows.len(), 2);
         assert!(rows[0].spans[0].content.starts_with("        "));
+    }
+
+    #[test]
+    fn tab_at_column_resolves_header_labels() {
+        use crate::app::Tab;
+        let tabs = vec![Tab::Dashboard, Tab::Prs, Tab::Approvals];
+        assert_eq!(tab_at_column(&tabs, 0), Some(Tab::Dashboard));
+        let prs_start = UnicodeWidthStr::width(" 1 Dashboard │");
+        assert_eq!(tab_at_column(&tabs, prs_start), Some(Tab::Prs));
     }
 }

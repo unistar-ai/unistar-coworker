@@ -286,13 +286,7 @@ impl LlmClient {
                 },
             )
             .await?;
-        let mut step = step_from_native_turn(&turn.content, &turn.tool_calls)?;
-        if step.action == ChatAgentAction::Reply && reply_message_looks_truncated(&step.message) {
-            step.message = format!(
-                "{}\n\n_[Reply may be incomplete — ask me to continue if you need the rest.]_",
-                step.message
-            );
-        }
+        let step = step_from_native_turn(&turn.content, &turn.tool_calls)?;
         let reasoning_for_context =
             if should_capture_reasoning_for_context(options.compress_reasoning, &last_reasoning) {
                 Some(last_reasoning)
@@ -441,8 +435,81 @@ pub fn reply_looks_like_planning(message: &str) -> bool {
         "i'll now investigate",
         "is my choice. i will",
         "is my choice, i will",
+        "i will rewrite",
+        "i'll rewrite",
+        "i will create",
+        "i'll create",
+        "i will build",
+        "i'll build",
+        "i will implement",
+        "i'll implement",
+        "i'll start by",
+        "i will start by",
+        "let me start by",
+        "starting with the",
+        "### plan",
+        "implementation plan",
+        "the implementation plan",
     ];
     PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// Model pasted `<tool_code>` / Python instead of native `tool_calls`.
+pub fn reply_contains_fake_tool_invocation(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("<tool_code>")
+        || lower.contains("</tool_code>")
+        || lower.contains("import subprocess")
+        || lower.contains("subprocess.run")
+        || lower.contains("def write_file_bash")
+        || (lower.contains("import os") && lower.contains("makedirs"))
+}
+
+/// User asked to build or change code/files in the workspace.
+pub fn user_implies_implementation(user_message: &str) -> bool {
+    let lower = user_message.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    const EN: &[&str] = &[
+        "implement",
+        "create ",
+        "rewrite",
+        "build ",
+        "write a",
+        "write the",
+        "start implementing",
+        "scaffold",
+        "add a",
+        "set up",
+        "setup ",
+    ];
+    if EN.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    user_message.contains("实现")
+        || user_message.contains("写")
+        || user_message.contains("创建")
+        || user_message.contains("改成")
+        || user_message.contains("重新")
+        || user_message.contains("开始")
+}
+
+/// Reply claims files/code exist without a tool result in this turn.
+pub fn reply_claims_implementation_done(message: &str) -> bool {
+    let lower = message.trim().to_ascii_lowercase();
+    const PHRASES: &[&str] = &[
+        "i have created",
+        "i've created",
+        "files have been created",
+        "following files have been created",
+        "the following files have been created",
+        "all files created",
+        "have been created in",
+        "have been created inside",
+        "project structure",
+    ];
+    PHRASES.iter().any(|p| lower.contains(p)) || message.contains("✅")
 }
 
 /// Model deflects without calling change tools — often hallucinated paths follow.
@@ -457,81 +524,49 @@ pub fn reply_claims_cannot_see_changes(message: &str) -> bool {
         || lower.contains("unable to") && lower.contains("see")
 }
 
-/// Reply ends the turn too early — based on assistant message quality only, not user phrasing.
-pub fn reply_premature_for_task(message: &str, _user_message: &str, _tool_names: &[&str]) -> bool {
-    reply_looks_like_planning(message) || reply_claims_cannot_see_changes(message)
-}
-
-/// User-facing reply ends mid-thought (model stopped early or ran out of tokens).
-pub fn reply_message_looks_truncated(message: &str) -> bool {
-    let t = message.trim();
-    if t.len() < 48 {
-        return false;
-    }
-    if reply_message_looks_complete(t) {
-        return false;
-    }
-    if reply_message_has_broken_suffix(t) {
+/// Reply ends the turn too early — plan/fake tools/claimed work without tool_calls this turn.
+pub fn reply_premature_for_task(message: &str, user_message: &str, tool_names: &[&str]) -> bool {
+    if reply_looks_like_planning(message)
+        || reply_claims_cannot_see_changes(message)
+        || reply_contains_fake_tool_invocation(message)
+    {
         return true;
     }
-    if let Some(last_line) = t.lines().last().map(str::trim) {
-        if last_line.len() > 24
-            && !reply_message_looks_complete(last_line)
-            && reply_message_has_broken_suffix(last_line)
-        {
-            return true;
-        }
+    if tool_names.is_empty() && user_implies_implementation(user_message) {
+        return reply_claims_implementation_done(message) || reply_looks_like_planning(message);
     }
     false
 }
 
-fn reply_message_looks_complete(s: &str) -> bool {
-    s.ends_with(['.', '!', '?', ':', ')', ']', '*', '`'])
-        || s.ends_with("```")
-        || s.ends_with("...")
-        || s.ends_with('…')
-}
-
-fn reply_message_has_broken_suffix(s: &str) -> bool {
-    let lower = s.to_ascii_lowercase();
-    const SUFFIXES: &[&str] = &[
-        " i",
-        " a",
-        " an",
-        " the",
-        " and",
-        " or",
-        " but",
-        " to",
-        " of",
-        " for",
-        " with",
-        " however,",
-        " however",
-        " though",
-        " because",
-        " when",
-        " that",
-        " which",
-        " it",
-        " my",
-        " your",
-        " we",
-        " they",
-        " this",
-        " these",
-        " those",
-        " if",
-        " as",
-    ];
-    if SUFFIXES.iter().any(|suffix| lower.ends_with(suffix)) {
-        return true;
+/// Harness nudge when a premature reply is rejected before ending the turn.
+pub fn reply_premature_nudge(message: &str, user_task: &str) -> String {
+    if reply_contains_fake_tool_invocation(message) {
+        return format!(
+            "Your reply embedded <tool_code> or simulated Python/shell instead of native tool_calls. \
+User asked: \"{user_task}\"\n\
+Call write_file, bash_run, python_run, or edit_file via the native tool API — not prose scripts. \
+After tool results are in context, reply in natural language."
+        );
     }
-    s.split_whitespace()
-        .last()
-        .is_some_and(|word| word.len() <= 2)
+    if reply_claims_cannot_see_changes(message) {
+        return format!(
+            "You replied without file/diff data. User asked: \"{user_task}\"\n\
+pr_list_changed_files or pr_get_diff may help if change detail is needed."
+        );
+    }
+    if reply_claims_implementation_done(message) {
+        return format!(
+            "You claimed files were created but no tool ran this turn. User asked: \"{user_task}\"\n\
+Call write_file / bash_run / python_run via native tool_calls first, then summarize tool output."
+        );
+    }
+    format!(
+        "Your reply looked like a plan or incomplete answer. User asked: \"{user_task}\"\n\
+Call tools via the native tool API before replying."
+    )
 }
 
+/// User-facing reply ends mid-thought (model stopped early or ran out of tokens).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,15 +639,34 @@ mod tests {
     }
 
     #[test]
-    fn reply_truncated_mid_sentence() {
-        let msg = "However, based on the previous list of open PRs, I";
-        assert!(reply_message_looks_truncated(msg));
+    fn fake_tool_code_reply_rejected() {
+        let msg = "I'll start by creating files.\n\n<tool_code>\nimport os\nos.makedirs(\"go-pro-server\")\n</tool_code>";
+        assert!(reply_contains_fake_tool_invocation(msg));
+        assert!(reply_premature_for_task(msg, "重新用golang实现", &[]));
+        assert!(reply_premature_nudge(msg, "重新用golang实现").contains("tool_code"));
     }
 
     #[test]
-    fn reply_complete_sentence_not_truncated() {
-        let msg = "However, based on the previous list of open PRs, PR #19239 has failing CI.";
-        assert!(!reply_message_looks_truncated(msg));
+    fn claimed_implementation_without_tools_rejected() {
+        let msg = "I have created a Python web server using **Flask** inside the `tmp-web-server/` directory.";
+        assert!(reply_claims_implementation_done(msg));
+        assert!(reply_premature_for_task(msg, "用 python 写。", &[]));
+    }
+
+    #[test]
+    fn implementation_reply_ok_after_tools() {
+        let msg = "I have created a Python web server using Flask.";
+        assert!(!reply_premature_for_task(
+            msg,
+            "用 python 写。",
+            &["write_file", "bash_run"],
+        ));
+    }
+
+    #[test]
+    fn go_rewrite_plan_rejected() {
+        let msg = "I will rewrite the web server using **Go** (Golang). I'll start by creating the directory.";
+        assert!(reply_premature_for_task(msg, "改成用 go 语言实现。", &[]));
     }
 
     #[test]

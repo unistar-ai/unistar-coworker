@@ -16,7 +16,6 @@ pub enum CoworkerError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Other(#[from] anyhow::Error),
-    #[cfg(feature = "sqlite")]
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }

@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use uuid::Uuid;
 
-use crate::app::{AppState, ApprovalDialogChoice, SharedState};
+use crate::app::{spawn_approval_decision, AppState, ApprovalDialogChoice, SharedState};
 use crate::engine::Engine;
 use crate::tui::theme::ThemePalette;
 
@@ -117,12 +117,19 @@ pub fn draw_approval_modal(frame: &mut Frame, state: &AppState, th: ThemePalette
         );
     } else {
         let selected = dialog.choice;
+        let armed = dialog.approve_armed();
+        let approve_label = if armed {
+            " ✓ Approve ".to_string()
+        } else {
+            let ms = dialog.approve_arm_ms_remaining().max(1);
+            format!(" ✓ Approve ({ms}ms) ")
+        };
         draw_modal_button(
             frame,
             layout.approve_button,
-            " ✓ Approve ",
+            &approve_label,
             selected == ApprovalDialogChoice::Approve,
-            th.ok,
+            if armed { th.ok } else { th.muted },
             th,
         );
         draw_modal_button(
@@ -136,8 +143,13 @@ pub fn draw_approval_modal(frame: &mut Frame, state: &AppState, th: ThemePalette
     }
 
     if !dialog.deciding {
+        let arm_note = if dialog.approve_armed() {
+            "click · ←/→ · Tab · Enter/y approve · n/Esc deny"
+        } else {
+            "approve arms shortly — deny is immediate"
+        };
         frame.render_widget(
-            Paragraph::new("click · ←/→ · Tab · Enter/y approve · n/Esc deny")
+            Paragraph::new(arm_note)
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(th.muted)),
             chunks[5],
@@ -244,7 +256,15 @@ pub async fn handle_approval_modal_mouse(
     let layout = modal_layout(frame_area);
     let pos = Position::new(mouse.column, mouse.row);
     if layout.approve_button.contains(pos) {
-        spawn_approval_decision(state, engine, id, true).await;
+        let armed = {
+            let s = state.read().await;
+            s.approval_dialog
+                .as_ref()
+                .is_some_and(|d| d.id == id && d.approve_armed())
+        };
+        if armed {
+            spawn_approval_decision(state, engine, id, true).await;
+        }
     } else if layout.deny_button.contains(pos) {
         spawn_approval_decision(state, engine, id, false).await;
     }
@@ -271,10 +291,14 @@ pub async fn handle_approval_modal_key(
             KeyCode::Left | KeyCode::Right | KeyCode::Tab => Some(ModalAction::Toggle),
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 let approve = dialog.choice == ApprovalDialogChoice::Approve;
-                Some(ModalAction::Decide {
-                    id: dialog.id,
-                    approve,
-                })
+                if approve && !dialog.approve_armed() {
+                    Some(ModalAction::Ignore)
+                } else {
+                    Some(ModalAction::Decide {
+                        id: dialog.id,
+                        approve,
+                    })
+                }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(ModalAction::Decide {
                 id: dialog.id,
@@ -303,85 +327,6 @@ enum ModalAction {
     Toggle,
     Decide { id: Uuid, approve: bool },
     Ignore,
-}
-
-pub async fn spawn_approval_decision(
-    state: &SharedState,
-    engine: &Arc<Engine>,
-    id: Uuid,
-    approve: bool,
-) {
-    {
-        let mut s = state.write().await;
-        if !s.try_begin_approval_decision(id, approve) {
-            return;
-        }
-    }
-
-    let engine = Arc::clone(engine);
-    let state = state.clone();
-    tokio::spawn(async move {
-        let resume_ctx = {
-            let s = state.read().await;
-            s.chat_pending_approval
-                .as_ref()
-                .filter(|p| p.id == id)
-                .cloned()
-        };
-
-        let result = engine.decide_approval(&id, approve).await;
-        let mut s = state.write().await;
-        s.finish_approval_decision(id);
-        s.close_approval_dialog();
-        match result {
-            Ok(msg) => {
-                s.resolve_chat_approval(id, approve, &msg);
-                if approve {
-                    s.push_log("info", format!("approved: {msg}"));
-                    s.status = msg.clone();
-                } else {
-                    s.push_log("info", format!("denied: {msg}"));
-                    s.status = "approval denied".into();
-                }
-
-                if let Some(pending) = resume_ctx {
-                    let tool_args = serde_json::from_str(&pending.tool_args_json)
-                        .unwrap_or_else(|_| serde_json::json!({}));
-                    let resume = crate::agent::chat_loop::ResumeChatAfterApproval {
-                        approval_id: id,
-                        approved: approve,
-                        detail: msg,
-                        tool_name: pending.tool_name,
-                        tool_args,
-                    };
-                    let session_id = pending.session_id;
-                    drop(s);
-                    let _ = engine.resume_chat_after_approval(session_id, resume).await;
-                }
-            }
-            Err(e) => {
-                let detail = format!("approval failed: {e}");
-                s.resolve_chat_approval(id, false, &detail);
-                s.push_log("error", detail.clone());
-                s.status = detail.clone();
-
-                if let Some(pending) = resume_ctx {
-                    let tool_args = serde_json::from_str(&pending.tool_args_json)
-                        .unwrap_or_else(|_| serde_json::json!({}));
-                    let resume = crate::agent::chat_loop::ResumeChatAfterApproval {
-                        approval_id: id,
-                        approved: false,
-                        detail: detail.clone(),
-                        tool_name: pending.tool_name,
-                        tool_args,
-                    };
-                    let session_id = pending.session_id;
-                    drop(s);
-                    let _ = engine.resume_chat_after_approval(session_id, resume).await;
-                }
-            }
-        }
-    });
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -462,5 +407,23 @@ mod tests {
             .contains(Position::new(layout.deny_button.x, layout.deny_button.y)));
         assert!(layout.approve_button.width > 0);
         assert!(layout.deny_button.width > 0);
+    }
+
+    #[test]
+    fn approval_not_armed_immediately() {
+        use crate::app::{ApprovalDialog, ApprovalDialogChoice};
+        use std::time::Instant;
+        use uuid::Uuid;
+
+        let dialog = ApprovalDialog {
+            id: Uuid::new_v4(),
+            tool_name: "ci_rerun".into(),
+            description: "rerun".into(),
+            choice: ApprovalDialogChoice::Approve,
+            deciding: false,
+            opened_at: Instant::now(),
+        };
+        assert!(!dialog.approve_armed());
+        assert!(dialog.approve_arm_ms_remaining() > 0);
     }
 }

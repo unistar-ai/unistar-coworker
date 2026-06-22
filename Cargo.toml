@@ -9,10 +9,6 @@ license = "MIT"
 name = "unistar-coworker"
 path = "src/main.rs"
 
-[features]
-default = []
-sqlite = ["dep:rusqlite"]
-
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
@@ -23,6 +19,7 @@ crossterm = "0.28"
 pulldown-cmark = "0.13"
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 regex = "1"
+encoding_rs = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -36,8 +33,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2"
 uuid = { version = "1", features = ["serde", "v4"] }
 fs2 = "0.4"
-
-rusqlite = { version = "0.34", optional = true, features = ["bundled"] }
+chromiumoxide = { version = "0.9", default-features = true }
+rusqlite = { version = "0.34", features = ["bundled"] }
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 [dev-dependencies]
 tempfile = "3"

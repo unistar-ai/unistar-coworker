@@ -4,24 +4,6 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Classification {
-    LlmFlaky,
-    LlmReal,
-    UserFlaky,
-    UserReal,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RerunOutcome {
-    Pending,
-    Succeeded,
-    Failed,
-    Skipped,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ApprovalStatus {
     Pending,
     Approved,
@@ -34,6 +16,11 @@ pub enum ApprovalKind {
     RerunFlaky,
     Backport,
     PostComment,
+    IssueAddLabel,
+    WriteFile,
+    EditFile,
+    BashRun,
+    PythonRun,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +120,11 @@ pub struct Approval {
     /// Payload for PostComment approvals.
     #[serde(default)]
     pub comment_body: Option<String>,
+    /// Payload for IssueAddLabel approvals.
+    #[serde(default)]
+    pub issue_number: Option<u32>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,74 +169,6 @@ pub struct WorkflowRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlakyIncident {
-    pub id: Uuid,
-    pub ts: DateTime<Utc>,
-    pub repo: String,
-    pub pr_number: Option<u32>,
-    pub run_id: i64,
-    pub workflow: String,
-    pub job: Option<String>,
-    pub step: Option<String>,
-    pub test_name: Option<String>,
-    pub fingerprint: String,
-    pub classification: Classification,
-    pub log_excerpt: String,
-    pub llm_reason: Option<String>,
-    pub rerun_outcome: Option<RerunOutcome>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlakyTestRollup {
-    pub fingerprint: String,
-    pub repo: String,
-    pub workflow: String,
-    pub job: Option<String>,
-    pub test_name: Option<String>,
-    pub first_seen: DateTime<Utc>,
-    pub last_seen: DateTime<Utc>,
-    pub incident_count: u32,
-    pub rerun_attempts: u32,
-    pub rerun_successes: u32,
-    pub last_error_signature: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FlakyQuery {
-    pub repo: Option<String>,
-    pub since_days: Option<u32>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MainAlert {
-    pub id: Uuid,
-    pub repo: String,
-    pub ts: DateTime<Utc>,
-    pub branch: String,
-    pub consecutive_failures: u32,
-    pub latest_run_id: i64,
-    pub latest_workflow: String,
-    pub conclusion: String,
-    #[serde(default)]
-    pub acknowledged: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MainAlertQuery {
-    pub repo: Option<String>,
-    #[serde(default)]
-    pub unacknowledged_only: bool,
-    pub since_hours: Option<u32>,
-    #[serde(default = "default_main_alert_limit")]
-    pub limit: usize,
-}
-
-fn default_main_alert_limit() -> usize {
-    50
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogLine {
     pub ts: DateTime<Utc>,
     pub level: String,
@@ -261,19 +185,6 @@ impl Digest {
             skill: self.skill.clone(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IssueSnapshot {
-    pub repo: String,
-    pub number: u32,
-    pub title: String,
-    pub author: String,
-    pub labels: String,
-    pub updated_at: DateTime<Utc>,
-    pub fetched_at: DateTime<Utc>,
-    #[serde(default)]
-    pub triage_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,6 +205,24 @@ pub struct ChatSession {
     pub title: String,
     #[serde(default)]
     pub repo_scope: Option<String>,
+    /// Last injected runtime context revision + snapshot for delta updates across turns.
+    #[serde(default)]
+    pub runtime_state: ChatRuntimeState,
+}
+
+/// Persisted workspace/skills snapshot for chat runtime context deltas.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ChatRuntimeState {
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub workspace_path: String,
+    #[serde(default)]
+    pub git_summary: String,
+    #[serde(default)]
+    pub recent_edits: Vec<String>,
+    #[serde(default)]
+    pub loaded_skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,33 +247,6 @@ pub struct Transcript {
     pub turns_json: String,
     pub verdict: String,
     pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegressionLink {
-    pub id: Uuid,
-    pub fingerprint: String,
-    pub repo: String,
-    pub test_name: Option<String>,
-    pub candidates_json: String,
-    pub summary: String,
-    pub created_at: DateTime<Utc>,
-}
-
-pub fn compute_fingerprint(
-    repo: &str,
-    workflow: &str,
-    job: Option<&str>,
-    test_name: Option<&str>,
-    error_sig: &str,
-) -> String {
-    use sha2::{Digest as _, Sha256};
-    let job = job.unwrap_or("");
-    let test = test_name.unwrap_or("");
-    let fallback = if test.is_empty() { error_sig } else { test };
-    let payload = format!("{repo}|{workflow}|{job}|{fallback}");
-    let hash = Sha256::digest(payload.as_bytes());
-    format!("{:x}", hash)
 }
 
 #[cfg(test)]

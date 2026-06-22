@@ -5,7 +5,7 @@ use crate::agent::parse::{parse_issue_line, parse_pr_line};
 use crate::error::Result;
 use crate::llm::{LlmClient, LlmTurnMessage};
 use crate::store::{ChatMessage, ChatRole};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Rough token estimate (~4 chars per token for Latin/mixed text).
 pub fn estimate_tokens(text: &str) -> u32 {
@@ -14,6 +14,107 @@ pub fn estimate_tokens(text: &str) -> u32 {
 
 pub fn estimate_messages_tokens(messages: &[LlmTurnMessage]) -> u32 {
     messages.iter().map(estimate_message_tokens).sum()
+}
+
+/// Rough token estimate for native `tools[]` JSON attached to a chat step.
+pub fn estimate_tools_tokens(tools: &[Value]) -> u32 {
+    if tools.is_empty() {
+        return 0;
+    }
+    let json = serde_json::to_string(tools).unwrap_or_default();
+    estimate_tokens(&json).saturating_add((tools.len() as u32).saturating_mul(8))
+}
+
+pub fn tool_names_from_definitions(tools: &[Value]) -> Vec<String> {
+    tools
+        .iter()
+        .filter_map(|d| {
+            d.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// Message trim budget after reserving estimated tool-schema tokens.
+pub fn message_budget_for_tools(input_budget: u32, tools: &[Value]) -> u32 {
+    const MIN_MESSAGE_BUDGET: u32 = 2048;
+    input_budget
+        .saturating_sub(estimate_tools_tokens(tools))
+        .max(MIN_MESSAGE_BUDGET)
+}
+
+const CONTEXT_PANEL_SECTION_MAX_CHARS: usize = 48_000;
+
+/// Human-readable native tool schemas for the LLM Context panel.
+pub fn format_tools_for_context_panel(tools: &[Value]) -> String {
+    if tools.is_empty() {
+        return "(no tools exposed on this step)".into();
+    }
+    let mut parts = Vec::new();
+    let mut total = 0usize;
+    for t in tools {
+        let Some(func) = t.get("function") else {
+            continue;
+        };
+        let name = func
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("?");
+        let desc = func
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        let params = func.get("parameters").cloned().unwrap_or_else(|| json!({}));
+        let params_str =
+            serde_json::to_string_pretty(&params).unwrap_or_else(|_| "{}".to_string());
+        let block = format!("### {name}\n{desc}\n\n```json\n{params_str}\n```");
+        total = total.saturating_add(block.len());
+        if total > CONTEXT_PANEL_SECTION_MAX_CHARS {
+            parts.push(
+                "[remaining tool schemas omitted from display — still sent to the LLM]".into(),
+            );
+            break;
+        }
+        parts.push(block);
+    }
+    parts.join("\n\n")
+}
+
+/// System prompt body for the panel — techniques are shown under `[skill]` blocks.
+pub fn format_system_for_context_panel(content: &str) -> String {
+    const TECH: &str = "\n## Techniques\n";
+    const TOOLS: &str = "\n## Tools\n";
+    const CTX: &str = "\n## Context\n";
+    if let Some(tech_start) = content.find(TECH) {
+        let before = &content[..tech_start];
+        if let Some(ctx_start) = content.find(CTX) {
+            return format!(
+                "{before}{CTX}{}",
+                &content[ctx_start + CTX.len()..]
+            )
+            .trim()
+            .to_string();
+        }
+        return before.trim().to_string();
+    }
+    if let Some(tools_start) = content.find(TOOLS) {
+        let before = &content[..tools_start];
+        if let Some(ctx_start) = content.find(CTX) {
+            return format!(
+                "{before}{CTX}{}",
+                &content[ctx_start + CTX.len()..]
+            )
+            .trim()
+            .to_string();
+        }
+    }
+    content.trim().to_string()
+}
+
+pub fn skill_body_for_context_panel(body: &str) -> String {
+    crate::engine::skill::skill_body_for_prompt(body)
 }
 
 pub fn estimate_message_tokens(msg: &LlmTurnMessage) -> u32 {
@@ -62,27 +163,251 @@ pub fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// Compaction strategy for long chat sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionStrategy {
+    Code,
+    Ops,
+    Generic,
+}
+
+pub fn tool_result_char_cap(strategy: CompactionStrategy, tool_name: &str) -> usize {
+    match strategy {
+        CompactionStrategy::Code => coding_tool_result_char_cap(tool_name),
+        CompactionStrategy::Ops | CompactionStrategy::Generic => ops_tool_result_char_cap(tool_name),
+    }
+}
+
 /// Per-tool byte cap when compressing older tool turns (not the live turn path).
-pub fn tool_result_char_cap(tool_name: &str) -> usize {
+pub fn cap_tool_result_for_strategy(
+    strategy: CompactionStrategy,
+    tool_name: &str,
+    text: &str,
+) -> String {
+    cap_tool_result_with_cap(tool_result_char_cap(strategy, tool_name), tool_name, text)
+}
+
+fn coding_tool_result_char_cap(tool_name: &str) -> usize {
+    match tool_name {
+        "read_file" => 4_000,
+        "grep" => 3_500,
+        "glob" => 2_500,
+        "bash_run" => 3_000,
+        "python_run" => 3_000,
+        "web_browser" => 4_000,
+        "edit_file" | "write_file" => 1_200,
+        _ => ops_tool_result_char_cap(tool_name),
+    }
+}
+
+fn ops_tool_result_char_cap(tool_name: &str) -> usize {
     match tool_name {
         "pr_list_open" | "pr_list_merged" | "pr_list_waiting_review" | "issue_list_open" => 4_200,
         "ci_get_failed_logs" => 7_200,
         "pr_list_changed_files" => 4_800,
         "pr_get_diff" => 6_000,
-        "pr_get_overview" | "ci_analyze_pr_failures" | "ci_get_run_summary" => 5_250,
-        "store_get_latest_digest" => 3_000,
+        "pr_get_overview" | "pr_get_status" | "pr_get_status_batch" | "ci_analyze_pr_failures"
+        | "ci_get_run_summary" | "ci_failure_fingerprint" => 5_250,
+        "ci_compare_runs" | "ci_list_external_checks" => 3_000,
+        "repo_get_info" => 2_500,
+        "store_get_latest_digest" | "store_list_pending_approvals" => 3_000,
+        "store_get_oncall_handoff" => 6_500,
         _ => 9_000,
     }
 }
 
+fn summarize_tool_result_for_compaction(
+    strategy: CompactionStrategy,
+    tool_name: &str,
+    content: &str,
+) -> String {
+    match strategy {
+        CompactionStrategy::Code => summarize_coding_tool_content(tool_name, content),
+        CompactionStrategy::Ops => summarize_ops_tool_content(tool_name, content),
+        CompactionStrategy::Generic => summarize_tool_content(content),
+    }
+}
+
+fn summarize_coding_tool_content(tool_name: &str, content: &str) -> String {
+    match tool_name {
+        "bash_run" => summarize_bash_run_for_compaction(content),
+        "python_run" => summarize_python_run_for_compaction(content),
+        "web_browser" => summarize_web_browser_for_compaction(content),
+        "read_file" | "grep" => {
+            let preview: String = content.chars().take(800).collect();
+            format!("[summarized tool_result {tool_name}]\n{preview}…")
+        }
+        _ => summarize_tool_content(content),
+    }
+}
+
+fn summarize_bash_run_for_compaction(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let exit = lines
+        .iter()
+        .find(|l| l.trim().starts_with("exit:"))
+        .copied()
+        .unwrap_or("exit: ?");
+    let tail: Vec<&str> = lines.iter().rev().take(20).copied().collect();
+    let mut tail: Vec<&str> = tail.into_iter().rev().collect();
+    if tail.is_empty() {
+        tail = lines.iter().take(20).copied().collect();
+    }
+    format!(
+        "[summarized tool_result bash_run]\n{exit}\n{}",
+        tail.join("\n")
+    )
+}
+
+fn summarize_python_run_for_compaction(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let exit = lines
+        .iter()
+        .find(|l| l.trim().starts_with("exit:"))
+        .copied()
+        .unwrap_or("exit: ?");
+    let tail: Vec<&str> = lines.iter().rev().take(20).copied().collect();
+    let mut tail: Vec<&str> = tail.into_iter().rev().collect();
+    if tail.is_empty() {
+        tail = lines.iter().take(20).copied().collect();
+    }
+    format!(
+        "[summarized tool_result python_run]\n{exit}\n{}",
+        tail.join("\n")
+    )
+}
+
+fn summarize_web_browser_for_compaction(content: &str) -> String {
+    let mut header = Vec::new();
+    let mut in_body = false;
+    let mut body_lines = Vec::new();
+    for line in content.lines() {
+        if line.trim() == "---" {
+            in_body = true;
+            continue;
+        }
+        if in_body {
+            body_lines.push(line);
+        } else {
+            let t = line.trim();
+            if t.starts_with("web_browser:")
+                || t.starts_with("status:")
+                || t.starts_with("content-type:")
+                || t.starts_with("title:")
+                || t.starts_with("description:")
+                || t.starts_with("headings:")
+                || t.starts_with("links:")
+                || t.starts_with("warning:")
+                || t.starts_with("- ")
+            {
+                header.push(t.to_string());
+            }
+        }
+    }
+    let tail: String = body_lines
+        .iter()
+        .rev()
+        .take(12)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = format!("[summarized tool_result web_browser]\n{}", header.join("\n"));
+    if !tail.is_empty() {
+        out.push_str("\n---\n");
+        out.push_str(&tail);
+        if body_lines.len() > 12 {
+            out.push('…');
+        }
+    }
+    out
+}
+
+fn summarize_ops_tool_content(tool_name: &str, content: &str) -> String {
+    let body = if content.trim_start().starts_with("tool_result(")
+        || content.trim_start().starts_with("[tool_result ")
+    {
+        tool_result_body(content)
+    } else {
+        content.to_string()
+    };
+    let critical = extract_ops_critical_lines(&body);
+    let mut parts = vec![format!("[summarized tool_result {tool_name}]")];
+    if !critical.is_empty() {
+        parts.push(critical.join("\n"));
+    } else {
+        let preview: String = body.chars().take(TOOL_SUMMARY_PREVIEW_CHARS).collect();
+        parts.push(format!("{preview}…"));
+    }
+    parts.join("\n")
+}
+
+/// Lines to keep when compacting ops / MCP tool output.
+pub fn extract_ops_critical_lines(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let lower = t.to_ascii_lowercase();
+        let keep = lower.contains("ci_kind")
+            || lower.contains("verdict")
+            || lower.contains("flaky")
+            || lower.contains("policy")
+            || lower.starts_with("error:")
+            || lower.contains("needs_attention")
+            || lower.contains("digest")
+            || (t.contains('#') && t.contains('/'))
+            || (t.contains("PR #") || t.contains("pr #"))
+            || lower.contains("triage:")
+            || lower.contains("failing run")
+            || lower.contains("workflow:");
+        if keep {
+            out.push(t.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn cap_tool_result(tool_name: &str, text: &str) -> String {
-    let cap = tool_result_char_cap(tool_name);
+    cap_tool_result_for_strategy(CompactionStrategy::Ops, tool_name, text)
+}
+
+fn cap_tool_result_with_cap(cap: usize, _tool_name: &str, text: &str) -> String {
     if text.chars().count() <= cap {
         return text.to_string();
     }
+    let critical: Vec<String> = text
+        .lines()
+        .filter(|line| {
+            let t = line.trim();
+            t.starts_with("ERROR:")
+                || t.starts_with("OK:")
+                || t.starts_with("PAGE:")
+                || t.starts_with("External checks")
+                || (t.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    && t.contains("  ")
+                    && !t.starts_with("20"))
+        })
+        .map(str::to_string)
+        .collect();
+    let body = truncate_chars(text, cap);
+    if critical.is_empty() {
+        return format!(
+            "{}…\n[truncated {} chars — use a narrower tool or follow-up for full output]",
+            body,
+            text.chars().count().saturating_sub(cap)
+        );
+    }
     format!(
-        "{}…\n[truncated {} chars — use a narrower tool or follow-up for full output]",
-        truncate_chars(text, cap),
+        "{}\n\n{}…\n[truncated {} chars]",
+        critical.join("\n"),
+        body,
         text.chars().count().saturating_sub(cap)
     )
 }
@@ -318,24 +643,34 @@ pub fn tool_body_header_indicates_failure(output: &str) -> bool {
         .lines()
         .next()
         .unwrap_or(trimmed)
-        .to_ascii_lowercase();
-    if first_line.starts_with("failed to ") {
+        .trim();
+    let first_lower = first_line.to_ascii_lowercase();
+    if first_lower.starts_with("ok:") {
+        return false;
+    }
+    if first_lower.starts_with("error:") {
+        return true;
+    }
+    if first_lower.starts_with("page:") {
+        return false;
+    }
+    if first_lower.starts_with("failed to ") {
         return true;
     }
     if first_line.contains("gateway timeout") {
         return true;
     }
-    if first_line.contains("http 504")
-        || first_line.contains("http 503")
-        || first_line.contains("http 502")
-        || first_line.contains("http 500")
+    if first_lower.contains("http 504")
+        || first_lower.contains("http 503")
+        || first_lower.contains("http 502")
+        || first_lower.contains("http 500")
     {
         return true;
     }
-    if first_line.contains("temporary server error") || first_line.contains("rate limit") {
+    if first_lower.contains("temporary server error") || first_lower.contains("rate limit") {
         return true;
     }
-    if first_line.contains("not found") || first_line.contains("http 404") {
+    if first_lower.contains("not found") || first_lower.contains("http 404") {
         return true;
     }
     false
@@ -396,7 +731,7 @@ fn fit_history_to_budget(
     let mut dropped = Vec::new();
     while estimate_messages_tokens(messages) > token_budget && messages.len() > TAIL_KEEP {
         let compress_end = messages.len().saturating_sub(TAIL_KEEP);
-        if compress_oldest_tool_in_slice(messages, 0, compress_end) {
+        if compress_oldest_tool_in_slice(messages, 0, compress_end, CompactionStrategy::Generic) {
             continue;
         }
         dropped.push(messages.remove(0));
@@ -447,6 +782,7 @@ pub async fn pack_session_history_with_llm(
     llm: &LlmClient,
     compress_history: bool,
     history_summary_min_tokens: u32,
+    compaction: CompactionStrategy,
 ) -> Result<Vec<LlmTurnMessage>> {
     if !compress_history {
         return Ok(pack_session_history(history, max_messages, token_budget));
@@ -472,7 +808,7 @@ pub async fn pack_session_history_with_llm(
     let dropped_tokens = estimate_messages_tokens(&dropped);
     if dropped_tokens >= history_summary_min_tokens {
         let text = format_history_for_summary(&dropped);
-        let summary = llm.summarize_session_history(&text).await?;
+        let summary = summarize_history_batch(llm, compaction, &text).await?;
         if !summary.trim().is_empty() {
             out.insert(
                 0,
@@ -560,6 +896,8 @@ pub fn is_harness_nudge_content(content: &str) -> bool {
         || trimmed.starts_with("Identical `")
         || trimmed.starts_with("Same tool call repeated")
         || trimmed.starts_with("Tool `")
+        || trimmed.starts_with("HARN:TOOL_FAILED")
+        || trimmed.contains("[Harness]")
         || trimmed.starts_with("You pasted multiple tool")
         || trimmed.starts_with("Malformed tool call:")
         || trimmed.starts_with("action:reply looked")
@@ -631,6 +969,7 @@ async fn try_collapse_old_messages_with_llm(
     token_budget: u32,
     llm: &LlmClient,
     summary_min_tokens: u32,
+    compaction: CompactionStrategy,
 ) -> Result<()> {
     const TAIL_PROTECT: usize = 8;
     const MAX_PASSES: u32 = 4;
@@ -649,7 +988,7 @@ async fn try_collapse_old_messages_with_llm(
             break;
         }
         let text = format_history_for_summary(&batch);
-        let summary = llm.summarize_session_history(&text).await?;
+        let summary = summarize_history_batch(llm, compaction, &text).await?;
         if summary.trim().is_empty() {
             break;
         }
@@ -665,6 +1004,27 @@ async fn try_collapse_old_messages_with_llm(
     Ok(())
 }
 
+async fn summarize_history_batch(
+    llm: &LlmClient,
+    compaction: CompactionStrategy,
+    text: &str,
+) -> Result<String> {
+    if compaction == CompactionStrategy::Ops {
+        let preserved = extract_ops_critical_lines(text);
+        if preserved.len() >= 2 {
+            return Ok(format!(
+                "Preserved ops facts:\n{}",
+                preserved.join("\n")
+            ));
+        }
+    }
+    match compaction {
+        CompactionStrategy::Code => llm.summarize_coding_session_history(text).await,
+        CompactionStrategy::Ops => llm.summarize_ops_session_history(text).await,
+        CompactionStrategy::Generic => llm.summarize_session_history(text).await,
+    }
+}
+
 /// Fit messages to the token budget; older turns may be rolled into one LLM summary first.
 pub async fn trim_llm_messages_with_llm(
     messages: &mut Vec<LlmTurnMessage>,
@@ -672,18 +1032,30 @@ pub async fn trim_llm_messages_with_llm(
     llm: &LlmClient,
     compress_with_llm: bool,
     summary_min_tokens: u32,
+    compaction: CompactionStrategy,
 ) -> Result<()> {
     if compress_with_llm && estimate_messages_tokens(messages) > token_budget {
-        try_collapse_old_messages_with_llm(messages, token_budget, llm, summary_min_tokens).await?;
+        try_collapse_old_messages_with_llm(
+            messages,
+            token_budget,
+            llm,
+            summary_min_tokens,
+            compaction,
+        )
+        .await?;
     }
     if estimate_messages_tokens(messages) > token_budget {
-        trim_llm_messages(messages, token_budget);
+        trim_llm_messages(messages, token_budget, compaction);
     }
     Ok(())
 }
 
 /// Shrink `messages` (system at index 0) to fit `token_budget`. Keeps system + recent tail.
-pub fn trim_llm_messages(messages: &mut Vec<LlmTurnMessage>, token_budget: u32) {
+pub fn trim_llm_messages(
+    messages: &mut Vec<LlmTurnMessage>,
+    token_budget: u32,
+    compaction: CompactionStrategy,
+) {
     const TAIL_PROTECT: usize = 8;
     if messages.len() <= 1 {
         return;
@@ -696,12 +1068,12 @@ pub fn trim_llm_messages(messages: &mut Vec<LlmTurnMessage>, token_budget: u32) 
             break;
         }
         let compress_until = len.saturating_sub(TAIL_PROTECT);
-        if compress_until > 1 && compress_oldest_tool_in_slice(messages, 1, compress_until) {
+        if compress_until > 1 && compress_oldest_tool_in_slice(messages, 1, compress_until, compaction) {
             continue;
         }
         if compress_until > 1 {
             if let Some(idx) = first_removable_message_index(messages, 1, compress_until) {
-                summarize_message_at(messages, idx);
+                summarize_message_at(messages, idx, compaction);
             }
             if estimate_messages_tokens(messages) <= token_budget {
                 break;
@@ -718,7 +1090,7 @@ pub fn trim_llm_messages(messages: &mut Vec<LlmTurnMessage>, token_budget: u32) 
         let tail_start = len.saturating_sub(TAIL_PROTECT);
         if tail_start > 0
             && tail_start < len.saturating_sub(1)
-            && compress_oldest_tool_in_slice(messages, tail_start, len.saturating_sub(1))
+            && compress_oldest_tool_in_slice(messages, tail_start, len.saturating_sub(1), compaction)
         {
             continue;
         }
@@ -752,6 +1124,7 @@ fn compress_oldest_tool_in_slice(
     messages: &mut [LlmTurnMessage],
     start: usize,
     end: usize,
+    compaction: CompactionStrategy,
 ) -> bool {
     for i in start..end.min(messages.len()) {
         if llm_message_is_tool_result(&messages[i])
@@ -760,14 +1133,14 @@ fn compress_oldest_tool_in_slice(
         {
             let summary = if messages[i].role == "tool" {
                 let tool = llm_message_tool_label(&messages[i]);
-                let preview: String = messages[i]
-                    .content
-                    .chars()
-                    .take(TOOL_SUMMARY_PREVIEW_CHARS)
-                    .collect();
-                format!("[summarized tool_result {tool}]\n{preview}…")
+                summarize_tool_result_for_compaction(compaction, &tool, &messages[i].content)
             } else {
-                summarize_tool_content(&messages[i].content)
+                match compaction {
+                    CompactionStrategy::Ops => {
+                        summarize_ops_tool_content("tool", &messages[i].content)
+                    }
+                    _ => summarize_tool_content(&messages[i].content),
+                }
             };
             messages[i].content = summary;
             messages[i].role = "user";
@@ -778,7 +1151,11 @@ fn compress_oldest_tool_in_slice(
     false
 }
 
-fn summarize_message_at(messages: &mut [LlmTurnMessage], idx: usize) {
+fn summarize_message_at(
+    messages: &mut [LlmTurnMessage],
+    idx: usize,
+    compaction: CompactionStrategy,
+) {
     if idx >= messages.len() {
         return;
     }
@@ -789,14 +1166,15 @@ fn summarize_message_at(messages: &mut [LlmTurnMessage], idx: usize) {
     if llm_message_is_tool_result(&messages[idx]) {
         if messages[idx].role == "tool" {
             let tool = llm_message_tool_label(&messages[idx]);
-            let preview: String = messages[idx]
-                .content
-                .chars()
-                .take(TOOL_SUMMARY_PREVIEW_CHARS)
-                .collect();
-            messages[idx].content = format!("[summarized tool_result {tool}]\n{preview}…");
+            messages[idx].content =
+                summarize_tool_result_for_compaction(compaction, &tool, &messages[idx].content);
         } else {
-            messages[idx].content = summarize_tool_content(&messages[idx].content);
+            messages[idx].content = match compaction {
+                CompactionStrategy::Ops => {
+                    summarize_ops_tool_content("tool", &messages[idx].content)
+                }
+                _ => summarize_tool_content(&messages[idx].content),
+            };
         }
         messages[idx].role = "user";
         messages[idx].tool_name = None;
@@ -916,6 +1294,52 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use uuid::Uuid;
+
+    #[test]
+    fn format_system_for_context_panel_strips_techniques() {
+        let raw = "Agent\n\n## Techniques\n### ci\nrules\n\n## Context\nrepos: x";
+        let out = format_system_for_context_panel(raw);
+        assert!(out.contains("Agent"));
+        assert!(out.contains("repos: x"));
+        assert!(!out.contains("Techniques"));
+        assert!(!out.contains("### ci"));
+    }
+
+    #[test]
+    fn format_tools_for_context_panel_includes_schema() {
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "tool_search",
+                "description": "search tools",
+                "parameters": { "type": "object", "required": ["query"] }
+            }
+        })];
+        let text = format_tools_for_context_panel(&tools);
+        assert!(text.contains("tool_search"));
+        assert!(text.contains("search tools"));
+        assert!(text.contains("query"));
+    }
+
+    #[test]
+    fn estimate_tools_tokens_counts_json_payload() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": { "name": "tool_search", "description": "search", "parameters": {} }
+        })];
+        assert!(estimate_tools_tokens(&tools) > 10);
+    }
+
+    #[test]
+    fn message_budget_for_tools_subtracts_tool_estimate() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": { "name": "x", "description": "y", "parameters": {} }
+        })];
+        let tools_t = estimate_tools_tokens(&tools);
+        let budget = message_budget_for_tools(10_000, &tools);
+        assert_eq!(budget, 10_000 - tools_t);
+    }
 
     fn sample_history(n: usize) -> Vec<ChatMessage> {
         (0..n)
@@ -1066,7 +1490,7 @@ diff --git a/bar.rs b/bar.rs\n\
     fn trim_preserves_harness_nudge_content() {
         use crate::agent::tool_catalog::ToolCatalog;
         use crate::llm::LlmTurnMessage;
-        let nudge = ToolCatalog::full().format_tool_args_nudge(
+        let nudge = ToolCatalog::new().format_tool_args_nudge(
             "pr_get_overview",
             "pr_number",
             Some("19272"),
@@ -1077,7 +1501,7 @@ diff --git a/bar.rs b/bar.rs\n\
             LlmTurnMessage::new("user", "user".repeat(5000)),
             LlmTurnMessage::new("user", nudge.clone()),
         ];
-        trim_llm_messages(&mut messages, 200);
+        trim_llm_messages(&mut messages, 200, CompactionStrategy::Code);
         assert!(
             messages
                 .iter()
@@ -1094,7 +1518,10 @@ diff --git a/bar.rs b/bar.rs\n\
 
     #[test]
     fn list_tool_gets_smaller_cap() {
-        assert!(tool_result_char_cap("pr_list_open") < tool_result_char_cap("pr_get_status"));
+        assert!(
+            tool_result_char_cap(CompactionStrategy::Ops, "pr_list_open")
+                < tool_result_char_cap(CompactionStrategy::Ops, "pr_get_status")
+        );
     }
 
     #[test]
@@ -1143,7 +1570,7 @@ diff --git a/bar.rs b/bar.rs\n\
             LlmTurnMessage::new("user", "user".repeat(5000)),
             reasoning,
         ];
-        trim_llm_messages(&mut messages, 200);
+        trim_llm_messages(&mut messages, 200, CompactionStrategy::Code);
         assert!(
             messages
                 .iter()
@@ -1247,7 +1674,7 @@ diff --git a/bar.rs b/bar.rs\n\
             ));
         }
         let before = estimate_messages_tokens(&msgs);
-        trim_llm_messages(&mut msgs, 6_500);
+        trim_llm_messages(&mut msgs, 6_500, CompactionStrategy::Ops);
         let after = estimate_messages_tokens(&msgs);
         assert_eq!(msgs[0].role, "system");
         assert!(msgs.len() >= 9);
@@ -1263,5 +1690,34 @@ diff --git a/bar.rs b/bar.rs\n\
         assert!(out.ends_with('…'));
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
         assert!(out.chars().count() <= 21);
+    }
+
+    #[test]
+    fn ops_compaction_preserves_ci_kind_and_verdict() {
+        let body = "CI_KIND: actions_only\nverdict: flaky\nnoise line\n#19264 acme/widget CI failing";
+        let out = summarize_ops_tool_content(
+            "ci_analyze_pr_failures",
+            &format!("tool_result(ci_analyze_pr_failures):\n{body}"),
+        );
+        assert!(out.contains("CI_KIND"));
+        assert!(out.contains("verdict"));
+    }
+
+    #[test]
+    fn compaction_strategy_variants_distinct() {
+        assert_eq!(CompactionStrategy::Ops, CompactionStrategy::Ops);
+        assert_ne!(CompactionStrategy::Ops, CompactionStrategy::Code);
+    }
+
+    #[test]
+    fn coding_bash_compaction_keeps_exit_and_tail() {
+        let body = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("exit: 1\n{body}");
+        let out = summarize_coding_tool_content("bash_run", &content);
+        assert!(out.contains("exit: 1"));
+        assert!(out.contains("line 39"));
     }
 }

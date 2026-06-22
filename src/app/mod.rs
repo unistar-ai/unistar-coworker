@@ -1,14 +1,20 @@
+mod approval;
+mod events;
+
+pub use approval::spawn_approval_decision;
+pub use events::apply_event;
+
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
 use tokio::sync::broadcast;
 
-use crate::agent::chat_loop::{ChatProgress, ContextSnapshot};
+use crate::agent::chat_loop::{ChatActivityFlow, ChatProgress, ContextSnapshot};
 use crate::config::Config;
 use crate::store::{
-    Approval, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, Digest, DigestMeta,
-    FlakyTestRollup, IssueSnapshot, LogLine, MainAlert, PrSnapshot, Store,
+    Approval, AuditEntry, ChatMessage, ChatRole, Digest, DigestMeta, LogLine, PrSnapshot, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,9 +119,6 @@ pub enum Tab {
     Approvals = 3,
     Logs = 4,
     Config = 5,
-    Flaky = 6,
-    Release = 7,
-    Issues = 8,
 }
 
 impl Tab {
@@ -130,24 +133,7 @@ impl Tab {
             Tab::Approvals,
             Tab::Logs,
             Tab::Config,
-            Tab::Flaky,
         ]);
-        if config
-            .workflows
-            .get("release-duty")
-            .map(|w| w.enabled)
-            .unwrap_or(false)
-        {
-            tabs.push(Tab::Release);
-        }
-        if config
-            .workflows
-            .get("issue-triage")
-            .map(|w| w.enabled)
-            .unwrap_or(false)
-        {
-            tabs.push(Tab::Issues);
-        }
         tabs
     }
 
@@ -159,9 +145,6 @@ impl Tab {
             Tab::Approvals => "3 Approvals",
             Tab::Logs => "4 Logs",
             Tab::Config => "5 Config",
-            Tab::Flaky => "6 Flaky",
-            Tab::Release => "7 Release",
-            Tab::Issues => "8 Issues",
         }
     }
 
@@ -194,6 +177,11 @@ pub enum AppEvent {
     StatusMessage(String),
     ChatReply,
     ChatProgress(ChatProgress),
+    /// PR tab detail: `pr_get_overview` body loaded asynchronously.
+    PrOverviewReady {
+        repo: String,
+        pr_number: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -218,6 +206,9 @@ pub enum ApprovalDialogChoice {
     Deny,
 }
 
+/// Approve on the modal is blocked briefly after open to prevent mis-clicks.
+pub const APPROVAL_ARM_DELAY: Duration = Duration::from_millis(200);
+
 #[derive(Debug, Clone)]
 pub struct ApprovalDialog {
     pub id: uuid::Uuid,
@@ -226,6 +217,58 @@ pub struct ApprovalDialog {
     pub choice: ApprovalDialogChoice,
     /// True while an approve/deny request is in flight (blocks duplicate submits).
     pub deciding: bool,
+    pub opened_at: Instant,
+}
+
+impl ApprovalDialog {
+    pub fn approve_armed(&self) -> bool {
+        self.opened_at.elapsed() >= APPROVAL_ARM_DELAY
+    }
+
+    pub fn approve_arm_ms_remaining(&self) -> u128 {
+        APPROVAL_ARM_DELAY
+            .as_millis()
+            .saturating_sub(self.opened_at.elapsed().as_millis())
+    }
+}
+
+/// Collapsed Dashboard list sections (`true` = items hidden, header only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DashboardFoldState {
+    pub digests: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardSection {
+    Digests,
+}
+
+impl DashboardSection {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Digests => "digests",
+        }
+    }
+}
+
+impl DashboardFoldState {
+    pub fn is_collapsed(self, section: DashboardSection) -> bool {
+        match section {
+            DashboardSection::Digests => self.digests,
+        }
+    }
+}
+
+fn default_folded_digest_sections() -> std::collections::HashSet<String> {
+    [
+        "Ignorable",
+        "Clear",
+        "Waiting for review",
+        "Notes",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -237,10 +280,6 @@ pub struct AppState {
     pub digest_history: Vec<DigestMeta>,
     pub prs: Vec<PrSnapshot>,
     pub approvals: Vec<Approval>,
-    pub flaky_tests: Vec<FlakyTestRollup>,
-    pub main_alerts: Vec<MainAlert>,
-    pub backport_queue: Vec<BackportQueueItem>,
-    pub issues: Vec<IssueSnapshot>,
     pub pr_filter: PrFilter,
     pub pr_sort: PrSort,
     pub log_filter: LogFilter,
@@ -250,8 +289,13 @@ pub struct AppState {
     pub selected_index: usize,
     pub status: String,
     pub engine_busy: bool,
-    pub mcp_ok: bool,
+    /// Active workflow id while `engine_busy` (shown in status bar).
+    pub engine_workflow_id: Option<String>,
+    pub github_ok: bool,
     pub llm_ok: bool,
+    /// Last MCP `tool_list` round-trip (ms), measured at engine start.
+    pub github_latency_ms: Option<u128>,
+    pub llm_latency_ms: Option<u128>,
     pub chat_input: String,
     pub chat_input_history: Vec<String>,
     /// Index into `chat_input_history` while browsing; `None` = drafting new input.
@@ -267,12 +311,18 @@ pub struct AppState {
     pub chat_tool_pending: Option<String>,
     /// MCP tool in flight between ToolStart and ToolDone.
     pub chat_tool_running: Option<String>,
+    /// Elapsed / paging hint while `chat_tool_running` is active.
+    pub chat_tool_running_detail: Option<String>,
     /// Ollama thinking stream (internal reasoning — not shown as the final answer).
     pub chat_reasoning: Option<String>,
+    /// Transient skill / MCP activity (live Messages tail — cleared when step ends).
+    pub chat_activity_flow: Option<ChatActivityFlow>,
     /// True while the harness summarizes streamed thinking before the next JSON step.
     pub chat_reasoning_compressing: bool,
     /// Bumped when chat content changes; drives render cache invalidation.
     pub chat_render_revision: u64,
+    /// Bumped when transcript lines / tool outputs change (not live streaming fields).
+    pub chat_history_revision: u64,
     /// Lines to keep visible above the bottom; 0 = pinned to latest.
     pub chat_scroll_from_bottom: u16,
     pub chat_session_id: Option<uuid::Uuid>,
@@ -291,11 +341,25 @@ pub struct AppState {
     pub chat_context_revision: u64,
     /// Which split pane receives ↑/↓ when context panel is open.
     pub chat_pane_focus: ChatPaneFocus,
-    pub flaky_since_days: u32,
-    pub flaky_repo_filter: Option<String>,
-    pub security_digest_md: Option<String>,
     /// Vertical scroll offset (wrapped lines) for the Detail pane on non-Chat tabs.
     pub detail_scroll_line: u16,
+    /// Inclusive line range for mouse drag-to-copy in Detail (`lo`, `hi`).
+    pub detail_select: Option<(u16, u16)>,
+    pub detail_selecting: bool,
+    /// Dashboard list section collapse (alerts / security / digests).
+    pub dashboard_fold: DashboardFoldState,
+    /// `##` section titles folded in digest Detail markdown (`z` / `Z` on Dashboard).
+    pub digest_folded_sections: std::collections::HashSet<String>,
+    /// `pr_get_overview` bodies keyed by `repo#number` for the PRs tab Detail pane.
+    pub pr_overview_cache: HashMap<String, String>,
+    /// In-flight overview fetch (`repo#number`).
+    pub pr_overview_fetching: Option<String>,
+    /// TUI started with `--attach` (poll shared store from daemon).
+    pub attach_mode: bool,
+    /// PR cursor within the selected Dashboard digest (`n` / `N`).
+    pub dashboard_digest_pr_index: usize,
+    /// Digest list index the PR cursor applies to.
+    pub dashboard_digest_pr_digest_idx: Option<usize>,
 }
 
 impl AppState {
@@ -312,10 +376,6 @@ impl AppState {
             digest_history: vec![],
             prs: vec![],
             approvals: vec![],
-            flaky_tests: vec![],
-            main_alerts: vec![],
-            backport_queue: vec![],
-            issues: vec![],
             pr_filter: PrFilter::All,
             pr_sort: PrSort::Updated,
             log_filter: LogFilter::All,
@@ -324,8 +384,11 @@ impl AppState {
             selected_index: 0,
             status: "ready".into(),
             engine_busy: false,
-            mcp_ok: false,
+            engine_workflow_id: None,
+            github_ok: false,
             llm_ok: false,
+            github_latency_ms: None,
+            llm_latency_ms: None,
             chat_input: String::new(),
             chat_input_history: vec![],
             chat_history_pos: None,
@@ -336,9 +399,12 @@ impl AppState {
             chat_streaming: None,
             chat_tool_pending: None,
             chat_tool_running: None,
+            chat_tool_running_detail: None,
             chat_reasoning: None,
+            chat_activity_flow: None,
             chat_reasoning_compressing: false,
             chat_render_revision: 0,
+            chat_history_revision: 0,
             chat_scroll_from_bottom: 0,
             chat_session_id: None,
             chat_pending_approval: None,
@@ -350,10 +416,59 @@ impl AppState {
             chat_context_scroll_from_bottom: 0,
             chat_context_revision: 0,
             chat_pane_focus: ChatPaneFocus::Messages,
-            flaky_since_days: 30,
-            flaky_repo_filter: None,
-            security_digest_md: None,
             detail_scroll_line: 0,
+            detail_select: None,
+            detail_selecting: false,
+            dashboard_fold: DashboardFoldState::default(),
+            digest_folded_sections: default_folded_digest_sections(),
+            pr_overview_cache: HashMap::new(),
+            pr_overview_fetching: None,
+            attach_mode: false,
+            dashboard_digest_pr_index: 0,
+            dashboard_digest_pr_digest_idx: None,
+        }
+    }
+
+    pub fn pr_overview_key(repo: &str, number: u32) -> String {
+        format!("{repo}#{number}")
+    }
+
+    pub fn selected_pr_overview(&self) -> Option<&str> {
+        let filtered = self.sorted_filtered_prs();
+        let pr = filtered.get(self.selected_index)?;
+        self.pr_overview_cache
+            .get(&Self::pr_overview_key(&pr.repo, pr.number))
+            .map(|s| s.as_str())
+    }
+
+    pub fn selected_pr_overview_loading(&self) -> bool {
+        let filtered = self.sorted_filtered_prs();
+        let Some(pr) = filtered.get(self.selected_index) else {
+            return false;
+        };
+        let key = Self::pr_overview_key(&pr.repo, pr.number);
+        self.pr_overview_fetching.as_ref() == Some(&key)
+            && !self.pr_overview_cache.contains_key(&key)
+    }
+
+    pub fn toggle_dashboard_section_fold(&mut self, section: DashboardSection) {
+        match section {
+            DashboardSection::Digests => self.dashboard_fold.digests = !self.dashboard_fold.digests,
+        }
+    }
+
+    pub fn toggle_digest_section_fold(&mut self, title: &str) {
+        if self.digest_folded_sections.contains(title) {
+            self.digest_folded_sections.remove(title);
+        } else {
+            self.digest_folded_sections.insert(title.to_string());
+        }
+    }
+
+    /// Collapse empty Dashboard list sections after store hydration.
+    pub fn sync_dashboard_fold(&mut self) {
+        if self.digest_history.is_empty() {
+            self.dashboard_fold.digests = true;
         }
     }
 
@@ -378,11 +493,13 @@ impl AppState {
             self.reindex_chat_indices(drain);
         }
         self.bump_chat_render();
+        self.bump_chat_history();
     }
 
     pub fn record_chat_tool_output(&mut self, line_index: usize, output: String) {
         if !output.is_empty() {
             self.chat_tool_outputs.insert(line_index, output);
+            self.bump_chat_history();
         }
     }
 
@@ -474,12 +591,26 @@ impl AppState {
             description,
             choice: ApprovalDialogChoice::Approve,
             deciding: false,
+            opened_at: Instant::now(),
         });
     }
 
     pub fn open_approval_dialog_from(&mut self, approval: &crate::store::Approval) {
         let tool_name = approval_tool_name_for_kind(&approval.kind);
         self.open_approval_dialog(approval.id, tool_name, approval.description.clone());
+    }
+
+    /// After store hydrate, open modal when workflow approvals grew (attach / refresh).
+    pub fn maybe_notify_new_workflow_approvals(&mut self, prev_pending_count: usize) {
+        self.last_pending_approval_count = self.approvals.len();
+        if !self.config.chat.auto_approve_mutations
+            && self.approval_dialog.is_none()
+            && self.approvals.len() > prev_pending_count
+        {
+            if let Some(approval) = self.approvals.first().cloned() {
+                self.open_approval_dialog_from(&approval);
+            }
+        }
     }
 
     pub fn close_approval_dialog(&mut self) {
@@ -583,6 +714,14 @@ impl AppState {
 
     pub fn set_chat_tool_running(&mut self, name: Option<String>) {
         self.chat_tool_running = name;
+        if self.chat_tool_running.is_none() {
+            self.chat_tool_running_detail = None;
+        }
+        self.bump_chat_render();
+    }
+
+    pub fn set_chat_tool_running_detail(&mut self, detail: Option<String>) {
+        self.chat_tool_running_detail = detail;
         self.bump_chat_render();
     }
 
@@ -591,6 +730,11 @@ impl AppState {
             self.chat_reasoning_compressing = false;
         }
         self.chat_reasoning = text;
+        self.bump_chat_render();
+    }
+
+    pub fn set_chat_activity_flow(&mut self, flow: Option<ChatActivityFlow>) {
+        self.chat_activity_flow = flow;
         self.bump_chat_render();
     }
 
@@ -668,10 +812,7 @@ impl AppState {
         if !self.chat_busy {
             return None;
         }
-        if self.chat_tool_pending.is_some() {
-            return Some("tool-json");
-        }
-        if self.chat_tool_running.is_some() {
+        if self.chat_tool_pending.is_some() || self.chat_tool_running.is_some() {
             return Some("tool");
         }
         if self.chat_streaming.is_some() {
@@ -683,6 +824,9 @@ impl AppState {
         if self.chat_reasoning.is_some() {
             return Some("reasoning");
         }
+        if self.chat_activity_flow.is_some() {
+            return Some("activity");
+        }
         Some("model")
     }
 
@@ -692,6 +836,10 @@ impl AppState {
 
     fn bump_chat_render(&mut self) {
         self.chat_render_revision = self.chat_render_revision.wrapping_add(1);
+    }
+
+    fn bump_chat_history(&mut self) {
+        self.chat_history_revision = self.chat_history_revision.wrapping_add(1);
     }
 
     pub fn selected_approval(&self) -> Option<&Approval> {
@@ -731,6 +879,23 @@ impl AppState {
             }
         }
         prs
+    }
+
+    /// Switch to PRs tab and select `repo#number` when present in store snapshots.
+    pub fn jump_to_pr(&mut self, repo: &str, number: u32) -> bool {
+        self.tab = Tab::Prs;
+        self.pr_filter = PrFilter::All;
+        let idx = self
+            .sorted_filtered_prs()
+            .iter()
+            .position(|p| p.repo == repo && p.number == number);
+        if let Some(i) = idx {
+            self.selected_index = i;
+            self.reset_detail_scroll();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn filtered_logs(&self) -> Vec<&LogLine> {
@@ -789,21 +954,27 @@ impl AppState {
         self.set_chat_tool_pending(None);
         self.set_chat_tool_running(None);
         self.set_chat_reasoning(None);
+        self.set_chat_activity_flow(None);
         self.chat_reasoning_compressing = false;
         self.chat_scroll_from_bottom = 0;
+        self.chat_context = None;
+        self.chat_context_scroll_from_bottom = 0;
+        self.chat_context_revision = self.chat_context_revision.wrapping_add(1);
         self.invalidate_render_cache();
+        self.bump_chat_history();
+    }
+
+    /// Clear visible transcript, context panel, and drop the persisted session binding.
+    pub fn reset_chat_session(&mut self) {
+        self.clear_chat_transcript();
+        self.chat_session_id = None;
     }
 
     pub fn reset_detail_scroll(&mut self) {
         self.detail_scroll_line = 0;
-    }
-
-    pub fn selected_backport(&self) -> Option<&BackportQueueItem> {
-        self.backport_queue.get(self.selected_index)
-    }
-
-    pub fn selected_issue(&self) -> Option<&IssueSnapshot> {
-        self.issues.get(self.selected_index)
+        self.detail_select = None;
+        self.detail_selecting = false;
+        self.dashboard_digest_pr_digest_idx = None;
     }
 }
 
@@ -840,30 +1011,6 @@ pub async fn hydrate_from_store(
     let prs = store.list_pr_snapshots(None).await?;
     let approvals = store.list_pending_approvals().await?;
 
-    let filters = {
-        let s = state.read().await;
-        (s.flaky_since_days, s.flaky_repo_filter.clone())
-    };
-    let flaky = store
-        .list_flaky_tests(crate::store::FlakyQuery {
-            repo: filters.1,
-            since_days: Some(filters.0),
-            limit: 50,
-        })
-        .await?;
-    let main_alerts = store
-        .list_main_alerts(crate::store::MainAlertQuery {
-            repo: None,
-            unacknowledged_only: true,
-            since_hours: Some(72),
-            limit: 20,
-        })
-        .await?;
-    let backport_queue = store.list_backport_queue(None).await?;
-    let issues = store.list_issue_snapshots(None).await?;
-
-    let security_digest_md = load_security_digest(store).await?;
-
     let mut s = state.write().await;
     s.latest_digest = digest;
     s.digest_history = digest_history;
@@ -871,19 +1018,8 @@ pub async fn hydrate_from_store(
     s.prs = prs;
     s.approvals = approvals;
     s.last_pending_approval_count = s.approvals.len();
-    s.flaky_tests = flaky;
-    s.main_alerts = main_alerts;
-    s.backport_queue = backport_queue;
-    s.issues = issues;
-    s.security_digest_md = security_digest_md;
+    s.sync_dashboard_fold();
     Ok(())
-}
-
-async fn load_security_digest(store: &dyn Store) -> crate::error::Result<Option<String>> {
-    Ok(store
-        .get_digest_by_skill("security-digest")
-        .await?
-        .map(|d| d.body_md))
 }
 
 /// Map a stored chat message to a TUI transcript line (`you>`, `assistant>`, tool rows).
@@ -941,6 +1077,19 @@ pub async fn load_chat_session_ui(
             continue;
         }
         if msg.role == ChatRole::Tool {
+            if msg
+                .tool_name
+                .as_deref()
+                .is_some_and(crate::agent::chat_loop::is_flow_activity_tool)
+            {
+                continue;
+            }
+            let name = msg.tool_name.as_deref().unwrap_or("tool");
+            if !crate::agent::context::is_tool_approval_pending_transcript(&msg.content)
+                && !msg.content.contains("awaiting approval")
+            {
+                state.push_chat_line(format!("  → {name}"));
+            }
             let idx = state.chat_lines.len();
             state.push_chat_line(chat_message_display_line(&msg));
             state.record_chat_tool_output(idx, msg.content.clone());
@@ -958,6 +1107,11 @@ fn approval_tool_name_for_kind(kind: &crate::store::ApprovalKind) -> String {
         crate::store::ApprovalKind::RerunFlaky => "ci_rerun_workflow".into(),
         crate::store::ApprovalKind::Backport => "pr_create_backport".into(),
         crate::store::ApprovalKind::PostComment => "pr_post_comment".into(),
+        crate::store::ApprovalKind::IssueAddLabel => "issue_add_label".into(),
+        crate::store::ApprovalKind::WriteFile => "write_file".into(),
+        crate::store::ApprovalKind::EditFile => "edit_file".into(),
+        crate::store::ApprovalKind::BashRun => "bash_run".into(),
+        crate::store::ApprovalKind::PythonRun => "python_run".into(),
     }
 }
 

@@ -8,7 +8,9 @@ use crate::error::{CoworkerError, Result};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub llm: LlmConfig,
-    pub mcp: McpConfig,
+    #[serde(default)]
+    pub github: GithubConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
     pub schedule: ScheduleConfig,
@@ -29,6 +31,8 @@ pub struct Config {
     pub chat: ChatConfig,
     #[serde(default)]
     pub tui: TuiConfig,
+    #[serde(default)]
+    pub web: WebConfig,
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
     #[serde(default)]
@@ -107,49 +111,114 @@ fn default_max_log_pages() -> u32 {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct McpConfig {
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
+pub struct GithubConfig {
+    /// GitHub CLI binary (default `gh`).
+    #[serde(default = "default_gh_command")]
+    pub gh_command: String,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Default tool RPC timeout in seconds (default 120).
+    #[serde(default = "default_mcp_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub tool_timeouts: HashMap<String, u64>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+fn default_gh_command() -> String {
+    "gh".into()
+}
+
+fn default_mcp_timeout_secs() -> u64 {
+    120
+}
+
+/// Legacy `mcp:` block in coworker.yaml (ignored except `env` / `timeout_secs`).
+#[derive(Debug, Clone, Default, Deserialize)]
+struct LegacyMcpYaml {
+    command: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    timeout_secs: Option<u64>,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            gh_command: default_gh_command(),
+            env: HashMap::new(),
+            timeout_secs: default_mcp_timeout_secs(),
+            tool_timeouts: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageBackend {
+    #[default]
     Json,
     Sqlite,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
+    #[serde(default)]
     pub backend: StorageBackend,
+    #[serde(default = "default_storage_path")]
     pub path: String,
     #[serde(default)]
     pub wal: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            backend: StorageBackend::Json,
+            path: default_storage_path(),
+            wal: false,
+        }
+    }
+}
+
+fn default_storage_path() -> String {
+    "./data".into()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScheduleConfig {
+    #[serde(default = "default_daily_digest_cron")]
     pub daily_digest: Option<String>,
+    #[serde(default = "default_ci_rescan_cron")]
     pub ci_rescan: Option<String>,
     pub main_guard: Option<String>,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            daily_digest: default_daily_digest_cron(),
+            ci_rescan: default_ci_rescan_cron(),
+            main_guard: None,
+        }
+    }
+}
+
+fn default_daily_digest_cron() -> Option<String> {
+    Some("0 6 * * *".into())
+}
+
+fn default_ci_rescan_cron() -> Option<String> {
+    Some("0 */4 * * *".into())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WorkflowConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Task spec markdown (agents/*/AGENT.md).
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// Technique skills to compose into prompts.
+    /// Technique skills; default from built-in workflow registry.
     #[serde(default)]
     pub skills: Vec<String>,
     pub schedule: Option<String>,
-    #[serde(default)]
-    pub mutating: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -164,17 +233,12 @@ pub struct PolicyConfig {
     pub auto_backport: bool,
     #[serde(default = "default_max_prs")]
     pub max_prs_per_repo: u32,
-    #[serde(default = "default_max_turns")]
-    pub max_agent_turns: u32,
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls_per_pr: u32,
 }
 
 fn default_max_prs() -> u32 {
     20
-}
-fn default_max_turns() -> u32 {
-    12
 }
 fn default_max_tool_calls() -> u32 {
     5
@@ -265,16 +329,44 @@ fn default_chat_agent() -> String {
 }
 
 fn default_chat_skills() -> Vec<String> {
-    vec![
-        "skills/github-ops-tone/SKILL.md".into(),
-        "skills/ci-triage/SKILL.md".into(),
-    ]
+    // Empty — use `agents/chat/AGENT.md` frontmatter `skills:` as SSOT.
+    Vec::new()
+}
+
+fn default_chat_workspace() -> PathBuf {
+    PathBuf::from(".")
+}
+
+/// Session history / tool-result compaction for chat (`code` = coding-first default).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCompaction {
+    /// Preserve paths, errors, edit targets (coding chat default).
+    #[default]
+    Code,
+    /// Preserve CI_KIND, verdicts, PR refs, digest excerpts (ops / MCP triage).
+    Ops,
+    /// Generic LLM rolling summary without domain-specific keep rules.
+    Generic,
+}
+
+impl ChatCompaction {
+    pub fn to_strategy(self) -> crate::agent::context::CompactionStrategy {
+        match self {
+            Self::Code => crate::agent::context::CompactionStrategy::Code,
+            Self::Ops => crate::agent::context::CompactionStrategy::Ops,
+            Self::Generic => crate::agent::context::CompactionStrategy::Generic,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Local coding workspace root (paths in file tools must resolve under this).
+    #[serde(default = "default_chat_workspace")]
+    pub workspace: PathBuf,
     #[serde(default = "default_chat_agent")]
     pub agent: String,
     #[serde(default = "default_chat_skills")]
@@ -294,10 +386,6 @@ pub struct ChatConfig {
     /// Max tokens for prior session turns in LLM context. 0 = auto (~40% of input budget).
     #[serde(default)]
     pub history_tokens: u32,
-    /// Read-only tools pre-registered for chat (MCP names + coworker virtual tools).
-    #[serde(default = "default_chat_preferred_tools")]
-    pub preferred_tools: Vec<String>,
-    /// Summarize Ollama thinking via a fast think=false LLM call for context + TUI.
     #[serde(default = "default_true")]
     pub compress_reasoning: bool,
     /// Min thinking chars before triggering LLM compression.
@@ -312,6 +400,177 @@ pub struct ChatConfig {
     /// When true, mutating chat tools (rerun, backport, comment) run immediately without a popup.
     #[serde(default)]
     pub auto_approve_mutations: bool,
+    /// How chat exposes tools to the LLM: lazy discovery vs full native schemas.
+    #[serde(default)]
+    pub tool_mode: ChatToolMode,
+    /// Whitelisted local shell (`bash_run`).
+    #[serde(default)]
+    pub bash: BashToolConfig,
+    /// Run Python snippets (`python_run`).
+    #[serde(default)]
+    pub python: PythonToolConfig,
+    /// Read-only web preview (`web_browser`).
+    #[serde(default)]
+    pub web_browser: WebBrowserToolConfig,
+    /// How older turns and tool output are compressed when context is tight.
+    #[serde(default)]
+    pub compaction: ChatCompaction,
+}
+
+/// `bash_run` — LLM-reviewed local shell (`timeout_secs`, `max_output_chars`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BashToolConfig {
+    #[serde(default = "default_bash_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_bash_max_output_chars")]
+    pub max_output_chars: usize,
+}
+
+impl Default for BashToolConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: default_bash_timeout_secs(),
+            max_output_chars: default_bash_max_output_chars(),
+        }
+    }
+}
+
+fn default_bash_timeout_secs() -> u64 {
+    30
+}
+
+fn default_bash_max_output_chars() -> usize {
+    16_000
+}
+
+/// `python_run` — execute Python in the workspace (`timeout_secs`, `max_output_chars`, `command`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PythonToolConfig {
+    #[serde(default = "default_python_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_python_max_output_chars")]
+    pub max_output_chars: usize,
+    /// Interpreter binary (default `python3`).
+    #[serde(default = "default_python_command")]
+    pub command: String,
+}
+
+impl Default for PythonToolConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: default_python_timeout_secs(),
+            max_output_chars: default_python_max_output_chars(),
+            command: default_python_command(),
+        }
+    }
+}
+
+fn default_python_timeout_secs() -> u64 {
+    30
+}
+
+fn default_python_max_output_chars() -> usize {
+    16_000
+}
+
+fn default_python_command() -> String {
+    "python3".into()
+}
+
+/// `web_browser` — fetch page text for the agent (`timeout_secs`, charset, SSRF, cache).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebBrowserToolConfig {
+    #[serde(default = "default_web_browser_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_web_browser_max_content_chars")]
+    pub max_content_chars: usize,
+    #[serde(default = "default_web_browser_max_download_bytes")]
+    pub max_download_bytes: usize,
+    #[serde(default = "default_web_browser_user_agent")]
+    pub user_agent: String,
+    #[serde(default)]
+    pub allow_localhost: bool,
+    #[serde(default = "default_web_browser_cache_ttl_secs")]
+    pub cache_ttl_secs: u64,
+    #[serde(default = "default_web_browser_spa_empty_chars")]
+    pub spa_empty_chars: usize,
+    #[serde(default = "default_web_browser_max_links")]
+    pub max_links: usize,
+    #[serde(default = "default_web_browser_browser_timeout_secs")]
+    pub browser_timeout_secs: u64,
+    /// Extra wait after navigation for JS challenges (e.g. zse-ck) before reading the DOM.
+    #[serde(default = "default_web_browser_browser_wait_ms")]
+    pub browser_wait_ms: u64,
+    /// Optional path to Chrome/Chromium binary (otherwise PATH).
+    #[serde(default)]
+    pub chromium_path: Option<String>,
+}
+
+impl Default for WebBrowserToolConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: default_web_browser_timeout_secs(),
+            max_content_chars: default_web_browser_max_content_chars(),
+            max_download_bytes: default_web_browser_max_download_bytes(),
+            user_agent: default_web_browser_user_agent(),
+            allow_localhost: false,
+            cache_ttl_secs: default_web_browser_cache_ttl_secs(),
+            spa_empty_chars: default_web_browser_spa_empty_chars(),
+            max_links: default_web_browser_max_links(),
+            browser_timeout_secs: default_web_browser_browser_timeout_secs(),
+            browser_wait_ms: default_web_browser_browser_wait_ms(),
+            chromium_path: None,
+        }
+    }
+}
+
+fn default_web_browser_browser_timeout_secs() -> u64 {
+    60
+}
+
+fn default_web_browser_browser_wait_ms() -> u64 {
+    3_000
+}
+
+fn default_web_browser_timeout_secs() -> u64 {
+    30
+}
+
+fn default_web_browser_max_content_chars() -> usize {
+    32_000
+}
+
+fn default_web_browser_max_download_bytes() -> usize {
+    2 * 1024 * 1024
+}
+
+fn default_web_browser_user_agent() -> String {
+    "unistar-coworker/1.0 (+local coding agent)".into()
+}
+
+fn default_web_browser_cache_ttl_secs() -> u64 {
+    60
+}
+
+fn default_web_browser_spa_empty_chars() -> usize {
+    80
+}
+
+fn default_web_browser_max_links() -> usize {
+    20
+}
+
+/// Chat tool exposure: progressive discovery (default), legacy lazy alias, or full native schemas.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatToolMode {
+    /// Lazy discovery + session warmup + intent hints (recommended).
+    #[default]
+    Auto,
+    /// Same as `auto` (kept for compatibility).
+    Lazy,
+    /// Full catalog native schemas.
+    Native,
 }
 
 fn default_history_summary_min_tokens() -> u32 {
@@ -342,30 +601,11 @@ fn default_chat_history_messages() -> u32 {
     24
 }
 
-pub fn default_chat_preferred_tools() -> Vec<String> {
-    vec![
-        "pr_get_overview".into(),
-        "pr_list_changed_files".into(),
-        "pr_get_diff".into(),
-        "pr_list_open".into(),
-        "pr_list_waiting_review".into(),
-        "pr_get_merge_blockers".into(),
-        "pr_get_status".into(),
-        "pr_list_merged".into(),
-        "ci_analyze_pr_failures".into(),
-        "ci_get_run_summary".into(),
-        "ci_get_failed_logs".into(),
-        "issue_list_open".into(),
-        "issue_get".into(),
-        "alert_list_open".into(),
-        "store_get_latest_digest".into(),
-    ]
-}
-
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            workspace: default_chat_workspace(),
             agent: default_chat_agent(),
             skills: default_chat_skills(),
             max_turns: default_chat_max_turns(),
@@ -374,12 +614,16 @@ impl Default for ChatConfig {
             llm_step_timeout_secs: default_chat_llm_step_timeout_secs(),
             history_messages: default_chat_history_messages(),
             history_tokens: 0,
-            preferred_tools: default_chat_preferred_tools(),
             compress_reasoning: true,
             reasoning_compress_min_chars: default_reasoning_compress_min_chars(),
             compress_history: true,
             history_summary_min_tokens: default_history_summary_min_tokens(),
             auto_approve_mutations: false,
+            tool_mode: ChatToolMode::Auto,
+            bash: BashToolConfig::default(),
+            python: PythonToolConfig::default(),
+            web_browser: WebBrowserToolConfig::default(),
+            compaction: ChatCompaction::default(),
         }
     }
 }
@@ -390,18 +634,47 @@ pub enum TuiThemeMode {
     #[default]
     Dark,
     Light,
+    /// Terminal default colors — no Catppuccin RGB backgrounds.
+    None,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TuiConfig {
     #[serde(default)]
     pub theme: TuiThemeMode,
+    /// Emit OSC 8 hyperlinks for markdown links (iTerm/WezTerm/Windows Terminal).
+    #[serde(default)]
+    pub osc8_links: bool,
+    /// Optional `#RRGGBB` accent for dark/light themes (ignored when `theme: none`).
+    #[serde(default)]
+    pub accent: Option<String>,
 }
 
 impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             theme: TuiThemeMode::Dark,
+            osc8_links: false,
+            accent: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebConfig {
+    /// Bind address for `unistar-coworker serve` (default 127.0.0.1:8787).
+    #[serde(default = "default_web_bind")]
+    pub bind: String,
+}
+
+fn default_web_bind() -> String {
+    "127.0.0.1:8787".into()
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_web_bind(),
         }
     }
 }
@@ -458,9 +731,54 @@ impl Default for HygieneConfig {
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let raw = std::fs::read_to_string(path.as_ref())?;
-        let mut cfg: Config = serde_yaml::from_str(&raw)?;
-        cfg.resolve_env_in_mcp();
+        let value: serde_yaml::Value = serde_yaml::from_str(&raw)?;
+        let mut cfg: Config = serde_yaml::from_value(value.clone())?;
+        if let Some(mcp) = value.get("mcp") {
+            let legacy: LegacyMcpYaml = serde_yaml::from_value(mcp.clone()).unwrap_or_default();
+            if !legacy.env.is_empty() {
+                cfg.github.env.extend(legacy.env);
+            }
+            if let Some(secs) = legacy.timeout_secs {
+                cfg.github.timeout_secs = secs;
+            }
+            if let Some(cmd) = legacy.command.as_deref() {
+                if cmd == "gh" || cmd.ends_with("/gh") {
+                    cfg.github.gh_command = cmd.to_string();
+                } else if cmd.contains("unistar-mcp") {
+                    tracing::warn!(
+                        "config still has mcp.command=unistar-mcp — GitHub tools now run in harness via `gh`; use github: instead"
+                    );
+                }
+            }
+        }
+        cfg.resolve_env_in_github();
+        cfg.finalize();
         Ok(cfg)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_from_str(raw: &str) -> Result<Self> {
+        let value: serde_yaml::Value = serde_yaml::from_str(raw)?;
+        let mut cfg: Config = serde_yaml::from_value(value.clone())?;
+        if let Some(mcp) = value.get("mcp") {
+            let legacy: LegacyMcpYaml = serde_yaml::from_value(mcp.clone()).unwrap_or_default();
+            if !legacy.env.is_empty() {
+                cfg.github.env.extend(legacy.env);
+            }
+            if let Some(secs) = legacy.timeout_secs {
+                cfg.github.timeout_secs = secs;
+            }
+        }
+        cfg.resolve_env_in_github();
+        Ok(cfg)
+    }
+
+    /// Reserved for derived fields after YAML deserialization.
+    pub fn finalize(&mut self) {
+        self.chat.workspace = expand_tilde(&self.chat.workspace.to_string_lossy());
+        if let Ok(canonical) = self.chat.workspace.canonicalize() {
+            self.chat.workspace = canonical;
+        }
     }
 
     pub fn discover() -> Result<(Self, PathBuf)> {
@@ -482,8 +800,8 @@ impl Config {
         expand_tilde(&self.storage.path)
     }
 
-    fn resolve_env_in_mcp(&mut self) {
-        for value in self.mcp.env.values_mut() {
+    fn resolve_env_in_github(&mut self) {
+        for value in self.github.env.values_mut() {
             if let Some(rest) = value.strip_prefix("${") {
                 if let Some(var) = rest.strip_suffix('}') {
                     if let Ok(v) = std::env::var(var) {
@@ -512,5 +830,95 @@ mod tests {
     fn expand_home() {
         let p = expand_tilde("~/foo");
         assert!(p.to_string_lossy().contains("foo"));
+    }
+
+    #[test]
+    fn chat_github_probe_tools_in_catalog() {
+        use crate::agent::tool_catalog::ToolCatalog;
+        use crate::github::helpers::chat_github_probe_tools;
+
+        let cat = ToolCatalog::new();
+        for tool in chat_github_probe_tools() {
+            assert!(
+                cat.is_known_chat_tool(tool),
+                "CHAT_GITHUB_TOOLS probe missing from catalog: {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn tui_theme_none_deserializes() {
+        let yaml = r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+mcp: { command: unistar-mcp }
+storage: { backend: json, path: ./data }
+repos: [acme/widget]
+tui:
+  theme: none
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.tui.theme, TuiThemeMode::None);
+    }
+
+    #[test]
+    fn tui_accent_hex_deserializes() {
+        let yaml = r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+mcp: { command: unistar-mcp }
+storage: { backend: json, path: ./data }
+repos: [acme/widget]
+tui:
+  accent: '#aabbcc'
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.tui.accent.as_deref(), Some("#aabbcc"));
+    }
+
+    #[test]
+    fn chat_tool_mode_deserializes() {
+        let yaml = r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+mcp: { command: unistar-mcp }
+storage: { backend: json, path: ./data }
+repos: [acme/widget]
+chat:
+  tool_mode: native
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.chat.tool_mode, ChatToolMode::Native);
+    }
+
+    #[test]
+    fn chat_tool_mode_defaults_lazy() {
+        let yaml = r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+mcp: { command: unistar-mcp }
+repos: [acme/widget]
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.chat.tool_mode, ChatToolMode::Auto);
+    }
+
+    #[test]
+    fn minimal_yaml_parses_with_legacy_mcp_block() {
+        let yaml = r#"
+llm:
+  base_url: http://localhost:11434/v1
+  model: m
+  context_limit: 64000
+mcp:
+  command: unistar-mcp
+repos:
+  - acme/widget
+workflows:
+  daily-work: {}
+"#;
+        let mut cfg = Config::load_from_str(yaml).unwrap();
+        cfg.finalize();
+        assert_eq!(cfg.github.gh_command, "gh");
+        assert!(cfg.workflows.get("daily-work").unwrap().enabled);
+        assert_eq!(cfg.storage.backend, StorageBackend::Json);
+        assert_eq!(cfg.storage.path, "./data");
+        assert!(cfg.schedule.daily_digest.is_some());
     }
 }

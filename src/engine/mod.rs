@@ -8,7 +8,7 @@ use crate::app::{hydrate_from_store, AppEvent, SharedState};
 use crate::config::Config;
 use crate::error::Result;
 use crate::llm::LlmClient;
-use crate::mcp::{spawn_mcp, McpClient};
+use crate::github::{spawn_github, GithubHarness};
 use crate::store::{LogLine, Store};
 
 pub mod approvals;
@@ -18,18 +18,25 @@ pub mod prompt;
 pub mod rules;
 pub mod scheduler;
 pub mod skill;
+pub mod skill_routing;
+pub mod workflow_registry;
+
+pub use skill_routing::SkillRegistry;
 pub mod workflows;
 
+pub use workflow_registry::{require as require_workflow, WORKFLOWS};
+
 pub use prompt::{
-    compose_system_prompt, load_chat_prompt_bundle, load_classify_skills_for_triage,
-    load_tools_doc_with_preferred, load_workflow_spec, WorkflowSpec,
+    compose_static_system_prompt, format_session_context_message,
+    load_chat_prompt_bundle_for_session, load_classify_skills_for_triage, load_workflow_spec,
+    WorkflowSpec, SESSION_CONTEXT_PREFIX,
 };
-pub use skill::{load_markdown_spec, load_skill_with_base, AgentSpec, SkillSpec};
+pub use skill::{load_markdown_spec, load_skill_with_base, SkillSpec};
 
 pub struct Engine {
     config: Config,
     store: Arc<dyn Store>,
-    mcp: Arc<dyn McpClient>,
+    github: Arc<GithubHarness>,
     llm: Arc<LlmClient>,
     events: broadcast::Sender<AppEvent>,
     state: SharedState,
@@ -43,27 +50,35 @@ impl Engine {
         events: broadcast::Sender<AppEvent>,
         state: SharedState,
     ) -> Self {
-        let mcp = spawn_mcp(&config).await;
-        let llm_online = crate::llm::ollama::probe(&config.llm).await;
+        let github = spawn_github(&config).await;
+        let llm_latency_ms = crate::llm::ollama::probe_latency_ms(&config.llm).await;
+        let llm_online = llm_latency_ms.is_some();
+        let github_latency_ms = if github.is_available() {
+            crate::github::helpers::probe_github_latency_ms(github.as_ref()).await
+        } else {
+            None
+        };
         let llm = Arc::new(LlmClient::new(config.llm.clone(), llm_online));
         {
             let mut s = state.write().await;
-            s.mcp_ok = mcp.is_available();
+            s.github_ok = github.is_available();
             s.llm_ok = llm_online;
+            s.github_latency_ms = github_latency_ms;
+            s.llm_latency_ms = llm_latency_ms;
         }
         let engine = Self {
             config,
             store,
-            mcp,
+            github,
             llm,
             events,
             state,
             chat_cancel: Arc::new(AtomicBool::new(false)),
         };
-        if !engine.mcp.is_available() {
+        if !engine.github.is_available() {
             engine.emit_log(
                 "warn",
-                "unistar-mcp unavailable — set mcp.command and GH_TOKEN",
+                "GitHub harness unavailable — set github.gh_command and GH_TOKEN",
             );
         }
         engine
@@ -94,7 +109,7 @@ impl Engine {
         let agent = AgentLoop::new(
             self.config.clone(),
             Arc::clone(&self.store),
-            Arc::clone(&self.mcp),
+            Arc::clone(&self.github),
             Arc::clone(&self.llm),
             self.events.clone(),
             Arc::clone(&self.state),
@@ -124,7 +139,7 @@ impl Engine {
     pub async fn decide_approval(&self, id: &uuid::Uuid, approve: bool) -> Result<String> {
         let msg = approvals::process_decision(
             Arc::clone(&self.store),
-            Arc::clone(&self.mcp),
+            Arc::clone(&self.github),
             id,
             approve,
         )
@@ -134,28 +149,126 @@ impl Engine {
         Ok(msg)
     }
 
-    pub async fn acknowledge_main_alert(&self, id: &uuid::Uuid) -> Result<()> {
-        self.store.acknowledge_main_alert(id).await?;
-        self.refresh_store().await?;
-        let _ = self.events.send(AppEvent::StatusMessage(format!(
-            "main alert {id} acknowledged"
-        )));
-        Ok(())
+    /// Lazy-load PR overview for the PRs tab Detail pane (MCP Resource, fallback to tool).
+    pub async fn fetch_pr_overview(&self, repo: String, pr_number: u32) {
+        use crate::github::helpers::{gh_tool, pr_overview_resource_uri, read_resource};
+
+        use serde_json::json;
+
+        let key = crate::app::AppState::pr_overview_key(&repo, pr_number);
+        let uri = pr_overview_resource_uri(&repo, pr_number);
+        let body = match read_resource(self.github.as_ref(), &uri).await {
+            Ok(text) => text,
+            Err(resource_err) => {
+                tracing::debug!(
+                    "resources/read failed for {uri} ({resource_err}); falling back to pr_get_overview"
+                );
+                match gh_tool(
+                    self.github.as_ref(),
+                    "pr_get_overview",
+                    json!({ "repo": repo, "pr_number": pr_number }),
+                )
+                .await
+                {
+                    Ok(text) => text,
+                    Err(e) => format!("## Overview unavailable\n\n{e}"),
+                }
+            }
+        };
+        {
+            let mut s = self.state.write().await;
+            s.pr_overview_fetching = None;
+            s.pr_overview_cache.insert(key, body);
+        }
+        let _ = self.events.send(AppEvent::PrOverviewReady {
+            repo,
+            pr_number,
+        });
     }
 
-    pub async fn reclassify_flaky(&self, fingerprint: &str, as_flaky: bool) -> Result<u32> {
-        use crate::store::Classification;
-        let classification = if as_flaky {
-            Classification::UserFlaky
-        } else {
-            Classification::UserReal
+    /// Background CI triage for one PR (PRs tab `t`).
+    pub fn spawn_triage_pr(self: &Arc<Self>, repo: String, pr_number: u32) {
+        let engine = Arc::clone(self);
+        tokio::spawn(async move {
+            let wf = format!("triage:{repo}#{pr_number}");
+            let _ = engine.events.send(AppEvent::WorkflowStarted {
+                workflow_id: wf.clone(),
+            });
+            let result = engine.triage_pr_for_number(&repo, pr_number).await;
+            let (ok, message) = match result {
+                Ok(outcome) => (true, outcome.full_note()),
+                Err(e) => (false, e.to_string()),
+            };
+            if ok {
+                if let Err(e) = engine.refresh_store().await {
+                    engine.emit_log("warn", format!("post-triage hydrate: {e}"));
+                }
+            }
+            let _ = engine.events.send(AppEvent::WorkflowFinished {
+                workflow_id: wf,
+                ok,
+                message,
+            });
+        });
+    }
+
+    async fn triage_pr_for_number(&self, repo: &str, pr_number: u32) -> Result<crate::agent::triage::TriageOutcome> {
+        use crate::agent::parse::ParsedPrLine;
+        use crate::agent::triage::triage_pr;
+        use crate::github::helpers::gh_tool;
+
+        let classify_skills = load_classify_skills_for_triage(&[])?;
+
+        let pr_line = {
+            let s = self.state.read().await;
+            s.prs
+                .iter()
+                .find(|p| p.repo == repo && p.number == pr_number)
+                .map(|p| ParsedPrLine {
+                    number: p.number,
+                    title: p.title.clone(),
+                    author: p.author.clone(),
+                    ci: p.ci_summary.clone(),
+                    review: p.review_summary.clone(),
+                    is_draft: p.is_draft,
+                })
         };
-        let updated = self
-            .store
-            .reclassify_flaky(fingerprint, classification)
+
+        let pr_line = if let Some(p) = pr_line {
+            p
+        } else {
+            use crate::agent::parse::parse_pr_line;
+
+            let list_text = gh_tool(
+                self.github.as_ref(),
+                "pr_list_open",
+                serde_json::json!({ "repo": repo, "limit": 50 }),
+            )
             .await?;
-        self.refresh_store().await?;
-        Ok(updated)
+            list_text
+                .lines()
+                .find_map(|line| {
+                    let p = parse_pr_line(line)?;
+                    (p.number == pr_number).then_some(p)
+                })
+                .ok_or_else(|| {
+                    crate::error::CoworkerError::Workflow(format!(
+                        "PR #{pr_number} not found in {repo}"
+                    ))
+                })?
+        };
+
+        triage_pr(
+            &self.config,
+            self.github.as_ref(),
+            self.llm.as_ref(),
+            self.store.as_ref(),
+            &classify_skills,
+            repo,
+            &pr_line,
+            Some(&self.events),
+        )
+        .await
     }
 
     pub fn spawn_background(self: Arc<Self>) {
@@ -169,5 +282,22 @@ impl Engine {
     pub fn spawn_scheduler(self: Arc<Self>) {
         let scheduler = scheduler::Scheduler::from_config(&self.config);
         scheduler.spawn(self);
+    }
+
+    /// Re-measure GitHub harness / LLM latency (Config tab `R`).
+    pub async fn refresh_connectivity_probes(&self) {
+        let llm_latency_ms = crate::llm::ollama::probe_latency_ms(&self.config.llm).await;
+        let llm_online = llm_latency_ms.is_some();
+        let github_latency_ms = if self.github.is_available() {
+            crate::github::helpers::probe_github_latency_ms(self.github.as_ref()).await
+        } else {
+            None
+        };
+        let github_ok = self.github.is_available();
+        let mut s = self.state.write().await;
+        s.github_ok = github_ok;
+        s.llm_ok = llm_online;
+        s.github_latency_ms = github_latency_ms;
+        s.llm_latency_ms = llm_latency_ms;
     }
 }

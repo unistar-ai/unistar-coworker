@@ -4,7 +4,10 @@ use std::time::Duration;
 
 mod approval_modal;
 mod chat;
+mod clipboard;
 mod context_panel;
+mod detail_cache;
+mod digest_nav;
 mod markdown;
 mod scroll;
 mod spinner;
@@ -14,10 +17,10 @@ use theme::ThemePalette;
 
 use approval_modal::{
     draw_approval_modal, handle_approval_modal_key, handle_approval_modal_mouse,
-    spawn_approval_decision,
 };
 use chat::{draw_chat, focus_pane_at, scroll_page_down, scroll_page_up};
-use context_panel::{context_status_note, scroll_context_page_down, scroll_context_page_up};
+use detail_cache::{cached_detail_markdown_lines, detail_body_cache_key};
+use context_panel::{context_status_spans, scroll_context_page_down, scroll_context_page_up, store_status_spans};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -28,13 +31,15 @@ use ratatui::widgets::{
 };
 use ratatui::DefaultTerminal;
 use std::io::{stdout, Write};
+use std::time::Instant;
 use tokio::sync::broadcast;
 use unicode_width::UnicodeWidthStr;
 
-use crate::agent::chat_loop::{is_chat_cancelled, ChatProgress};
+use crate::agent::chat_loop::is_chat_cancelled;
 use crate::app::{
-    export_chat_transcript_markdown, load_chat_session_ui, AppEvent, AppState, ChatPaneFocus,
-    ChatPendingApproval, SharedState, Tab,
+    apply_event, export_chat_transcript_markdown, hydrate_from_store, load_chat_session_ui,
+    spawn_approval_decision, AppEvent, AppState, ChatPaneFocus, DashboardSection, SharedState,
+    Tab,
 };
 use crate::engine::Engine;
 use crate::error::Result;
@@ -51,12 +56,31 @@ pub async fn run(
     list_state.select(Some(0));
 
     enable_terminal_modes()?;
+    spinner::reset_session();
+
+    const ATTACH_POLL: Duration = Duration::from_secs(2);
+    let mut last_attach_poll = Instant::now();
 
     let result = async {
         loop {
             while let Ok(ev) = events_rx.try_recv() {
                 apply_event(&state, ev).await;
             }
+
+            if {
+                let s = state.read().await;
+                s.attach_mode
+            } && last_attach_poll.elapsed() >= ATTACH_POLL
+            {
+                let prev = state.read().await.approvals.len();
+                if hydrate_from_store(&state, store.as_ref()).await.is_ok() {
+                    let mut s = state.write().await;
+                    s.maybe_notify_new_workflow_approvals(prev);
+                }
+                last_attach_poll = Instant::now();
+            }
+
+            maybe_request_pr_overview(&state, &engine).await;
 
             {
                 let s = state.read().await;
@@ -71,7 +95,7 @@ pub async fn run(
                         break;
                     }
                     Event::Mouse(mouse)
-                        if handle_mouse(mouse, terminal, &state, &engine).await? =>
+                        if handle_mouse(mouse, terminal, &state, &engine, &mut list_state).await? =>
                     {
                         break;
                     }
@@ -109,176 +133,6 @@ fn disable_terminal_modes() -> std::io::Result<()> {
 fn is_context_toggle_key(key: &KeyEvent) -> bool {
     !key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('＼'))
-}
-
-async fn apply_event(state: &SharedState, ev: AppEvent) {
-    let mut s = state.write().await;
-    match ev {
-        AppEvent::StoreUpdated => {
-            let prev = s.last_pending_approval_count;
-            s.last_pending_approval_count = s.approvals.len();
-            if !s.config.chat.auto_approve_mutations
-                && s.approval_dialog.is_none()
-                && s.approvals.len() > prev
-            {
-                if let Some(approval) = s.approvals.first().cloned() {
-                    s.open_approval_dialog_from(&approval);
-                }
-            }
-            s.status = "store updated".into();
-        }
-        AppEvent::DigestReady(d) => {
-            s.latest_digest = Some(d.clone());
-            s.status = if d.summary.complete {
-                "digest ready".into()
-            } else {
-                format!(
-                    "digest updating ({} PRs, {} attention)",
-                    d.summary.needs_attention + d.summary.ignorable + d.summary.flaky_candidates,
-                    d.summary.needs_attention
-                )
-            };
-        }
-        AppEvent::LogLine(l) => s.push_log(&l.level, l.message),
-        AppEvent::WorkflowStarted { workflow_id } => {
-            s.engine_busy = true;
-            s.status = format!("running {workflow_id}");
-        }
-        AppEvent::WorkflowFinished {
-            workflow_id,
-            ok,
-            message,
-        } => {
-            s.engine_busy = false;
-            let status = if ok {
-                message.clone()
-            } else {
-                format!("error: {message}")
-            };
-            s.status = status;
-            s.push_log("info", format!("{workflow_id} finished: {message}"));
-        }
-        AppEvent::StatusMessage(m) => {
-            s.status = m.clone();
-            s.push_log("info", m);
-        }
-        AppEvent::ChatProgress(p) => {
-            match &p {
-                ChatProgress::TurnThinking { .. } => {
-                    s.set_chat_streaming(None);
-                    s.set_chat_tool_pending(None);
-                    s.set_chat_tool_running(None);
-                    s.set_chat_reasoning(None);
-                    s.set_chat_reasoning_compressing(false);
-                }
-                ChatProgress::ReasoningPartial { text } => {
-                    s.set_chat_reasoning(Some(text.clone()));
-                }
-                ChatProgress::ReasoningCompressing => {
-                    s.set_chat_reasoning_compressing(true);
-                }
-                ChatProgress::ToolPending { label } => {
-                    s.set_chat_streaming(None);
-                    s.set_chat_tool_pending(Some(label.clone()));
-                }
-                ChatProgress::AssistantPartial { text } => {
-                    s.set_chat_tool_pending(None);
-                    s.set_chat_reasoning(None);
-                    if !crate::agent::context::is_tool_result_transcript(text) {
-                        s.set_chat_streaming(Some(text.clone()));
-                    }
-                }
-                ChatProgress::ContextSnapshot(snapshot) => {
-                    s.set_chat_context(snapshot.clone());
-                }
-                ChatProgress::ToolStart { name, .. } => {
-                    s.set_chat_streaming(None);
-                    s.set_chat_tool_pending(None);
-                    s.set_chat_reasoning(None);
-                    s.set_chat_reasoning_compressing(false);
-                    s.set_chat_tool_running(Some(name.clone()));
-                    s.push_chat_line(p.display_line());
-                }
-                ChatProgress::ToolDone { output_preview, .. } => {
-                    s.set_chat_tool_pending(None);
-                    s.set_chat_reasoning(None);
-                    s.set_chat_reasoning_compressing(false);
-                    s.set_chat_tool_running(None);
-                    let idx = s.chat_lines.len();
-                    s.push_chat_line(p.display_line());
-                    s.record_chat_tool_output(idx, output_preview.clone());
-                }
-                ChatProgress::ApprovalQueued {
-                    approval_id,
-                    session_id,
-                    tool_name,
-                    tool_args_json,
-                    description,
-                } => {
-                    s.set_chat_streaming(None);
-                    s.set_chat_tool_pending(None);
-                    s.set_chat_reasoning(None);
-                    s.set_chat_reasoning_compressing(false);
-                    s.set_chat_tool_running(None);
-                    let idx = s.chat_lines.len();
-                    s.push_chat_line(p.display_line());
-                    s.set_chat_pending_approval(Some(ChatPendingApproval {
-                        id: *approval_id,
-                        session_id: *session_id,
-                        tool_name: tool_name.clone(),
-                        tool_args_json: tool_args_json.clone(),
-                        line_index: idx,
-                    }));
-                    if !s.config.chat.auto_approve_mutations {
-                        s.open_approval_dialog(
-                            *approval_id,
-                            tool_name.clone(),
-                            description.clone(),
-                        );
-                    }
-                }
-                ChatProgress::ApprovalResolved {
-                    approval_id,
-                    approved,
-                    detail,
-                    ..
-                } => {
-                    s.set_chat_streaming(None);
-                    s.set_chat_tool_pending(None);
-                    s.set_chat_reasoning(None);
-                    s.set_chat_reasoning_compressing(false);
-                    s.set_chat_tool_running(None);
-                    s.push_chat_line(p.display_line());
-                    s.close_approval_dialog();
-                    s.resolve_chat_approval(*approval_id, *approved, detail);
-                }
-                ChatProgress::ReasoningSummary { .. } => {
-                    s.set_chat_streaming(None);
-                    s.set_chat_tool_pending(None);
-                    s.set_chat_reasoning(None);
-                    s.set_chat_reasoning_compressing(false);
-                    s.set_chat_tool_running(None);
-                }
-                _ if p.show_in_log() => {
-                    s.push_chat_line(p.display_line());
-                }
-                _ => {}
-            }
-            let status = p.status_text();
-            if !status.is_empty() {
-                s.status = status;
-            }
-        }
-        AppEvent::ChatReply => {
-            s.chat_busy = false;
-            s.set_chat_streaming(None);
-            s.set_chat_tool_pending(None);
-            s.set_chat_tool_running(None);
-            s.set_chat_reasoning(None);
-            s.set_chat_reasoning_compressing(false);
-            s.status = "chat ready".into();
-        }
-    }
 }
 
 async fn handle_key(
@@ -325,33 +179,6 @@ async fn handle_key(
         KeyCode::Char('3') => set_tab(state, Tab::Approvals, list_state).await,
         KeyCode::Char('4') => set_tab(state, Tab::Logs, list_state).await,
         KeyCode::Char('5') => set_tab(state, Tab::Config, list_state).await,
-        KeyCode::Char('6') => set_tab(state, Tab::Flaky, list_state).await,
-        KeyCode::Char('7') => {
-            let enabled = {
-                let s = state.read().await;
-                s.config
-                    .workflows
-                    .get("release-duty")
-                    .map(|w| w.enabled)
-                    .unwrap_or(false)
-            };
-            if enabled {
-                set_tab(state, Tab::Release, list_state).await;
-            }
-        }
-        KeyCode::Char('8') => {
-            let enabled = {
-                let s = state.read().await;
-                s.config
-                    .workflows
-                    .get("issue-triage")
-                    .map(|w| w.enabled)
-                    .unwrap_or(false)
-            };
-            if enabled {
-                set_tab(state, Tab::Issues, list_state).await;
-            }
-        }
         KeyCode::Char('?') => {
             let mut s = state.write().await;
             if s.config.chat.enabled {
@@ -373,16 +200,10 @@ async fn handle_key(
             list_state.select(Some(0));
         }
         KeyCode::Char('m') => {
-            let engine = Arc::clone(engine);
-            tokio::spawn(async move {
-                let _ = engine.run_workflow("my-pr-brief").await;
-            });
+            set_tab(state, Tab::Prs, list_state).await;
         }
         KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let engine = Arc::clone(engine);
-            tokio::spawn(async move {
-                let _ = engine.run_workflow("ci-efficiency").await;
-            });
+            set_tab(state, Tab::Chat, list_state).await;
         }
         KeyCode::Char('/') => {
             let mut s = state.write().await;
@@ -411,26 +232,6 @@ async fn handle_key(
                 s.status = format!("PR sort: {}", s.pr_sort.label());
             }
         }
-        KeyCode::Char('A') => {
-            let alert_id = {
-                let s = state.read().await;
-                if s.tab == Tab::Dashboard {
-                    dashboard_alert_at(&s, s.selected_index).map(|a| a.id)
-                } else {
-                    None
-                }
-            };
-            if let Some(id) = alert_id {
-                let engine = Arc::clone(engine);
-                let state = state.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = engine.acknowledge_main_alert(&id).await {
-                        let mut s = state.write().await;
-                        s.push_log("error", format!("ack failed: {e}"));
-                    }
-                });
-            }
-        }
         KeyCode::Char('r') => {
             let engine = Arc::clone(engine);
             tokio::spawn(async move {
@@ -438,16 +239,21 @@ async fn handle_key(
             });
         }
         KeyCode::Char('R') => {
-            let engine = Arc::clone(engine);
-            tokio::spawn(async move {
-                let _ = engine.run_workflow("release-duty").await;
-            });
-        }
-        KeyCode::Char('g') => {
-            let engine = Arc::clone(engine);
-            tokio::spawn(async move {
-                let _ = engine.run_workflow("main-guard").await;
-            });
+            let on_config = state.read().await.tab == Tab::Config;
+            if on_config {
+                let engine = Arc::clone(engine);
+                let state = state.clone();
+                tokio::spawn(async move {
+                    engine.refresh_connectivity_probes().await;
+                    let mut s = state.write().await;
+                    s.status = "connectivity probes refreshed".into();
+                });
+            } else {
+                let engine = Arc::clone(engine);
+                tokio::spawn(async move {
+                    let _ = engine.run_workflow("review-radar").await;
+                });
+            }
         }
         KeyCode::Char('v') => {
             let engine = Arc::clone(engine);
@@ -455,127 +261,110 @@ async fn handle_key(
                 let _ = engine.run_workflow("review-radar").await;
             });
         }
-        KeyCode::Char('f') => {
-            let on_flaky = state.read().await.tab == Tab::Flaky;
-            if on_flaky {
-                let mut s = state.write().await;
-                let repos: Vec<_> = s.config.repos.clone();
-                s.flaky_repo_filter = match &s.flaky_repo_filter {
-                    None => repos.first().cloned(),
-                    Some(cur) => repos
-                        .iter()
-                        .position(|r| r == cur)
-                        .and_then(|i| repos.get(i + 1).cloned()),
-                };
-                s.selected_index = 0;
-                list_state.select(Some(0));
-                s.status = format!(
-                    "Flaky repo filter: {}",
-                    s.flaky_repo_filter.as_deref().unwrap_or("all")
-                );
-                drop(s);
-                let _ = engine.refresh_store().await;
-            } else {
-                let engine = Arc::clone(engine);
-                tokio::spawn(async move {
-                    let _ = engine.run_workflow("flaky-govern").await;
-                });
-            }
-        }
-        KeyCode::Char('[') => {
+        KeyCode::Char('z') => {
             let mut s = state.write().await;
-            if s.tab == Tab::Flaky {
-                s.flaky_since_days = 7;
-                s.selected_index = 0;
-                list_state.select(Some(0));
-                s.status = "Flaky window: 7d".into();
-                drop(s);
-                let _ = engine.refresh_store().await;
+            if s.tab == Tab::Dashboard {
+                if let Some(kind) = dashboard_row_kind_at(&s, s.selected_index) {
+                    if let Some(section) = dashboard_section_for_row(&kind) {
+                        s.toggle_dashboard_section_fold(section);
+                        clamp_dashboard_selection(&mut s);
+                        list_state.select(Some(s.selected_index));
+                        s.status = format!(
+                            "Dashboard {} {}",
+                            section.label(),
+                            if s.dashboard_fold.is_collapsed(section) {
+                                "collapsed"
+                            } else {
+                                "expanded"
+                            }
+                        );
+                    }
+                }
             }
         }
-        KeyCode::Char(']') => {
+        KeyCode::Char('Z') => {
             let mut s = state.write().await;
-            if s.tab == Tab::Flaky {
-                s.flaky_since_days = 30;
-                s.selected_index = 0;
-                list_state.select(Some(0));
-                s.status = "Flaky window: 30d".into();
-                drop(s);
-                let _ = engine.refresh_store().await;
+            if s.tab == Tab::Dashboard {
+                if let Some(title) = cycle_digest_section_fold(&mut s) {
+                    let folded = s.digest_folded_sections.contains(&title);
+                    s.reset_detail_scroll();
+                    s.status = format!(
+                        "digest section '{title}' {}",
+                        if folded { "folded" } else { "expanded" }
+                    );
+                }
             }
         }
-        KeyCode::Char('U') => {
-            let fp = {
+        KeyCode::Char('t') => {
+            let triage = {
                 let s = state.read().await;
-                if s.tab == Tab::Flaky {
-                    s.flaky_tests
+                if s.tab == Tab::Prs && s.github_ok {
+                    s.sorted_filtered_prs()
                         .get(s.selected_index)
-                        .map(|t| t.fingerprint.clone())
+                        .map(|pr| (pr.repo.clone(), pr.number))
                 } else {
                     None
                 }
             };
-            if let Some(fingerprint) = fp {
+            if let Some((repo, number)) = triage {
                 let engine = Arc::clone(engine);
-                let state = state.clone();
-                tokio::spawn(async move {
-                    match engine.reclassify_flaky(&fingerprint, true).await {
-                        Ok(n) => {
-                            let mut s = state.write().await;
-                            s.status = format!("Marked {n} incident(s) as user-flaky");
-                        }
-                        Err(e) => {
-                            let mut s = state.write().await;
-                            s.push_log("error", format!("reclassify: {e}"));
-                        }
-                    }
-                });
+                engine.spawn_triage_pr(repo, number);
             }
         }
-        KeyCode::Char('u') => {
-            let fp = {
-                let s = state.read().await;
-                if s.tab == Tab::Flaky {
-                    s.flaky_tests
-                        .get(s.selected_index)
-                        .map(|t| t.fingerprint.clone())
-                } else {
-                    None
-                }
-            };
-            if let Some(fingerprint) = fp {
-                let engine = Arc::clone(engine);
-                let state = state.clone();
-                tokio::spawn(async move {
-                    match engine.reclassify_flaky(&fingerprint, false).await {
-                        Ok(n) => {
-                            let mut s = state.write().await;
-                            s.status = format!("Marked {n} incident(s) as real bug");
-                        }
-                        Err(e) => {
-                            let mut s = state.write().await;
-                            s.push_log("error", format!("reclassify: {e}"));
-                        }
-                    }
-                });
-            }
+        KeyCode::Char('p') => {
+            jump_to_pr_from_context(state, list_state).await;
         }
         KeyCode::Char('o') => {
-            let engine = Arc::clone(engine);
-            tokio::spawn(async move {
-                let _ = engine.run_workflow("oncall-handoff").await;
-            });
+            let pr_refresh = {
+                let s = state.read().await;
+                if s.tab == Tab::Prs && s.github_ok {
+                    s.sorted_filtered_prs()
+                        .get(s.selected_index)
+                        .map(|pr| (pr.repo.clone(), pr.number))
+                } else {
+                    None
+                }
+            };
+            if let Some((repo, number)) = pr_refresh {
+                let key = AppState::pr_overview_key(&repo, number);
+                {
+                    let mut s = state.write().await;
+                    s.pr_overview_cache.remove(&key);
+                    s.pr_overview_fetching = Some(key.clone());
+                    s.status = format!("refreshing overview {repo}#{number}");
+                }
+                let engine = Arc::clone(engine);
+                tokio::spawn(async move {
+                    engine.fetch_pr_overview(repo, number).await;
+                });
+            }
         }
         KeyCode::Char('y') => {
             try_decide_approval(state, engine, true).await;
         }
         KeyCode::Char('n') => {
-            try_decide_approval(state, engine, false).await;
+            let tab = state.read().await.tab;
+            if tab == Tab::Dashboard {
+                let mut s = state.write().await;
+                if let Some(msg) = cycle_dashboard_digest_pr(&mut s, 1) {
+                    s.status = msg;
+                }
+            } else if tab == Tab::Approvals {
+                try_decide_approval(state, engine, false).await;
+            }
+        }
+        KeyCode::Char('N') => {
+            let mut s = state.write().await;
+            if s.tab == Tab::Dashboard {
+                if let Some(msg) = cycle_dashboard_digest_pr(&mut s, -1) {
+                    s.status = msg;
+                }
+            }
         }
         KeyCode::Char('{')
             if {
                 let s = state.read().await;
-                s.tab != Tab::Chat && s.tab != Tab::Flaky
+                s.tab != Tab::Chat
             } =>
         {
             let mut s = state.write().await;
@@ -584,7 +373,7 @@ async fn handle_key(
         KeyCode::Char('}')
             if {
                 let s = state.read().await;
-                s.tab != Tab::Chat && s.tab != Tab::Flaky
+                s.tab != Tab::Chat
             } =>
         {
             let mut s = state.write().await;
@@ -611,7 +400,19 @@ async fn handle_key(
             }
         }
         KeyCode::Enter => {
-            try_submit_chat(state, engine, store).await;
+            let jump_digest = {
+                let s = state.read().await;
+                s.tab == Tab::Dashboard
+                    && matches!(
+                        dashboard_row_kind_at(&s, s.selected_index),
+                        Some(DashboardRowKind::Digest(_))
+                    )
+            };
+            if jump_digest {
+                jump_to_pr_from_context(state, list_state).await;
+            } else {
+                try_submit_chat(state, engine, store).await;
+            }
         }
         KeyCode::Backspace => {}
         _ => {}
@@ -628,23 +429,10 @@ async fn handle_chat_key(
     list_state: &mut ListState,
 ) -> Result<bool> {
     match key.code {
-        KeyCode::Char(c @ '0'..='8') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(c @ '0'..='5') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             let snapshot = {
                 let s = state.read().await;
-                (
-                    s.chat_input.is_empty(),
-                    s.config.chat.enabled,
-                    s.config
-                        .workflows
-                        .get("release-duty")
-                        .map(|w| w.enabled)
-                        .unwrap_or(false),
-                    s.config
-                        .workflows
-                        .get("issue-triage")
-                        .map(|w| w.enabled)
-                        .unwrap_or(false),
-                )
+                (s.chat_input.is_empty(), s.config.chat.enabled)
             };
             if !snapshot.0 {
                 let mut s = state.write().await;
@@ -659,9 +447,6 @@ async fn handle_chat_key(
                     '3' => set_tab(state, Tab::Approvals, list_state).await,
                     '4' => set_tab(state, Tab::Logs, list_state).await,
                     '5' => set_tab(state, Tab::Config, list_state).await,
-                    '6' => set_tab(state, Tab::Flaky, list_state).await,
-                    '7' if snapshot.2 => set_tab(state, Tab::Release, list_state).await,
-                    '8' if snapshot.3 => set_tab(state, Tab::Issues, list_state).await,
                     _ => {}
                 }
             }
@@ -941,6 +726,7 @@ async fn try_submit_chat(
                     s.set_chat_tool_pending(None);
                     s.set_chat_tool_running(None);
                     s.set_chat_reasoning(None);
+                    s.set_chat_activity_flow(None);
                     s.set_chat_reasoning_compressing(false);
                     s.status = "chat ready".into();
                 }
@@ -951,6 +737,7 @@ async fn try_submit_chat(
                     s.set_chat_tool_pending(None);
                     s.set_chat_tool_running(None);
                     s.set_chat_reasoning(None);
+                    s.set_chat_activity_flow(None);
                     s.set_chat_reasoning_compressing(false);
                     s.status = "chat ready".into();
                 }
@@ -961,6 +748,7 @@ async fn try_submit_chat(
                     s.set_chat_tool_pending(None);
                     s.set_chat_tool_running(None);
                     s.set_chat_reasoning(None);
+                    s.set_chat_activity_flow(None);
                     s.set_chat_reasoning_compressing(false);
                     s.push_chat_line(format!("error> {e}"));
                     s.status = format!("chat error: {e}");
@@ -983,19 +771,24 @@ async fn handle_chat_slash_command(
     match trimmed {
         "/clear" => {
             let mut s = state.write().await;
-            s.clear_chat_transcript();
+            s.reset_chat_session();
             s.status = "chat cleared".into();
         }
         "/new" => {
             let mut s = state.write().await;
-            s.clear_chat_transcript();
-            s.chat_session_id = None;
+            s.reset_chat_session();
             s.status = "new chat session".into();
         }
         "/help" => {
             let mut s = state.write().await;
             s.push_chat_line(
-                "system> /clear /new — transcript; /sessions — list; /session <id> — switch; /export [path] — save markdown; /approve /deny — pending approval; Shift+Enter — newline; ↑/↓ — history",
+                "system> **Slash**: /clear /new — reset transcript + LLM context; /sessions /session <id> — history; /export [path] — markdown; /approve /deny — pending approval",
+            );
+            s.push_chat_line(
+                "system> **Chat**: Enter send; Shift+Enter newline; ↑/↓ input history; j/k scroll msgs; o expand tool (input empty); Esc cancel; End latest; \\ toggle ctx panel",
+            );
+            s.push_chat_line(
+                "system> **Tabs**: Tab/BackTab cycle; 1–8 jump; q quit; Ctrl+c quit; ? open Chat; Dashboard r/R/g/v/m/c/f/o/A Enter/p open PR; PRs / filter s sort t triage; Flaky u/U reclassify",
             );
             s.status = "chat help".into();
         }
@@ -1118,32 +911,230 @@ async fn set_tab(state: &SharedState, tab: Tab, list_state: &mut ListState) {
     list_state.select(Some(0));
 }
 
-fn dashboard_security_count(state: &AppState) -> usize {
-    usize::from(state.security_digest_md.is_some())
+#[derive(Debug, Clone)]
+enum DashboardRowKind {
+    SectionHeader(DashboardSection),
+    Digest(usize),
+    Placeholder,
 }
 
-fn dashboard_alert_at(state: &AppState, index: usize) -> Option<&crate::store::MainAlert> {
-    state.main_alerts.get(index)
+struct DashboardRow {
+    kind: DashboardRowKind,
+    label: String,
 }
 
-fn dashboard_alert_count(state: &AppState) -> usize {
-    state.main_alerts.len()
+fn dashboard_rows(state: &AppState) -> Vec<DashboardRow> {
+    let fold = state.dashboard_fold;
+    let mut rows = Vec::new();
+    let digest_n = state.digest_history.len();
+    rows.push(DashboardRow {
+        kind: DashboardRowKind::SectionHeader(DashboardSection::Digests),
+        label: format!(
+            "{} Daily digests ({digest_n})",
+            if fold.digests { "▸" } else { "▾" }
+        ),
+    });
+    if !fold.digests {
+        if digest_n == 0 {
+            rows.push(DashboardRow {
+                kind: DashboardRowKind::Placeholder,
+                label: "  No digest — press r".into(),
+            });
+        } else {
+            for (i, d) in state.digest_history.iter().enumerate() {
+                let updating = if d.summary.complete {
+                    ""
+                } else {
+                    " ◷"
+                };
+                rows.push(DashboardRow {
+                    kind: DashboardRowKind::Digest(i),
+                    label: format!(
+                        "  ▸ {} — attention:{} flaky:{} policy:{} ok:{}{} ({})",
+                        d.date,
+                        d.summary.needs_attention,
+                        d.summary.flaky_candidates,
+                        d.summary.policy_gates,
+                        d.summary.ignorable,
+                        updating,
+                        d.summary.duration_label()
+                    ),
+                });
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        rows.push(DashboardRow {
+            kind: DashboardRowKind::Placeholder,
+            label: "No digest — press r".into(),
+        });
+    }
+    rows
+}
+
+fn dashboard_row_kind_at(state: &AppState, index: usize) -> Option<DashboardRowKind> {
+    dashboard_rows(state)
+        .get(index)
+        .map(|row| row.kind.clone())
+}
+
+fn dashboard_section_for_row(kind: &DashboardRowKind) -> Option<DashboardSection> {
+    match kind {
+        DashboardRowKind::SectionHeader(section) => Some(*section),
+        DashboardRowKind::Digest(_) => Some(DashboardSection::Digests),
+        DashboardRowKind::Placeholder => None,
+    }
+}
+
+fn clamp_dashboard_selection(state: &mut AppState) {
+    let max = dashboard_rows(state).len().saturating_sub(1);
+    if state.selected_index > max {
+        state.selected_index = max;
+        state.reset_detail_scroll();
+    }
+}
+
+fn dashboard_digest_body(state: &AppState, digest_idx: usize) -> Option<String> {
+    if digest_idx == 0 {
+        state
+            .latest_digest
+            .as_ref()
+            .map(|d| d.body_md.clone())
+    } else {
+        state.digest_history.get(digest_idx).and_then(|meta| {
+            state
+                .digest_bodies
+                .get(&meta.date)
+                .cloned()
+                .or_else(|| {
+                    Some(format!(
+                        "Digest {}\nattention: {}  flaky: {}  policy: {}  ok: {}\nrun time: {}",
+                        meta.date,
+                        meta.summary.needs_attention,
+                        meta.summary.flaky_candidates,
+                        meta.summary.policy_gates,
+                        meta.summary.ignorable,
+                        meta.summary.duration_label()
+                    ))
+                })
+        })
+    }
+}
+
+fn cycle_digest_section_fold(state: &mut AppState) -> Option<String> {
+    let kind = dashboard_row_kind_at(state, state.selected_index)?;
+    let digest_idx = match kind {
+        DashboardRowKind::Digest(idx) => idx,
+        _ => return None,
+    };
+    let body = dashboard_digest_body(state, digest_idx)?;
+    let sections = markdown::markdown_h2_section_titles(&body);
+    if sections.is_empty() {
+        return None;
+    }
+    let next = sections
+        .iter()
+        .find(|title| !state.digest_folded_sections.contains(title.as_str()))
+        .or_else(|| sections.first())?;
+    let title = next.clone();
+    state.toggle_digest_section_fold(&title);
+    Some(title)
+}
+
+fn dashboard_digest_pr_refs(state: &AppState, digest_idx: usize) -> Vec<(String, u32)> {
+    let fallback = state
+        .config
+        .repos
+        .first()
+        .map(String::as_str)
+        .unwrap_or("unknown/repo");
+    dashboard_digest_body(state, digest_idx)
+        .map(|body| digest_nav::extract_pr_refs_from_digest(&body, fallback))
+        .unwrap_or_default()
+}
+
+fn selected_dashboard_digest_pr(state: &AppState) -> Option<(String, u32)> {
+    let digest_idx = match dashboard_row_kind_at(state, state.selected_index)? {
+        DashboardRowKind::Digest(i) => i,
+        _ => return None,
+    };
+    let refs = dashboard_digest_pr_refs(state, digest_idx);
+    if refs.is_empty() {
+        let fallback = state.config.repos.first().map(String::as_str)?;
+        return dashboard_digest_body(state, digest_idx).and_then(|body| {
+            digest_nav::pr_ref_at_source_line(&body, state.detail_scroll_line as usize, fallback)
+        });
+    }
+    let idx = if state.dashboard_digest_pr_digest_idx == Some(digest_idx) {
+        state
+            .dashboard_digest_pr_index
+            .min(refs.len().saturating_sub(1))
+    } else {
+        0
+    };
+    refs.get(idx).cloned()
+}
+
+fn cycle_dashboard_digest_pr(state: &mut AppState, delta: isize) -> Option<String> {
+    let digest_idx = match dashboard_row_kind_at(state, state.selected_index)? {
+        DashboardRowKind::Digest(i) => i,
+        _ => return None,
+    };
+    let refs = dashboard_digest_pr_refs(state, digest_idx);
+    if refs.is_empty() {
+        return None;
+    }
+    if state.dashboard_digest_pr_digest_idx != Some(digest_idx) {
+        state.dashboard_digest_pr_digest_idx = Some(digest_idx);
+        state.dashboard_digest_pr_index = 0;
+    }
+    let len = refs.len() as isize;
+    let next = (state.dashboard_digest_pr_index as isize + delta).rem_euclid(len) as usize;
+    state.dashboard_digest_pr_index = next;
+    let (repo, number) = &refs[next];
+    Some(format!(
+        "digest PR {}/{}: {repo}#{number} (Enter/p open)",
+        next + 1,
+        refs.len()
+    ))
+}
+
+enum JumpTarget {
+    Pr { repo: String, number: u32 },
+}
+
+fn jump_target_from_state(state: &AppState) -> Option<JumpTarget> {
+    match state.tab {
+        Tab::Dashboard => match dashboard_row_kind_at(state, state.selected_index)? {
+            DashboardRowKind::Digest(_) => {
+                selected_dashboard_digest_pr(state).map(|(repo, number)| JumpTarget::Pr {
+                    repo,
+                    number,
+                })
+            }
+            _ => None,
+        },
+        Tab::Prs => {
+            let prs = state.sorted_filtered_prs();
+            let p = prs.get(state.selected_index)?;
+            Some(JumpTarget::Pr {
+                repo: p.repo.clone(),
+                number: p.number,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn list_len(s: &AppState) -> usize {
     match s.tab {
         Tab::Chat => s.chat_lines.len().max(1),
-        Tab::Dashboard => {
-            { dashboard_alert_count(s) + dashboard_security_count(s) + s.digest_history.len() }
-                .max(1)
-        }
+        Tab::Dashboard => dashboard_rows(s).len().max(1),
         Tab::Prs => s.sorted_filtered_prs().len().max(1),
         Tab::Approvals => s.approvals.len().max(1),
         Tab::Logs => s.filtered_logs().len().max(1),
         Tab::Config => 4,
-        Tab::Flaky => s.flaky_tests.len().max(1),
-        Tab::Release => s.backport_queue.len().max(1),
-        Tab::Issues => s.issues.len().max(1),
     }
 }
 
@@ -1159,11 +1150,93 @@ fn ui_content_area(full: Rect) -> Rect {
         .split(full)[2]
 }
 
+fn list_detail_panes(content: Rect) -> (Rect, Rect) {
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .split(content);
+    (panes[0], panes[1])
+}
+
+fn scroll_list_selection(s: &mut AppState, list_state: &mut ListState, delta: i32) {
+    if s.tab == Tab::Chat {
+        return;
+    }
+    let max = list_len(s).saturating_sub(1);
+    let next = if delta < 0 {
+        s.selected_index.saturating_sub(1)
+    } else {
+        (s.selected_index + 1).min(max)
+    };
+    if next != s.selected_index {
+        s.selected_index = next;
+        s.reset_detail_scroll();
+        list_state.select(Some(s.selected_index));
+    }
+}
+
+async fn maybe_request_pr_overview(state: &SharedState, engine: &Arc<Engine>) {
+    let (repo, number, key) = {
+        let s = state.read().await;
+        if s.tab != Tab::Prs || !s.github_ok {
+            return;
+        }
+        let filtered = s.sorted_filtered_prs();
+        let Some(pr) = filtered.get(s.selected_index) else {
+            return;
+        };
+        let key = AppState::pr_overview_key(&pr.repo, pr.number);
+        if s.pr_overview_cache.contains_key(&key)
+            || s.pr_overview_fetching.as_ref() == Some(&key)
+        {
+            return;
+        }
+        (pr.repo.clone(), pr.number, key)
+    };
+    {
+        let mut s = state.write().await;
+        if s.pr_overview_cache.contains_key(&key) {
+            return;
+        }
+        s.pr_overview_fetching = Some(key);
+    }
+    engine.fetch_pr_overview(repo, number).await;
+}
+
+
+async fn jump_to_pr_from_context(state: &SharedState, list_state: &mut ListState) {
+    let target = {
+        let s = state.read().await;
+        jump_target_from_state(&s)
+    };
+    let Some(target) = target else {
+        return;
+    };
+    let mut s = state.write().await;
+    let (ok, ok_msg, fail_msg) = match target {
+        JumpTarget::Pr { repo, number } => {
+            let ok = s.jump_to_pr(&repo, number);
+            (
+                ok,
+                format!("PRs {repo}#{number}"),
+                format!("PR {repo}#{number} not in store — run daily-work"),
+            )
+        }
+    };
+    if ok {
+        list_state.select(Some(s.selected_index));
+        s.status = ok_msg;
+    } else {
+        s.status = fail_msg;
+    }
+}
+
 async fn handle_mouse(
     mouse: crossterm::event::MouseEvent,
     terminal: &DefaultTerminal,
     state: &SharedState,
     engine: &Arc<Engine>,
+    list_state: &mut ListState,
 ) -> Result<bool> {
     let modal_open = {
         let s = state.read().await;
@@ -1178,28 +1251,132 @@ async fn handle_mouse(
         return Ok(false);
     }
 
+    let size = terminal.size().map_err(|e| {
+        crate::error::CoworkerError::Other(anyhow::anyhow!("terminal size: {e}"))
+    })?;
+    let frame_area = Rect::new(0, 0, size.width, size.height);
+    let content = ui_content_area(frame_area);
+    let (list_area, detail_area) = list_detail_panes(content);
+    let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
+
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             let mut s = state.write().await;
             if s.tab == Tab::Chat && (s.chat_busy || s.chat_input.is_empty()) {
                 s.scroll_focused_chat_pane_line_up();
+            } else if detail_area.contains(pos) && s.tab != Tab::Chat {
+                s.detail_scroll_line = s.detail_scroll_line.saturating_sub(1);
+            } else if list_area.contains(pos) {
+                scroll_list_selection(&mut s, list_state, -1);
             }
         }
         MouseEventKind::ScrollDown => {
             let mut s = state.write().await;
             if s.tab == Tab::Chat && (s.chat_busy || s.chat_input.is_empty()) {
                 s.scroll_focused_chat_pane_line_down();
+            } else if detail_area.contains(pos) && s.tab != Tab::Chat {
+                s.detail_scroll_line = s.detail_scroll_line.saturating_add(1);
+            } else if list_area.contains(pos) {
+                scroll_list_selection(&mut s, list_state, 1);
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            let size = terminal.size().map_err(|e| {
-                crate::error::CoworkerError::Other(anyhow::anyhow!("terminal size: {e}"))
-            })?;
-            let content = ui_content_area(Rect::new(0, 0, size.width, size.height));
+            let header_inner = theme::header_inner_area(frame_area);
+            if header_inner.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                let rel_x = mouse.column.saturating_sub(header_inner.x) as usize;
+                let tabs = {
+                    let s = state.read().await;
+                    Tab::all_for_config(&s.config)
+                };
+                if let Some(tab) = theme::tab_at_column(&tabs, rel_x) {
+                    set_tab(state, tab, list_state).await;
+                    return Ok(false);
+                }
+            }
+            if detail_area.contains(pos) {
+                let tab = {
+                    let s = state.read().await;
+                    s.tab
+                };
+                if tab != Tab::Chat {
+                    let inner = detail_pane_inner(detail_area);
+                    if inner.contains(pos) {
+                        let line = detail_line_at_mouse(inner, mouse.row, {
+                            let s = state.read().await;
+                            s.detail_scroll_line
+                        });
+                        let mut s = state.write().await;
+                        s.detail_select = Some((line, line));
+                        s.detail_selecting = true;
+                        return Ok(false);
+                    }
+                }
+            }
+            let content = ui_content_area(frame_area);
             let mut s = state.write().await;
             if s.tab == Tab::Chat && s.chat_context_visible {
                 if let Some(focus) = focus_pane_at(content, true, mouse.column, mouse.row) {
                     s.chat_pane_focus = focus;
+                }
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let tab = {
+                let s = state.read().await;
+                s.tab
+            };
+            if tab != Tab::Chat && detail_area.contains(pos) {
+                let inner = detail_pane_inner(detail_area);
+                if inner.contains(pos) {
+                    let line = detail_line_at_mouse(inner, mouse.row, {
+                        let s = state.read().await;
+                        s.detail_scroll_line
+                    });
+                    let mut s = state.write().await;
+                    if s.detail_selecting {
+                        if let Some((start, _)) = s.detail_select {
+                            s.detail_select = Some((start, line));
+                        }
+                    }
+                }
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let (selecting, selection, tab, width) = {
+                let s = state.read().await;
+                (
+                    s.detail_selecting,
+                    s.detail_select,
+                    s.tab,
+                    detail_pane_inner(detail_area).width.max(1) as usize,
+                )
+            };
+            if selecting {
+                if let Some((a, b)) = selection {
+                    let lo = a.min(b);
+                    let hi = a.max(b);
+                    let snap = {
+                        let s = state.read().await;
+                        copy_detail_text_from_state(&s, width, lo, hi)
+                    };
+                    let mut s = state.write().await;
+                    s.detail_selecting = false;
+                    s.detail_select = None;
+                    if tab == Tab::Chat {
+                        return Ok(false);
+                    }
+                    if let Some(text) = snap {
+                        if clipboard::copy_text(&text) {
+                            s.status = format!("copied {} line(s) to clipboard", hi - lo + 1);
+                        } else {
+                            s.status =
+                                "copy failed (install pbcopy, wl-copy, or xclip)".into();
+                        }
+                    }
+                } else {
+                    let mut s = state.write().await;
+                    s.detail_selecting = false;
+                    s.detail_select = None;
                 }
             }
         }
@@ -1209,7 +1386,7 @@ async fn handle_mouse(
 }
 
 fn draw_ui(frame: &mut ratatui::Frame, state: &AppState, list_state: &mut ListState) {
-    let th = ThemePalette::from_mode(state.config.tui.theme);
+    let th = ThemePalette::from_tui(&state.config.tui);
     frame.render_widget(Clear, frame.area());
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(th.bg)),
@@ -1246,6 +1423,15 @@ fn draw_ui(frame: &mut ratatui::Frame, state: &AppState, list_state: &mut ListSt
     }
 }
 
+fn tab_header_label(state: &AppState, tab: Tab) -> String {
+    match tab {
+        Tab::Approvals if !state.approvals.is_empty() => {
+            format!("3 Approvals({})", state.approvals.len())
+        }
+        _ => tab.label().to_string(),
+    }
+}
+
 fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: ThemePalette) {
     let tabs_list: Vec<Span> = Tab::all_for_config(&state.config)
         .iter()
@@ -1255,7 +1441,12 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: The
             if i > 0 {
                 spans.push(theme::tab_separator(th));
             }
-            spans.push(theme::tab_spans(th, t.label(), *t == state.tab));
+            let label = tab_header_label(state, *t);
+            let mut span = theme::tab_spans(th, &label, *t == state.tab);
+            if *t == Tab::Approvals && !state.approvals.is_empty() && *t != state.tab {
+                span.style = span.style.fg(th.warn);
+            }
+            spans.push(span);
             spans
         })
         .collect();
@@ -1284,9 +1475,13 @@ fn draw_hints(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: Them
                     format!(
                         "click/←/→: focus  ↑/↓: scroll  \\: hide ctx  Esc: cancel  End: latest{approval_hint}"
                     )
+                } else if state.chat_pane_focus_is_context() {
+                    format!(
+                        "click/←/→: focus  ↑/↓: scroll  j/k: msgs  \\: ctx  End: latest{approval_hint}"
+                    )
                 } else {
                     format!(
-                        "click/←/→: focus  ↑/↓: scroll  o: expand tool (input empty)  j/k: msgs  \\: ctx  End: latest{approval_hint}"
+                        "click/←/→: focus  ↑/↓: scroll  o: expand tool (input empty)  j/k: scroll  \\: ctx  End: latest{approval_hint}"
                     )
                 }
             } else if state.chat_busy {
@@ -1298,13 +1493,13 @@ fn draw_hints(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: Them
             }
         }
         Tab::Dashboard => {
-            "r: daily  R: release  g: guard  v: radar  m: my-prs  c: ci-eff  f: flaky  o: oncall  A: ack  {/}: detail scroll".into()
+            "r: daily  R: radar  v: radar  m: PRs  c: chat  o: refresh overview  Enter/p: open PR  n/N: cycle PR  z: fold list  Z: fold digest  {/}: detail scroll".into()
         }
         Tab::Prs => return frame.render_widget(
             Paragraph::new(theme::hint_bar(
                 th,
                 &format!(
-                    "filter: {} (/)  sort: {} (s)  j/k scroll  q: quit",
+                    "filter: {} (/)  sort: {} (s)  t: triage  o: refresh  p: focus PR  j/k scroll  q: quit",
                     state.pr_filter.label(),
                     state.pr_sort.label()
                 ),
@@ -1312,7 +1507,7 @@ fn draw_hints(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: Them
             .style(Style::default().bg(th.title_bg)),
             area,
         ),
-        Tab::Approvals => "y: approve (runs MCP)  n: deny  q: quit".into(),
+        Tab::Approvals => "y: approve (runs tool)  n: deny  q: quit".into(),
         Tab::Logs => return frame.render_widget(
             Paragraph::new(theme::hint_bar(
                 th,
@@ -1324,10 +1519,7 @@ fn draw_hints(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: Them
             .style(Style::default().bg(th.title_bg)),
             area,
         ),
-        Tab::Release => "backport queue  j/k scroll  q: quit".into(),
-        Tab::Issues => "open issues  j/k scroll  q: quit".into(),
-        Tab::Flaky => "[/]: 7/30d  f: repo filter  u/U: reclassify  j/k scroll  q: quit".into(),
-        _ => "j/k: scroll  {/}: detail  Tab: next  q: quit".into(),
+        _ => "j/k: scroll  {/}: detail  drag detail: copy  Config: R probe  Tab: next  q: quit".into(),
     };
     frame.render_widget(
         Paragraph::new(theme::hint_bar(th, &hint)).style(Style::default().bg(th.title_bg)),
@@ -1344,42 +1536,23 @@ fn draw_list(
 ) {
     let items: Vec<ListItem> = match state.tab {
         Tab::Chat => vec![ListItem::new("use chat pane →")],
-        Tab::Dashboard => {
-            let mut items: Vec<ListItem> = state
-                .main_alerts
-                .iter()
-                .map(|a| {
-                    ListItem::new(format!(
-                        "! {}@{} — {} fail(s) run {}",
-                        a.repo, a.branch, a.consecutive_failures, a.latest_run_id
-                    ))
-                })
-                .collect();
-            if state.security_digest_md.is_some() {
-                items.push(ListItem::new("🔒 Security digest"));
-            }
-            if state.digest_history.is_empty() && items.is_empty() {
-                items.push(ListItem::new("No digest — press r"));
-            } else {
-                items.extend(state.digest_history.iter().map(|d| {
-                    ListItem::new(format!(
-                        "▸ {} — attention:{} flaky:{} policy:{} ok:{} ({})",
-                        d.date,
-                        d.summary.needs_attention,
-                        d.summary.flaky_candidates,
-                        d.summary.policy_gates,
-                        d.summary.ignorable,
-                        d.summary.duration_label()
-                    ))
-                }));
-            }
-            items
-        }
+        Tab::Dashboard => dashboard_rows(state)
+            .into_iter()
+            .map(|row| {
+                let style = match row.kind {
+                    DashboardRowKind::SectionHeader(_) => Style::default()
+                        .fg(th.accent)
+                        .add_modifier(Modifier::BOLD),
+                    _ => Style::default().fg(th.text),
+                };
+                ListItem::new(Line::from(Span::styled(row.label, style)))
+            })
+            .collect(),
         Tab::Prs => {
             let filtered = state.sorted_filtered_prs();
             if filtered.is_empty() {
                 vec![ListItem::new(format!(
-                    "No PRs ({}) — run daily-work or my-pr-brief",
+                    "No PRs ({}) — run daily-work",
                     state.pr_filter.label()
                 ))]
             } else {
@@ -1401,6 +1574,11 @@ fn draw_list(
                             ),
                             Span::styled(trunc(&p.title, 24), Style::default().fg(th.text)),
                             Span::styled(format!(" [{}] ", p.repo), Style::default().fg(th.muted)),
+                            if p.triage_note.is_some() {
+                                Span::styled("◆ ", Style::default().fg(th.accent_dim))
+                            } else {
+                                Span::raw("")
+                            },
                             Span::styled(
                                 p.ci_summary.clone(),
                                 theme::ci_status_style(th, &p.ci_summary),
@@ -1454,62 +1632,16 @@ fn draw_list(
             ListItem::new(format!("repos: {}", state.config.repos.join(", "))),
             ListItem::new(format!("storage: {:?}", state.config.storage.backend)),
             ListItem::new(format!("llm: {}", state.config.llm.model)),
+            ListItem::new(format!(
+                "github: {}",
+                context_panel::format_probe_latency(state.github_ok, state.github_latency_ms)
+            )),
+            ListItem::new(format!(
+                "llm probe: {}",
+                context_panel::format_probe_latency(state.llm_ok, state.llm_latency_ms)
+            )),
             ListItem::new(format!("tui theme: {:?}", state.config.tui.theme)),
         ],
-        Tab::Flaky => {
-            if state.flaky_tests.is_empty() {
-                vec![ListItem::new("No flaky tests")]
-            } else {
-                state
-                    .flaky_tests
-                    .iter()
-                    .map(|t| {
-                        ListItem::new(format!(
-                            "{} x{} {}",
-                            t.test_name.as_deref().unwrap_or(&t.workflow),
-                            t.incident_count,
-                            t.repo
-                        ))
-                    })
-                    .collect()
-            }
-        }
-        Tab::Release => {
-            if state.backport_queue.is_empty() {
-                vec![ListItem::new("No backport queue — run release-duty")]
-            } else {
-                state
-                    .backport_queue
-                    .iter()
-                    .map(|b| {
-                        ListItem::new(format!(
-                            "#{} → {} [{:?}]",
-                            b.pr_number, b.target_branch, b.status
-                        ))
-                    })
-                    .collect()
-            }
-        }
-        Tab::Issues => {
-            if state.issues.is_empty() {
-                vec![ListItem::new("No issues — run issue-triage")]
-            } else {
-                state
-                    .issues
-                    .iter()
-                    .map(|i| {
-                        ListItem::new(format!(
-                            "{}#{} {} @{} [{}]",
-                            i.repo,
-                            i.number,
-                            trunc(&i.title, 32),
-                            i.author,
-                            i.labels
-                        ))
-                    })
-                    .collect()
-            }
-        }
     };
 
     let list = List::new(items)
@@ -1533,6 +1665,7 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: The
         &body,
         render_markdown,
         state.detail_scroll_line,
+        state.detail_select,
     );
 }
 
@@ -1541,104 +1674,138 @@ struct DetailBody {
     markdown: bool,
 }
 
+fn config_connectivity_detail(state: &AppState) -> String {
+    const BAR_W: usize = 24;
+    let github_status = context_panel::format_probe_latency(state.github_ok, state.github_latency_ms);
+    let llm_status = context_panel::format_probe_latency(state.llm_ok, state.llm_latency_ms);
+    let github_bar = state
+        .github_ok
+        .then_some(state.github_latency_ms)
+        .flatten()
+        .map(|ms| format!("\n\n`{}`", context_panel::latency_bar_ms(ms, BAR_W)))
+        .unwrap_or_default();
+    let llm_bar = state
+        .llm_ok
+        .then_some(state.llm_latency_ms)
+        .flatten()
+        .map(|ms| format!("\n\n`{}`", context_panel::latency_bar_ms(ms, BAR_W)))
+        .unwrap_or_default();
+    format!(
+        "## Connectivity\n\n\
+        | Service | Endpoint | Status |\n|---|---|---|\n\
+        | GitHub (`gh`) | {} | {} |\n\
+        | LLM | {} | {} |\n\n\
+        ### Latency (engine start)\n\n\
+        **GitHub** — {github_status}{github_bar}\n\n\
+        **LLM** — {llm_status}{llm_bar}\n\n\
+        _Bar scale: 0–2000ms_\n\n\
+        Press **R** to re-probe GitHub and LLM latency.\n\n\
+        ## Enabled workflows\n\n{}",
+        state.config.github.gh_command,
+        if state.github_ok { "ok" } else { "offline" },
+        state.config.llm.base_url,
+        if state.llm_ok { "ok" } else { "offline" },
+        state
+            .config
+            .workflows
+            .iter()
+            .filter(|(_, w)| w.enabled)
+            .map(|(k, _)| format!("- `{k}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 fn detail_body(state: &AppState) -> (String, bool) {
     let view = match state.tab {
         Tab::Chat => DetailBody {
             text: String::new(),
             markdown: false,
         },
-        Tab::Dashboard => {
-            let alert_n = dashboard_alert_count(state);
-            let sec_n = dashboard_security_count(state);
-            if state.selected_index < alert_n {
+        Tab::Dashboard => match dashboard_row_kind_at(state, state.selected_index) {
+            Some(DashboardRowKind::Digest(idx)) => {
+                let raw = dashboard_digest_body(state, idx)
+                    .unwrap_or_else(|| "Press r to run daily-work.".into());
+                let has_md = idx == 0
+                    || state
+                        .digest_history
+                        .get(idx)
+                        .is_some_and(|meta| state.digest_bodies.contains_key(&meta.date));
                 DetailBody {
-                    text: dashboard_alert_at(state, state.selected_index).map_or_else(
-                        || "Select an alert".into(),
-                        |a| {
-                            format!(
-                                "Main alert\nrepo: {}@{}\nconsecutive failures: {}\nrun: {} ({})\nconclusion: {}\n\nPress A to acknowledge",
-                                a.repo,
-                                a.branch,
-                                a.consecutive_failures,
-                                a.latest_run_id,
-                                a.latest_workflow,
-                                a.conclusion
-                            )
-                        },
-                    ),
-                    markdown: false,
+                    text: if has_md {
+                        markdown::filter_folded_markdown_sections(
+                            &raw,
+                            &state.digest_folded_sections,
+                            "Z",
+                        )
+                    } else {
+                        raw
+                    },
+                    markdown: has_md,
                 }
-            } else if state.selected_index < alert_n + sec_n {
+            }
+            Some(DashboardRowKind::SectionHeader(_)) => DetailBody {
+                text: "Select an item in this section, or press **z** to fold/unfold.".into(),
+                markdown: true,
+            },
+            _ => DetailBody {
+                text: "Press **r** to run daily-work.".into(),
+                markdown: true,
+            },
+        },
+        Tab::Prs => {
+            if let Some(overview) = state.selected_pr_overview() {
+                let triage = state
+                    .sorted_filtered_prs()
+                    .get(state.selected_index)
+                    .and_then(|p| p.triage_note.as_deref())
+                    .map(|n| format!("\n\n## Triage note\n\n{n}"))
+                    .unwrap_or_default();
                 DetailBody {
-                    text: state
-                        .security_digest_md
-                        .clone()
-                        .unwrap_or_else(|| "Run security-digest workflow.".into()),
+                    text: format!("{overview}{triage}"),
+                    markdown: true,
+                }
+            } else if state.selected_pr_overview_loading() {
+                DetailBody {
+                    text: "_Loading `pr_get_overview`…_".into(),
                     markdown: true,
                 }
             } else {
-                let digest_idx = state.selected_index - alert_n - sec_n;
-                if digest_idx == 0 {
-                    DetailBody {
-                        text: state
-                            .latest_digest
-                            .as_ref()
-                            .map(|d| d.body_md.clone())
-                            .unwrap_or_else(|| "Press r to run daily-work.".into()),
-                        markdown: true,
-                    }
-                } else if let Some(meta) = state.digest_history.get(digest_idx) {
-                    DetailBody {
-                        text: state
-                            .digest_bodies
-                            .get(&meta.date)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                format!(
-                                    "Digest {}\nattention: {}  flaky: {}  policy: {}  ok: {}\nrun time: {}",
-                                    meta.date,
-                                    meta.summary.needs_attention,
-                                    meta.summary.flaky_candidates,
-                                    meta.summary.policy_gates,
-                                    meta.summary.ignorable,
-                                    meta.summary.duration_label()
-                                )
-                            }),
-                        markdown: state.digest_bodies.contains_key(&meta.date),
-                    }
-                } else {
-                    DetailBody {
-                        text: "Press r to run daily-work.".into(),
-                        markdown: false,
-                    }
+                DetailBody {
+                    text: state
+                        .sorted_filtered_prs()
+                        .get(state.selected_index)
+                        .map(|p| {
+                            format!(
+                                "# #{} {}\n\n\
+                                | Field | Value |\n|---|---|\n\
+                                | Author | @{} |\n\
+                                | Repo | {} |\n\
+                                | CI | {} |\n\
+                                | Review | {} |\n\n\
+                                ## Triage\n\n{}",
+                                p.number,
+                                p.title,
+                                p.author,
+                                p.repo,
+                                p.ci_summary,
+                                p.review_summary,
+                                p.triage_note
+                                    .as_deref()
+                                    .unwrap_or("_No triage yet._")
+                            )
+                        })
+                        .unwrap_or_else(|| "Select a PR".into()),
+                    markdown: true,
                 }
             }
         }
-        Tab::Prs => DetailBody {
-            text: state
-                .sorted_filtered_prs()
-                .get(state.selected_index)
-                .map(|p| {
-                    format!(
-                        "#{} {} @{} \nrepo: {}\nci: {} review: {}\n\n{}",
-                        p.number,
-                        p.title,
-                        p.author,
-                        p.repo,
-                        p.ci_summary,
-                        p.review_summary,
-                        p.triage_note.as_deref().unwrap_or("(no triage yet)")
-                    )
-                })
-                .unwrap_or_else(|| "Select a PR".into()),
-            markdown: false,
-        },
         Tab::Approvals => DetailBody {
             text: state
                 .selected_approval()
                 .map(format_approval_detail)
                 .unwrap_or_else(|| "Select an approval".into()),
-            markdown: false,
+            markdown: true,
         },
         Tab::Logs => {
             let logs: Vec<_> = state.filtered_logs().into_iter().rev().collect();
@@ -1647,136 +1814,216 @@ fn detail_body(state: &AppState) -> (String, bool) {
                     .get(state.selected_index)
                     .map(|l| {
                         format!(
-                            "[{}] {}\n{}",
+                            "## [{}] {}\n\n```\n{}\n```",
                             l.level,
                             l.ts.format("%Y-%m-%d %H:%M:%S"),
                             l.message
                         )
                     })
                     .unwrap_or_else(|| format!("No logs ({})", state.log_filter.label())),
-                markdown: false,
+                markdown: true,
             }
         }
         Tab::Config => DetailBody {
-            text: format!(
-                "MCP: {} ({})\nLLM: {} ({})\nEnabled workflows:\n  {}",
-                state.config.mcp.command,
-                if state.mcp_ok { "ok" } else { "offline" },
-                state.config.llm.base_url,
-                if state.llm_ok { "ok" } else { "offline" },
-                state
-                    .config
-                    .workflows
-                    .iter()
-                    .filter(|(_, w)| w.enabled)
-                    .map(|(k, _)| k.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n  ")
-            ),
-            markdown: false,
-        },
-        Tab::Flaky => DetailBody {
-            text: state
-                .flaky_tests
-                .get(state.selected_index)
-                .map(|t| {
-                    let rate = if t.rerun_attempts == 0 {
-                        "—".into()
-                    } else {
-                        format!(
-                            "{:.0}%",
-                            100.0 * f64::from(t.rerun_successes) / f64::from(t.rerun_attempts)
-                        )
-                    };
-                    let quarantine = if t.incident_count >= 5
-                        && t.rerun_attempts > 0
-                        && t.rerun_successes * 2 < t.rerun_attempts
-                    {
-                        "\n\n⚠ Quarantine candidate (high count, low rerun success)"
-                    } else {
-                        ""
-                    };
-                    format!(
-                        "fingerprint: {}\nrepo: {}\nworkflow: {}\ncount: {}\nrerun: {}/{} ({rate})\nlast: {}{quarantine}\n\nu: mark real bug  U: mark flaky",
-                        t.fingerprint,
-                        t.repo,
-                        t.workflow,
-                        t.incident_count,
-                        t.rerun_successes,
-                        t.rerun_attempts,
-                        t.last_seen
-                    )
-                })
-                .unwrap_or_else(|| {
-                    format!(
-                        "Flaky report ({}d, repo: {}) — run flaky-govern or daily-work",
-                        state.flaky_since_days,
-                        state.flaky_repo_filter.as_deref().unwrap_or("all")
-                    )
-                }),
-            markdown: false,
-        },
-        Tab::Release => DetailBody {
-            text: state
-                .selected_backport()
-                .map(|b| {
-                    format!(
-                        "#{} {}\nrepo: {}\ntarget: {}\nstatus: {:?}\ncreated: {}",
-                        b.pr_number, b.pr_title, b.repo, b.target_branch, b.status, b.created_at
-                    )
-                })
-                .unwrap_or_else(|| "Select a backport item".into()),
-            markdown: false,
-        },
-        Tab::Issues => DetailBody {
-            text: state
-                .selected_issue()
-                .map(|i| {
-                    format!(
-                        "#{} {}\nrepo: {}\nauthor: {}\nlabels: {}\nupdated: {}\n\n{}",
-                        i.number,
-                        i.title,
-                        i.repo,
-                        i.author,
-                        i.labels,
-                        i.updated_at,
-                        i.triage_note.as_deref().unwrap_or("")
-                    )
-                })
-                .unwrap_or_else(|| "Select an issue".into()),
-            markdown: false,
+            text: config_connectivity_detail(state),
+            markdown: true,
         },
     };
     (view.text, view.markdown)
 }
 
 fn format_approval_detail(a: &crate::store::Approval) -> String {
-    let mut lines = vec![
-        format!("Kind:     {:?}", a.kind),
-        format!("Status:   {:?}", a.status),
-        format!("Repo:     {}", a.repo),
-        format!("Created:  {}", a.created_at.format("%Y-%m-%d %H:%M:%S")),
-        String::new(),
-        a.description.clone(),
-    ];
+    let mut md = format!(
+        "# {:?} approval\n\n\
+        | Field | Value |\n|---|---|\n\
+        | ID | `{}` |\n\
+        | Status | {:?} |\n\
+        | Repo | {} |\n\
+        | Created | {} |\n",
+        a.kind,
+        a.id,
+        a.status,
+        a.repo,
+        a.created_at.format("%Y-%m-%d %H:%M:%S")
+    );
+    if let Some(at) = a.decided_at {
+        md.push_str(&format!(
+            "| Decided | {} |\n",
+            at.format("%Y-%m-%d %H:%M:%S")
+        ));
+    }
     if let Some(n) = a.pr_number {
-        lines.push(format!("PR:       #{n}"));
+        md.push_str(&format!("| PR | #{n} |\n"));
     }
     if let Some(run) = a.run_id {
-        lines.push(format!("Run:      {run}"));
+        md.push_str(&format!("| Run | {run} |\n"));
     }
     if let Some(ref branch) = a.target_branch {
-        lines.push(format!("Branch:   {branch}"));
-    }
-    if let Some(ref body) = a.comment_body {
-        lines.push(String::new());
-        lines.push("Comment body:".into());
-        lines.push(body.clone());
+        md.push_str(&format!("| Branch | {branch} |\n"));
     }
     if let Some(id) = a.incident_id {
-        lines.push(format!("Incident: {id}"));
+        md.push_str(&format!("| Incident | {id} |\n"));
     }
-    lines.join("\n")
+    md.push_str("\n## Description\n\n");
+    md.push_str(&a.description);
+    if let Some(ref body) = a.comment_body {
+        md.push_str("\n\n## Comment body\n\n");
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+            if let Ok(pretty) = serde_json::to_string_pretty(&value) {
+                md.push_str("```json\n");
+                md.push_str(&pretty);
+                md.push_str("\n```\n");
+            } else {
+                md.push_str(body);
+            }
+        } else {
+            md.push_str(body);
+        }
+    }
+    if let Some(issue) = a.issue_number {
+        md.push_str(&format!("\n\n## Issue\n\n#{issue}\n"));
+    }
+    if let Some(ref label) = a.label {
+        md.push_str(&format!("\n\n## Label\n\n`{label}`\n"));
+    }
+    if let Ok(pretty) = serde_json::to_string_pretty(&approval_tool_payload(a)) {
+        md.push_str("\n\n## Tool payload\n\n```json\n");
+        md.push_str(&pretty);
+        md.push_str("\n```\n");
+    }
+    md
+}
+
+fn approval_tool_payload(a: &crate::store::Approval) -> serde_json::Value {
+    use crate::store::model::ApprovalKind;
+    match a.kind {
+        ApprovalKind::RerunFlaky => serde_json::json!({
+            "action": "ci_rerun",
+            "repo": a.repo,
+            "pr_number": a.pr_number,
+            "run_id": a.run_id,
+            "incident_id": a.incident_id,
+        }),
+        ApprovalKind::Backport => serde_json::json!({
+            "action": "backport",
+            "repo": a.repo,
+            "pr_number": a.pr_number,
+            "target_branch": a.target_branch,
+        }),
+        ApprovalKind::PostComment => serde_json::json!({
+            "action": "pr_post_comment",
+            "repo": a.repo,
+            "pr_number": a.pr_number,
+            "body": a.comment_body,
+        }),
+        ApprovalKind::IssueAddLabel => serde_json::json!({
+            "action": "issue_add_label",
+            "repo": a.repo,
+            "issue_number": a.issue_number,
+            "label": a.label,
+        }),
+        ApprovalKind::WriteFile | ApprovalKind::EditFile => serde_json::json!({
+            "action": "file_mutation",
+            "workspace": a.repo,
+            "kind": format!("{:?}", a.kind),
+            "args": a.comment_body,
+        }),
+        ApprovalKind::BashRun => serde_json::json!({
+            "action": "bash_run",
+            "workspace": a.repo,
+            "args": a.comment_body,
+        }),
+        ApprovalKind::PythonRun => serde_json::json!({
+            "action": "python_run",
+            "workspace": a.repo,
+            "args": a.comment_body,
+        }),
+    }
+}
+
+fn detail_pane_inner(area: Rect) -> Rect {
+    theme::detail_block(ThemePalette::dark()).inner(area)
+}
+
+fn detail_line_at_mouse(inner: Rect, mouse_row: u16, scroll: u16) -> u16 {
+    scroll + mouse_row.saturating_sub(inner.y)
+}
+
+fn detail_render_lines(
+    th: ThemePalette,
+    body: &str,
+    render_markdown: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let base = Style::default().fg(th.text);
+    if render_markdown {
+        let key = detail_body_cache_key(body, width.min(u16::MAX as usize) as u16);
+        cached_detail_markdown_lines(th, body, width, key)
+    } else {
+        body.lines()
+            .map(|line| {
+                if line.is_empty() {
+                    Line::from("")
+                } else {
+                    Line::from(Span::styled(line.to_string(), base))
+                }
+            })
+            .collect()
+    }
+}
+
+fn line_plain(line: &Line) -> String {
+    line.spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>()
+}
+
+fn copy_detail_text_from_state(
+    state: &AppState,
+    width: usize,
+    sel_lo: u16,
+    sel_hi: u16,
+) -> Option<String> {
+    let th = ThemePalette::from_tui(&state.config.tui);
+    let (body, render_markdown) = detail_body(state);
+    let lines = detail_render_lines(th, &body, render_markdown, width);
+    if lines.is_empty() {
+        return None;
+    }
+    let lo = sel_lo.min(sel_hi) as usize;
+    let hi = sel_lo
+        .max(sel_hi)
+        .min(lines.len().saturating_sub(1) as u16) as usize;
+    let text = lines[lo..=hi]
+        .iter()
+        .map(line_plain)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn apply_detail_selection_highlight(
+    lines: &mut [Line<'static>],
+    th: ThemePalette,
+    select: Option<(u16, u16)>,
+) {
+    let Some((a, b)) = select else {
+        return;
+    };
+    let lo = a.min(b) as usize;
+    let hi = a.max(b) as usize;
+    for (i, line) in lines.iter_mut().enumerate() {
+        if (lo..=hi).contains(&i) {
+            for span in &mut line.spans {
+                span.style = span.style.bg(th.tab_active_bg);
+            }
+        }
+    }
 }
 
 fn draw_detail_pane(
@@ -1786,6 +2033,7 @@ fn draw_detail_pane(
     body: &str,
     render_markdown: bool,
     scroll_line: u16,
+    detail_select: Option<(u16, u16)>,
 ) {
     let block = theme::detail_block(th);
     let inner = block.inner(area);
@@ -1794,8 +2042,9 @@ fn draw_detail_pane(
         return;
     }
     let base = Style::default().fg(th.text);
-    let lines: Vec<Line> = if render_markdown {
-        markdown::markdown_to_lines_in_width(th, body, base, Some(inner.width.max(1) as usize))
+    let mut lines: Vec<Line> = if render_markdown {
+        let key = detail_body_cache_key(body, inner.width.max(1));
+        cached_detail_markdown_lines(th, body, inner.width.max(1) as usize, key)
     } else {
         body.lines()
             .map(|line| {
@@ -1807,11 +2056,10 @@ fn draw_detail_pane(
             })
             .collect()
     };
-    let lines = if lines.is_empty() {
-        vec![Line::from("")]
-    } else {
-        lines
-    };
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    apply_detail_selection_highlight(&mut lines, th, detail_select);
     let width = inner.width.max(1);
     let visible = inner.height.max(1);
     let total = Paragraph::new(Text::from(lines.clone()))
@@ -1842,24 +2090,39 @@ fn draw_detail_pane(
 
 fn draw_status(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: ThemePalette) {
     let busy = state.engine_busy || state.chat_busy;
-    let alert_note = if state.main_alerts.is_empty() {
-        String::new()
-    } else {
-        format!(" │ main alerts: {}", state.main_alerts.len())
-    };
-    let ctx_note = context_status_note(state);
     let phase_note = state
         .chat_turn_phase()
         .map(|p| format!(" │ phase: {p}"))
         .unwrap_or_default();
-    let line = theme::status_line(
+    let workflow_note = state
+        .engine_workflow_id
+        .as_ref()
+        .filter(|_| state.engine_busy)
+        .map(|id| format!(" │ {id}"))
+        .unwrap_or_default();
+    let mut line = theme::status_line(
         th,
         busy,
         &state.status,
-        state.mcp_ok,
+        state.github_ok,
         state.llm_ok,
-        &format!("{ctx_note}{phase_note}{alert_note}"),
+        "",
     );
+    line.spans.extend(context_status_spans(th, state));
+    line.spans.extend(store_status_spans(th, state));
+    if !workflow_note.is_empty() {
+        line.spans.push(Span::styled(
+            workflow_note,
+            Style::default().fg(th.accent).bg(th.surface),
+        ));
+    }
+    if !phase_note.is_empty() {
+        line.spans.push(Span::styled(
+            phase_note,
+            Style::default().fg(th.muted).bg(th.surface),
+        ));
+    }
+    line.spans.push(Span::styled(" ", Style::default().bg(th.surface)));
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(th.surface)),
         area,
@@ -1882,4 +2145,60 @@ fn trunc(s: &str, max: usize) -> String {
     }
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use crate::store::model::{Approval, ApprovalKind, ApprovalStatus};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    #[test]
+    fn approval_detail_includes_tool_payload_json_fence() {
+        let approval = Approval {
+            id: Uuid::new_v4(),
+            kind: ApprovalKind::RerunFlaky,
+            repo: "acme/widget".into(),
+            pr_number: Some(42),
+            run_id: Some(99),
+            target_branch: None,
+            incident_id: None,
+            description: "rerun flaky job".into(),
+            status: ApprovalStatus::Pending,
+            created_at: Utc::now(),
+            decided_at: None,
+            comment_body: None,
+            issue_number: None,
+            label: None,
+        };
+        let md = format_approval_detail(&approval);
+        assert!(md.contains("## Tool payload"));
+        assert!(md.contains("```json"));
+        assert!(md.contains("\"action\": \"ci_rerun\""));
+        assert!(md.contains("\"pr_number\": 42"));
+    }
+
+    #[test]
+    fn approval_tool_payload_maps_post_comment() {
+        let approval = Approval {
+            id: Uuid::new_v4(),
+            kind: ApprovalKind::PostComment,
+            repo: "acme/widget".into(),
+            pr_number: Some(1),
+            run_id: None,
+            target_branch: None,
+            incident_id: None,
+            description: "comment".into(),
+            status: ApprovalStatus::Pending,
+            created_at: Utc::now(),
+            decided_at: None,
+            comment_body: Some("hello".into()),
+            issue_number: None,
+            label: None,
+        };
+        let payload = approval_tool_payload(&approval);
+        assert_eq!(payload["action"], "pr_post_comment");
+        assert_eq!(payload["body"], "hello");
+    }
 }

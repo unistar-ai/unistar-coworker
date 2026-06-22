@@ -6,3 +6,21 @@
 .coworker/
 coworker.yaml
 .coworker/coworker.yaml
+
+# env / secrets — never commit tokens or webhook URLs
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# runtime logs and local binaries
+*.log
+unistar-mcp
+unistar-coworker
+
+# editor / agent local state
+.vscode/
+.cursor/settings.json
+.claude/settings.local.json

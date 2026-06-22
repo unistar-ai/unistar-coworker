@@ -1,36 +1,26 @@
-# Agents directory
+# Agents
 
-**Task SSOT** — one `AGENT.md` per workflow or chat mode.
+**Chat only.** Interactive assistant spec: `agents/chat/AGENT.md`.
 
-| Agent | Harness entry |
-|-------|----------------|
-| `chat/` | Interactive JSON loop (`run_chat_turn`) |
-| `daily-work/` | `AgentLoop::run_daily_work` |
-| `merge-health/` | `run_merge_health` |
-| … | `src/agent/loop.rs` dispatch |
-
-Optional frontmatter:
+Batch GitHub workflows (daily digest, review radar, issue triage, …) are **built into Rust** — metadata and default skills live in `src/engine/workflow_registry.rs`. Enable them in `coworker.yaml`:
 
 ```yaml
----
-name: daily-work
-description: Morning triage digest
-skills: [ci-triage, digest-style]
----
+workflows:
+  daily-work: {}
+  review-radar: {}
 ```
 
-Configure in `coworker.yaml`:
+List workflows: `cargo run --release -- workflows list`
+
+Override default technique skills per workflow:
 
 ```yaml
 workflows:
   daily-work:
-    agent: agents/daily-work/AGENT.md
     skills:
       - skills/ci-triage/SKILL.md
 ```
 
-```bash
-unistar-coworker agents list
-```
+Chat loads skills from `agents/chat/AGENT.md` `skills:` unless `chat.skills` overrides in yaml.
 
-See [skill-agent-harness.md](../skill-agent-harness.md).
+Technique library: **`skills/*`**. See [skill-agent-harness.md](../skill-agent-harness.md).

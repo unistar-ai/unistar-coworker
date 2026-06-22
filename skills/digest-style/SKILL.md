@@ -1,6 +1,13 @@
 ---
 name: digest-style
-description: Ops digest writing — concise sections, scannable lists.
+description: Ops digest writing — concise sections, scannable lists. Use for morning digest, triage summaries, or repo-wide status rollups.
+intent_keywords: [digest, morning, summary]
+intent_phrases: [daily triage, open pr summary, morning digest]
+tools:
+  - store_get_latest_digest
+  - pr_list_open
+  - pr_get_overview
+  - harness_daily_digest
 ---
 
 ## Format

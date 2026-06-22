@@ -1,11 +1,168 @@
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::collections::HashSet;
 use unicode_width::UnicodeWidthStr;
 
 use crate::agent::context::truncate_chars;
 
 use super::theme::ThemePalette;
+
+/// ATX `##` section titles in document order (excludes `###` and deeper).
+pub fn markdown_h2_section_titles(input: &str) -> Vec<String> {
+    input
+        .lines()
+        .filter_map(|line| {
+            let t = line.trim();
+            if !t.starts_with("## ") || t.starts_with("### ") {
+                return None;
+            }
+            Some(t.trim_start_matches("## ").trim().to_string())
+        })
+        .collect()
+}
+
+/// Hide body text under folded `##` sections; headers stay visible with a fold hint.
+pub fn filter_folded_markdown_sections(
+    input: &str,
+    folded: &HashSet<String>,
+    expand_hint: &str,
+) -> String {
+    if folded.is_empty() {
+        return input.to_string();
+    }
+    let mut out = String::new();
+    let mut in_folded = false;
+    let mut skipped_lines = 0usize;
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") && !trimmed.starts_with("### ") {
+            if in_folded && skipped_lines > 0 {
+                out.push_str(&format!(
+                    "\n  _… {skipped_lines} line(s) folded — {expand_hint} to expand_"
+                ));
+            }
+            skipped_lines = 0;
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+            let title = trimmed.trim_start_matches("## ").trim();
+            in_folded = folded.contains(title);
+            if in_folded {
+                out.push_str(" `[folded]`");
+            }
+            continue;
+        }
+        if in_folded {
+            if !trimmed.is_empty() {
+                skipped_lines += 1;
+            }
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    if in_folded && skipped_lines > 0 {
+        out.push_str(&format!(
+            "\n  _… {skipped_lines} line(s) folded — {expand_hint} to expand_"
+        ));
+    }
+    out
+}
+
+/// Incremental markdown renderer for streaming assistant output.
+///
+/// Complete lines (ending in `\n`) are cached; only the trailing partial line is re-parsed.
+pub struct StreamingMarkdownRenderer {
+    source: String,
+    stable_byte_len: usize,
+    stable_lines: Vec<Line<'static>>,
+}
+
+impl StreamingMarkdownRenderer {
+    pub fn new() -> Self {
+        Self {
+            source: String::new(),
+            stable_byte_len: 0,
+            stable_lines: Vec::new(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.source.clear();
+        self.stable_byte_len = 0;
+        self.stable_lines.clear();
+    }
+
+    /// Render `input`, reusing cached lines for every complete line prefix.
+    pub fn render(
+        &mut self,
+        th: ThemePalette,
+        input: &str,
+        base: Style,
+        max_width: Option<usize>,
+    ) -> Vec<Line<'static>> {
+        if input.is_empty() {
+            self.clear();
+            return Vec::new();
+        }
+
+        if input.len() < self.source.len() || !input.starts_with(self.source.as_str()) {
+            self.clear();
+        }
+
+        if input != self.source {
+            self.source = input.to_string();
+            self.refresh_stable(th, base, max_width);
+        } else if self.stable_lines.is_empty() {
+            self.refresh_stable(th, base, max_width);
+        }
+
+        let tail = &self.source[self.stable_byte_len..];
+        if tail.is_empty() {
+            return self.stable_lines.clone();
+        }
+        let mut lines = self.stable_lines.clone();
+        lines.extend(markdown_to_lines_in_width(th, tail, base, max_width));
+        lines
+    }
+
+    fn refresh_stable(&mut self, th: ThemePalette, base: Style, max_width: Option<usize>) {
+        let new_stable = stable_line_prefix_byte_len(&self.source);
+        if new_stable == self.stable_byte_len {
+            return;
+        }
+        self.stable_byte_len = new_stable;
+        if new_stable == 0 {
+            self.stable_lines.clear();
+            return;
+        }
+        let prefix = &self.source[..new_stable];
+        self.stable_lines = markdown_to_lines_in_width(th, prefix, base, max_width);
+    }
+
+    #[cfg(test)]
+    fn stable_byte_len(&self) -> usize {
+        self.stable_byte_len
+    }
+}
+
+impl Default for StreamingMarkdownRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Byte index after the last complete `\n` line in `s` (0 if none).
+fn stable_line_prefix_byte_len(s: &str) -> usize {
+    match s.rfind('\n') {
+        Some(i) => i + 1,
+        None => 0,
+    }
+}
 
 /// Render a markdown fragment into styled terminal lines.
 pub fn markdown_to_lines_in_width(
@@ -322,14 +479,23 @@ fn fit_table_widths(widths: &mut [usize], ncols: usize, max_width: usize) {
 }
 
 fn normalize_terminal_text(s: &str) -> String {
-    s.replace('\t', "    ")
+    crate::terminal::sanitize_terminal_output(s).replace('\t', "    ")
+}
+
+/// Strip OSC/CSI sequences so display-width math matches ratatui layout (avoids double-wrap).
+fn strip_terminal_escapes(s: &str) -> String {
+    crate::terminal::strip_terminal_escapes(s)
+}
+
+fn visible_display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(strip_terminal_escapes(&normalize_terminal_text(s)).as_str())
 }
 
 fn truncate_to_display_width(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    let s = normalize_terminal_text(s);
+    let s = strip_terminal_escapes(&normalize_terminal_text(s));
     if UnicodeWidthStr::width(s.as_str()) <= max {
         return s;
     }
@@ -357,7 +523,7 @@ struct StyledChar {
 pub(crate) fn line_display_width(line: &Line<'_>) -> usize {
     line.spans
         .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .map(|s| visible_display_width(s.content.as_ref()))
         .sum()
 }
 
@@ -431,37 +597,35 @@ fn split_into_words(chars: Vec<StyledChar>) -> Vec<Vec<StyledChar>> {
     words
 }
 
-fn is_list_marker_span(text: &str) -> bool {
-    if text.contains('▸') {
-        return true;
+/// Display width of list marker prefix only (`  1. ` or `    ▸ `), not the item body.
+fn list_marker_prefix_display_width(text: &str) -> Option<usize> {
+    if let Some(idx) = text.find('▸') {
+        let byte_end = idx + '▸'.len_utf8();
+        let end = if text.get(byte_end..).is_some_and(|s| s.starts_with(' ')) {
+            byte_end + 1
+        } else {
+            byte_end
+        };
+        return Some(UnicodeWidthStr::width(&text[..end]));
     }
-    let trimmed = text.trim_start();
-    let bytes = trimmed.as_bytes();
+    let bytes = text.as_bytes();
     let mut i = 0;
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    let digit_start = i;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
         i += 1;
     }
-    i > 0 && bytes.get(i) == Some(&b'.') && bytes.get(i + 1) == Some(&b' ')
+    if i > digit_start && bytes.get(i) == Some(&b'.') && bytes.get(i + 1) == Some(&b' ') {
+        return Some(UnicodeWidthStr::width(&text[..i + 2]));
+    }
+    None
 }
 
 fn list_marker_hang_width(line: &Line<'_>) -> Option<usize> {
     let first = line.spans.first()?;
-    if is_list_marker_span(first.content.as_ref()) {
-        Some(UnicodeWidthStr::width(first.content.as_ref()))
-    } else {
-        None
-    }
-}
-
-fn should_preserve_line_as_single(line: &Line<'_>) -> bool {
-    if line.spans.is_empty() {
-        return true;
-    }
-    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    text.contains('│')
-        || text.starts_with("  ┌─")
-        || text.starts_with("  └─")
-        || text.starts_with('─')
+    list_marker_prefix_display_width(first.content.as_ref())
 }
 
 fn wrap_rendered_lines(lines: Vec<Line<'static>>, max_width: Option<usize>) -> Vec<Line<'static>> {
@@ -471,7 +635,7 @@ fn wrap_rendered_lines(lines: Vec<Line<'static>>, max_width: Option<usize>) -> V
     lines
         .into_iter()
         .flat_map(|line| {
-            if should_preserve_line_as_single(&line) || line_display_width(&line) <= width {
+            if line_display_width(&line) <= width {
                 vec![line]
             } else {
                 let hang = list_marker_hang_width(&line);
@@ -588,6 +752,51 @@ fn fit_chat_line_to_panel(line: Line<'static>, width: usize) -> Vec<Line<'static
             }
         })
         .collect()
+}
+
+/// Pad or truncate each row to exactly `panel_width` columns so ratatui does not
+/// leave ghost characters from a previous frame when a line gets shorter.
+pub(crate) fn pad_lines_to_panel_width(
+    lines: Vec<Line<'static>>,
+    panel_width: u16,
+    pad_style: Style,
+) -> Vec<Line<'static>> {
+    let width = panel_width.max(1) as usize;
+    lines
+        .into_iter()
+        .map(|line| fit_line_to_panel_width(line, width, pad_style))
+        .collect()
+}
+
+/// Reflow (optionally preserving chat badges), then pad every row to the pane width.
+pub(crate) fn finalize_panel_lines(
+    lines: Vec<Line<'static>>,
+    panel_width: u16,
+    pad_style: Style,
+    preserve_message_badges: bool,
+) -> Vec<Line<'static>> {
+    let fitted = if preserve_message_badges {
+        ensure_chat_lines_fit_panel(lines, panel_width)
+    } else {
+        reflow_chat_lines_to_width(lines, panel_width)
+    };
+    pad_lines_to_panel_width(fitted, panel_width, pad_style)
+}
+
+fn fit_line_to_panel_width(line: Line<'static>, width: usize, pad_style: Style) -> Line<'static> {
+    let line = if line_display_width(&line) > width {
+        truncate_line_to_width(line, width)
+    } else {
+        line
+    };
+    let used = line_display_width(&line);
+    if used < width {
+        let mut spans = line.spans;
+        spans.push(Span::styled(" ".repeat(width - used), pad_style));
+        Line::from(spans)
+    } else {
+        line
+    }
 }
 
 /// Fit chat history rows to the Messages pane without splitting `▌ You` / `▌ AI` badges.
@@ -772,6 +981,212 @@ fn format_table_lines(
     lines
 }
 
+fn json_code_line(th: ThemePalette, line: &str, base: Style) -> Line<'static> {
+    let mut spans = vec![Span::raw("  │ ")];
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            spans.push(Span::styled(line[start..i].to_string(), base));
+            continue;
+        }
+        if b == b'"' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' && bytes[i - 1] != b'\\' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            let slice = &line[start..i];
+            let rest = line[i..].trim_start();
+            let style = if rest.starts_with(':') {
+                Style::default().fg(th.accent)
+            } else {
+                Style::default().fg(th.ok)
+            };
+            spans.push(Span::styled(slice.to_string(), style));
+            continue;
+        }
+        if bytes[i].is_ascii_digit() || bytes[i] == b'-' {
+            let start = i;
+            i += 1;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_digit()
+                    || matches!(bytes[i], b'.' | b'e' | b'E' | b'+' | b'-'))
+            {
+                i += 1;
+            }
+            spans.push(Span::styled(
+                line[start..i].to_string(),
+                Style::default().fg(th.warn),
+            ));
+            continue;
+        }
+        if line[i..].starts_with("false") {
+            spans.push(Span::styled(
+                line[i..i + 5].to_string(),
+                Style::default().fg(th.muted),
+            ));
+            i += 5;
+            continue;
+        }
+        if line[i..].starts_with("true") {
+            spans.push(Span::styled(
+                line[i..i + 4].to_string(),
+                Style::default().fg(th.muted),
+            ));
+            i += 4;
+            continue;
+        }
+        if line[i..].starts_with("null") {
+            spans.push(Span::styled(
+                line[i..i + 4].to_string(),
+                Style::default().fg(th.muted),
+            ));
+            i += 4;
+            continue;
+        }
+        spans.push(Span::styled(
+            line[i..i + 1].to_string(),
+            Style::default().fg(th.muted),
+        ));
+        i += 1;
+    }
+    Line::from(spans)
+}
+
+fn yaml_code_line(th: ThemePalette, line: &str, base: Style) -> Line<'static> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Line::from(vec![
+            Span::raw("  │ "),
+            Span::styled(line.to_string(), Style::default().fg(th.muted)),
+        ]);
+    }
+    if let Some((key, rest)) = trimmed.split_once(':') {
+        let indent = line.len().saturating_sub(trimmed.len());
+        let prefix = &line[..indent];
+        return Line::from(vec![
+            Span::raw("  │ "),
+            Span::raw(prefix.to_string()),
+            Span::styled(key.to_string(), Style::default().fg(th.accent)),
+            Span::styled(":".to_string(), base),
+            Span::styled(rest.to_string(), Style::default().fg(th.ok)),
+        ]);
+    }
+    Line::from(vec![
+        Span::raw("  │ "),
+        Span::styled(line.to_string(), base),
+    ])
+}
+
+fn rust_code_line(th: ThemePalette, line: &str, base: Style) -> Line<'static> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        return Line::from(vec![
+            Span::raw("  │ "),
+            Span::styled(
+                line.to_string(),
+                Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
+            ),
+        ]);
+    }
+    for kw in ["fn ", "func ", "type ", "struct ", "impl ", "use ", "mod ", "pub "] {
+        if let Some(rest) = trimmed.strip_prefix(kw) {
+            let indent = line.len().saturating_sub(trimmed.len());
+            return Line::from(vec![
+                Span::raw("  │ "),
+                Span::raw(line[..indent].to_string()),
+                Span::styled(
+                    kw.to_string(),
+                    Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(rest.to_string(), base),
+            ]);
+        }
+    }
+    Line::from(vec![
+        Span::raw("  │ "),
+        Span::styled(line.to_string(), base),
+    ])
+}
+
+fn toml_code_line(th: ThemePalette, line: &str, base: Style) -> Line<'static> {
+    yaml_code_line(th, line, base)
+}
+
+fn go_code_line(th: ThemePalette, line: &str, base: Style) -> Line<'static> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        return Line::from(vec![
+            Span::raw("  │ "),
+            Span::styled(
+                line.to_string(),
+                Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
+            ),
+        ]);
+    }
+    for kw in ["package ", "import ", "func ", "type ", "var ", "const "] {
+        if let Some(rest) = trimmed.strip_prefix(kw) {
+            let indent = line.len().saturating_sub(trimmed.len());
+            return Line::from(vec![
+                Span::raw("  │ "),
+                Span::raw(line[..indent].to_string()),
+                Span::styled(
+                    kw.to_string(),
+                    Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(rest.to_string(), base),
+            ]);
+        }
+    }
+    Line::from(vec![
+        Span::raw("  │ "),
+        Span::styled(line.to_string(), base),
+    ])
+}
+
+fn shell_code_line(th: ThemePalette, line: &str, base: Style) -> Line<'static> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return Line::from(vec![
+            Span::raw("  │ "),
+            Span::styled(
+                line.to_string(),
+                Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
+            ),
+        ]);
+    }
+    if let Some(ch) = trimmed.chars().next() {
+        if ch == '$' || ch == '>' {
+            let indent = line.len().saturating_sub(trimmed.len());
+            let prefix = &line[..indent];
+            return Line::from(vec![
+                Span::raw("  │ "),
+                Span::raw(prefix.to_string()),
+                Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(trimmed[1..].to_string(), base),
+            ]);
+        }
+    }
+    Line::from(vec![
+        Span::raw("  │ "),
+        Span::styled(line.to_string(), base),
+    ])
+}
+
 struct MarkdownRenderer {
     th: ThemePalette,
     base: Style,
@@ -784,6 +1199,7 @@ struct MarkdownRenderer {
     in_ordered_list: bool,
     link_url: Option<String>,
     in_code_block: bool,
+    code_block_lang: Option<String>,
     table: Option<TableBuilder>,
 }
 
@@ -801,6 +1217,7 @@ impl MarkdownRenderer {
             in_ordered_list: false,
             link_url: None,
             in_code_block: false,
+            code_block_lang: None,
             table: None,
         }
     }
@@ -931,11 +1348,26 @@ impl MarkdownRenderer {
                     self.push_span(format!("{indent}▸ "), Style::default().fg(self.th.warn));
                 }
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 self.flush_line();
                 self.in_code_block = true;
+                self.code_block_lang = match kind {
+                    CodeBlockKind::Fenced(lang) => {
+                        let lang = lang.trim();
+                        if lang.is_empty() {
+                            None
+                        } else {
+                            Some(lang.to_ascii_lowercase())
+                        }
+                    }
+                    CodeBlockKind::Indented => None,
+                };
+                let label = self
+                    .code_block_lang
+                    .as_deref()
+                    .unwrap_or("code");
                 self.lines.push(Line::from(Span::styled(
-                    "  ┌─ code ",
+                    format!("  ┌─ {label} "),
                     Style::default().fg(self.th.muted),
                 )));
                 self.style_stack
@@ -987,10 +1419,25 @@ impl MarkdownRenderer {
             }
             TagEnd::Link => {
                 if let Some(url) = self.link_url.take() {
-                    self.push_span(
-                        format!(" ↗ {}", shorten_url(&url)),
-                        Style::default().fg(self.th.muted),
-                    );
+                    if self.th.osc8_links && !self.current.is_empty() {
+                        let label: String = self
+                            .current
+                            .iter()
+                            .map(|s| s.content.as_ref())
+                            .collect();
+                        let style = self
+                            .current
+                            .last()
+                            .map(|s| s.style)
+                            .unwrap_or_else(|| self.current_style());
+                        self.current.clear();
+                        self.push_span(osc8_link(&url, &label), style);
+                    } else {
+                        self.push_span(
+                            format!(" ↗ {}", shorten_url(&url)),
+                            Style::default().fg(self.th.muted),
+                        );
+                    }
                 }
                 self.style_stack.pop();
             }
@@ -1007,6 +1454,7 @@ impl MarkdownRenderer {
             TagEnd::CodeBlock => {
                 self.style_stack.pop();
                 self.in_code_block = false;
+                self.code_block_lang = None;
                 self.lines.push(Line::from(Span::styled(
                     "  └─",
                     Style::default().fg(self.th.muted),
@@ -1058,7 +1506,33 @@ impl MarkdownRenderer {
                 if !self.current.is_empty() {
                     self.new_line();
                 }
-                self.push_span(format!("  │ {part}"), self.current_style());
+                if self.code_block_lang.as_deref() == Some("json") {
+                    self.lines
+                        .push(json_code_line(self.th, part, self.current_style()));
+                } else if matches!(
+                    self.code_block_lang.as_deref(),
+                    Some("yaml") | Some("yml")
+                ) {
+                    self.lines
+                        .push(yaml_code_line(self.th, part, self.current_style()));
+                } else if matches!(
+                    self.code_block_lang.as_deref(),
+                    Some("sh") | Some("bash") | Some("shell") | Some("zsh")
+                ) {
+                    self.lines
+                        .push(shell_code_line(self.th, part, self.current_style()));
+                } else if matches!(self.code_block_lang.as_deref(), Some("go") | Some("golang")) {
+                    self.lines
+                        .push(go_code_line(self.th, part, self.current_style()));
+                } else if matches!(self.code_block_lang.as_deref(), Some("rust") | Some("rs")) {
+                    self.lines
+                        .push(rust_code_line(self.th, part, self.current_style()));
+                } else if matches!(self.code_block_lang.as_deref(), Some("toml")) {
+                    self.lines
+                        .push(toml_code_line(self.th, part, self.current_style()));
+                } else {
+                    self.push_span(format!("  │ {part}"), self.current_style());
+                }
             }
             return;
         }
@@ -1066,37 +1540,30 @@ impl MarkdownRenderer {
     }
 
     fn push_spans_with_pr_refs(&mut self, text: &str, style: Style) {
-        let bytes = text.as_bytes();
-        let mut i = 0;
-        let mut chunk_start = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'#' {
-                let hash_start = i;
-                i += 1;
-                let num_start = i;
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    i += 1;
+        let mut i = 0usize;
+        while i < text.len() {
+            if let Some((start, end, kind)) = next_inline_highlight(text, i) {
+                if start > i {
+                    self.push_span(text[i..start].to_string(), style);
                 }
-                if i > num_start {
-                    if chunk_start < hash_start {
-                        self.push_span(text[chunk_start..hash_start].to_string(), style);
-                    }
-                    self.push_span(
-                        text[hash_start..i].to_string(),
-                        Style::default()
-                            .fg(self.th.pr_ref)
-                            .add_modifier(Modifier::BOLD),
-                    );
-                    chunk_start = i;
-                    continue;
-                }
-                i = hash_start + 1;
+                let slice = highlight_label(text, start, end, kind);
+                let hi = match kind {
+                    InlineHighlight::Pr => Style::default()
+                        .fg(self.th.pr_ref)
+                        .add_modifier(Modifier::BOLD),
+                    InlineHighlight::Run => Style::default()
+                        .fg(self.th.accent)
+                        .add_modifier(Modifier::BOLD),
+                    InlineHighlight::Repo => Style::default()
+                        .fg(self.th.link)
+                        .add_modifier(Modifier::UNDERLINED),
+                };
+                self.push_span(slice, hi);
+                i = end;
             } else {
-                i += 1;
+                self.push_span(text[i..].to_string(), style);
+                break;
             }
-        }
-        if chunk_start < text.len() {
-            self.push_span(text[chunk_start..].to_string(), style);
         }
     }
 
@@ -1143,51 +1610,177 @@ impl MarkdownRenderer {
 }
 
 fn enrich_pr_refs(th: ThemePalette, mut line: Line<'static>) -> Line<'static> {
-    // Re-highlight #NNN that weren't split during streaming (e.g. plain lines).
     let mut new_spans = Vec::new();
     for span in line.spans {
         let style = span.style;
         let text = span.content.into_owned();
-        if text.contains('#') && span.style.bg != Some(th.code_bg) {
-            let bytes = text.as_bytes();
-            let mut i = 0;
-            let mut chunk_start = 0;
-            while i < bytes.len() {
-                if bytes[i] == b'#' {
-                    let hash_start = i;
-                    i += 1;
-                    let num_start = i;
-                    while i < bytes.len() && bytes[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                    if i > num_start {
-                        if chunk_start < hash_start {
-                            new_spans.push(Span::styled(
-                                text[chunk_start..hash_start].to_string(),
-                                style,
-                            ));
-                        }
-                        new_spans.push(Span::styled(
-                            text[hash_start..i].to_string(),
-                            Style::default().fg(th.pr_ref).add_modifier(Modifier::BOLD),
-                        ));
-                        chunk_start = i;
-                        continue;
-                    }
-                    i = hash_start + 1;
-                } else {
-                    i += 1;
-                }
-            }
-            if chunk_start < text.len() {
-                new_spans.push(Span::styled(text[chunk_start..].to_string(), style));
-            }
-        } else {
+        if span.style.bg == Some(th.code_bg) {
             new_spans.push(Span::styled(text, style));
+            continue;
+        }
+        let mut i = 0usize;
+        while i < text.len() {
+            if let Some((start, end, kind)) = next_inline_highlight(&text, i) {
+                if start > i {
+                    new_spans.push(Span::styled(text[i..start].to_string(), style));
+                }
+                let hi = match kind {
+                    InlineHighlight::Pr => Style::default().fg(th.pr_ref).add_modifier(Modifier::BOLD),
+                    InlineHighlight::Run => {
+                        Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
+                    }
+                    InlineHighlight::Repo => Style::default()
+                        .fg(th.link)
+                        .add_modifier(Modifier::UNDERLINED),
+                };
+                new_spans.push(Span::styled(highlight_label(&text, start, end, kind), hi));
+                i = end;
+            } else {
+                new_spans.push(Span::styled(text[i..].to_string(), style));
+                break;
+            }
         }
     }
     line.spans = new_spans;
     line
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineHighlight {
+    Pr,
+    Run,
+    Repo,
+}
+
+fn highlight_label(text: &str, start: usize, end: usize, kind: InlineHighlight) -> String {
+    let raw = &text[start..end];
+    match kind {
+        InlineHighlight::Pr if raw.starts_with('#') => format!("[PR {raw}]"),
+        _ => raw.to_string(),
+    }
+}
+
+fn next_inline_highlight(text: &str, from: usize) -> Option<(usize, usize, InlineHighlight)> {
+    let bytes = text.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        if let Some(end) = match_hash_pr(bytes, i) {
+            return Some((i, end, InlineHighlight::Pr));
+        }
+        if let Some(end) = match_pr_label(bytes, i) {
+            return Some((i, end, InlineHighlight::Pr));
+        }
+        if let Some(end) = match_repo_slug(bytes, i) {
+            return Some((i, end, InlineHighlight::Repo));
+        }
+        if let Some(end) = match_run_ref(bytes, i) {
+            return Some((i, end, InlineHighlight::Run));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn match_hash_pr(bytes: &[u8], i: usize) -> Option<usize> {
+    if bytes.get(i) != Some(&b'#') {
+        return None;
+    }
+    let mut j = i + 1;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j > i + 1 {
+        Some(j)
+    } else {
+        None
+    }
+}
+
+fn match_pr_label(bytes: &[u8], i: usize) -> Option<usize> {
+    if i + 4 >= bytes.len() {
+        return None;
+    }
+    if !bytes[i].eq_ignore_ascii_case(&b'p') || !bytes[i + 1].eq_ignore_ascii_case(&b'r') {
+        return None;
+    }
+    if bytes[i + 2] != b' ' || bytes[i + 3] != b'#' {
+        return None;
+    }
+    let mut j = i + 4;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j > i + 4 {
+        Some(j)
+    } else {
+        None
+    }
+}
+
+fn is_repo_slug_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
+}
+
+fn repo_slug_boundary_ok(bytes: &[u8], i: usize) -> bool {
+    i == 0 || !matches!(bytes[i - 1], b':' | b'/' | b'.' | b'@')
+}
+
+fn match_repo_slug(bytes: &[u8], i: usize) -> Option<usize> {
+    if !repo_slug_boundary_ok(bytes, i) {
+        return None;
+    }
+    let start = i;
+    let mut j = i;
+    while j < bytes.len() && is_repo_slug_char(bytes[j]) {
+        j += 1;
+    }
+    if j == start || bytes.get(j) != Some(&b'/') {
+        return None;
+    }
+    j += 1;
+    let seg2 = j;
+    while j < bytes.len() && is_repo_slug_char(bytes[j]) {
+        j += 1;
+    }
+    if j <= seg2 || j - start < 3 {
+        return None;
+    }
+    if !bytes[start..j].iter().any(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(j)
+}
+
+fn match_run_ref(bytes: &[u8], i: usize) -> Option<usize> {
+    if i + 4 >= bytes.len() {
+        return None;
+    }
+    if !(bytes[i].eq_ignore_ascii_case(&b'r')
+        && bytes[i + 1].eq_ignore_ascii_case(&b'u')
+        && bytes[i + 2].eq_ignore_ascii_case(&b'n'))
+    {
+        return None;
+    }
+    let mut j = i + 3;
+    if j + 2 < bytes.len()
+        && bytes[j] == b'_'
+        && bytes[j + 1].eq_ignore_ascii_case(&b'i')
+        && bytes[j + 2].eq_ignore_ascii_case(&b'd')
+    {
+        j += 3;
+    }
+    while j < bytes.len() && matches!(bytes[j], b' ' | b'#' | b':' | b'=') {
+        j += 1;
+    }
+    let digit_start = j;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j >= digit_start + 5 {
+        Some(j)
+    } else {
+        None
+    }
 }
 
 fn shorten_url(url: &str) -> String {
@@ -1199,6 +1792,10 @@ fn shorten_url(url: &str) -> String {
     } else {
         stripped.to_string()
     }
+}
+
+fn osc8_link(url: &str, label: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\")
 }
 
 #[cfg(test)]
@@ -1226,6 +1823,79 @@ mod tests {
         assert!(!l1.is_empty());
         let l2 = markdown_to_lines_in_width(th, "Hello\n* item", base, None);
         assert!(l2.len() >= l1.len());
+    }
+
+    #[test]
+    fn json_code_fence_highlights_keys_and_strings() {
+        let th = dark();
+        let md = "```json\n{\"repo\": \"acme/widget\", \"ok\": true}\n```";
+        let lines = markdown_to_lines_in_width(th, md, Style::default().fg(th.text), None);
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains("\"repo\""));
+        assert!(
+            lines.iter().flat_map(|l| &l.spans).any(|s| s.style.fg == Some(th.accent)),
+            "expected accent key color"
+        );
+        assert!(
+            lines.iter().flat_map(|l| &l.spans).any(|s| s.style.fg == Some(th.ok)),
+            "expected string value color"
+        );
+    }
+
+    #[test]
+    fn yaml_code_fence_highlights_keys() {
+        let th = dark();
+        let md = "```yaml\nrepos:\n  - acme/widget\n```";
+        let lines = markdown_to_lines_in_width(th, md, Style::default().fg(th.text), None);
+        assert!(
+            lines.iter().flat_map(|l| &l.spans).any(|s| s.style.fg == Some(th.accent)),
+            "expected yaml key accent"
+        );
+    }
+
+    #[test]
+    fn shell_code_fence_highlights_comments() {
+        let th = dark();
+        let md = "```bash\n# install deps\n$ cargo build\n```";
+        let lines = markdown_to_lines_in_width(th, md, Style::default().fg(th.text), None);
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains('#'));
+        assert!(joined.contains('$'));
+    }
+
+    #[test]
+    fn go_code_fence_highlights_keywords() {
+        let th = dark();
+        let md = "```go\npackage main\n\nfunc main() {}\n```";
+        let lines = markdown_to_lines_in_width(th, md, Style::default().fg(th.text), None);
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains("package"));
+        assert!(joined.contains("func"));
+    }
+
+    #[test]
+    fn rust_code_fence_highlights_keywords() {
+        let th = dark();
+        let md = "```rust\nfn main() {\n    // ok\n}\n```";
+        let lines = markdown_to_lines_in_width(th, md, Style::default().fg(th.text), None);
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(joined.contains("fn "));
     }
 
     #[test]
@@ -1446,6 +2116,15 @@ mod tests {
     }
 
     #[test]
+    fn pad_lines_to_panel_width_fills_short_rows() {
+        let width = 20u16;
+        let lines = vec![Line::from("short")];
+        let padded = pad_lines_to_panel_width(lines, width, Style::default());
+        assert_eq!(padded.len(), 1);
+        assert_eq!(line_display_width_for_test(&padded[0]), width as usize);
+    }
+
+    #[test]
     fn tools_table_fits_narrow_width_without_lone_pipes() {
         let th = dark();
         let md = "## MCP\n\n| Tool | When to use |\n|------|-------------|\n\
@@ -1544,5 +2223,172 @@ open PR(s) in acme/widget (3):\n\
         assert_eq!(lines.len(), 2);
         assert!(line_text(&lines[0]).contains("19264"));
         assert!(line_text(&lines[1]).contains("19263"));
+    }
+
+    #[test]
+    fn streaming_markdown_caches_complete_lines() {
+        let th = dark();
+        let base = Style::default().fg(th.text);
+        let mut renderer = StreamingMarkdownRenderer::new();
+        let l1 = renderer.render(th, "Line one\nLine two", base, None);
+        assert_eq!(
+            renderer.stable_byte_len(),
+            stable_line_prefix_byte_len("Line one\nLine two")
+        );
+        let l2 = renderer.render(th, "Line one\nLine two\nLine three", base, None);
+        assert!(l2.len() >= l1.len());
+        assert_eq!(line_text(&l1[0]), line_text(&l2[0]));
+        assert!(l2.iter().any(|l| line_text(l).contains("three")));
+    }
+
+    #[test]
+    fn streaming_markdown_grows_with_partial_line() {
+        let th = dark();
+        let base = Style::default().fg(th.assistant);
+        let mut renderer = StreamingMarkdownRenderer::new();
+        let l1 = renderer.render(th, "**Hello", base, None);
+        let l2 = renderer.render(th, "**Hello** world", base, None);
+        assert!(l2.len() >= l1.len());
+        let joined: String = l2.iter().map(|l| line_text(l)).collect();
+        assert!(joined.contains("Hello"));
+        assert!(joined.contains("world"));
+    }
+
+    #[test]
+    fn stable_line_prefix_byte_len_at_newline() {
+        assert_eq!(stable_line_prefix_byte_len("ab"), 0);
+        assert_eq!(stable_line_prefix_byte_len("ab\n"), 3);
+        assert_eq!(stable_line_prefix_byte_len("ab\ncd"), 3);
+        assert_eq!(stable_line_prefix_byte_len("ab\ncd\n"), 6);
+    }
+
+    #[test]
+    fn markdown_h2_section_titles_skips_h3() {
+        let md = "## Needs attention\n### repo\n## Ignorable";
+        let titles = markdown_h2_section_titles(md);
+        assert_eq!(titles, vec!["Needs attention", "Ignorable"]);
+    }
+
+    #[test]
+    fn filter_folded_markdown_sections_hides_body() {
+        let md = "## Needs attention\n\n- item\n\n## Ignorable\n\n- skip me";
+        let folded: HashSet<String> = ["Ignorable"].into_iter().map(str::to_string).collect();
+        let out = filter_folded_markdown_sections(md, &folded, "Z");
+        assert!(out.contains("Needs attention"));
+        assert!(out.contains("- item"));
+        assert!(out.contains("Ignorable"));
+        assert!(out.contains("[folded]"));
+        assert!(!out.contains("skip me"));
+    }
+
+    #[test]
+    fn nested_bullet_wrap_uses_marker_hang_indent() {
+        let th = dark();
+        let base = Style::default().fg(th.assistant);
+        let md = "* outer short\n  * nested item with a long description that should wrap under the bullet marker";
+        let width = 42;
+        let lines = markdown_to_lines_in_width(th, md, base, Some(width));
+        let joined: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        let nested: Vec<_> = joined
+            .iter()
+            .skip_while(|l| !l.contains('▸') || !l.starts_with("  "))
+            .take_while(|l| l.starts_with(' ') || l.contains('▸'))
+            .collect();
+        assert!(
+            nested.len() >= 2,
+            "nested item should wrap: {joined:?}"
+        );
+        assert!(
+            nested[1].starts_with("    "),
+            "continuation should hang under nested marker (4 cols), got {:?} in {:?}",
+            nested[1],
+            joined
+        );
+    }
+
+    #[test]
+    fn list_marker_prefix_width_excludes_body() {
+        assert_eq!(
+            list_marker_prefix_display_width("    ▸ body text"),
+            Some(UnicodeWidthStr::width("    ▸ "))
+        );
+    }
+
+    #[test]
+    fn highlights_pr_label_and_run_id() {
+        let th = dark();
+        let lines = markdown_to_lines_in_width(
+            th,
+            "PR #42 failed on run 1234567890",
+            Style::default().fg(th.text),
+            None,
+        );
+        let joined: String = lines.iter().map(|l| line_text(l)).collect();
+        assert!(joined.contains("PR #42"));
+        assert!(joined.contains("1234567890"));
+        let pr_bold = lines[0]
+            .spans
+            .iter()
+            .any(|s| s.content.as_ref().contains("PR #42") && s.style.fg == Some(th.pr_ref));
+        assert!(pr_bold, "PR label should be highlighted: {:?}", lines[0].spans);
+    }
+
+    #[test]
+    fn hash_pr_renders_short_pr_label() {
+        let th = dark();
+        let lines = markdown_to_lines_in_width(
+            th,
+            "see #42 for details",
+            Style::default().fg(th.text),
+            None,
+        );
+        let joined: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            joined.contains("[PR #42]"),
+            "expected short PR label, got {joined:?}"
+        );
+    }
+
+    #[test]
+    fn highlights_owner_repo_slug() {
+        let th = dark();
+        let lines = markdown_to_lines_in_width(
+            th,
+            "open PR in acme/widget with failing CI",
+            Style::default().fg(th.text),
+            None,
+        );
+        assert!(
+            lines[0].spans.iter().any(|s| {
+                s.content.as_ref().contains("acme/widget") && s.style.fg == Some(th.link)
+            }),
+            "repo slug should be highlighted: {:?}",
+            lines[0].spans
+        );
+    }
+
+    #[test]
+    fn osc8_links_wrap_markdown_href() {
+        let mut th = dark();
+        th.osc8_links = true;
+        let lines = markdown_to_lines_in_width(
+            th,
+            "[run](https://github.com/acme/widget/actions/runs/1)",
+            Style::default().fg(th.text),
+            None,
+        );
+        let joined: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            joined.contains("\x1b]8;;https://github.com/acme/widget/actions/runs/1\x1b\\"),
+            "expected OSC 8 link wrapper: {joined:?}"
+        );
     }
 }

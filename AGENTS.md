@@ -7,7 +7,7 @@ Guidance for AI agents working in the **unistar-coworker** repository.
 unistar-coworker is a **local GitHub ops secretary** (Rust, ratatui TUI). It:
 
 - Runs scheduled **workflows** (daily triage, release duty, review radar, …) and an interactive **chat** mode.
-- Calls **[unistar-mcp](https://github.com/unistar-ai/unistar-mcp)** over stdio MCP (`--lazy` by default) for GitHub/CI read/write tools.
+- Calls **[unistar-mcp](../unistar-mcp)** over stdio MCP (`--lazy` by default) for GitHub/CI read/write tools.
 - Uses a **local LLM** (Ollama-compatible OpenAI API) for classification, chat planning, and digests.
 - **Never** auto-executes mutating actions — `ci_rerun_workflow`, `pr_create_backport`, `pr_post_comment` go through the TUI approval queue unless `chat.auto_approve_mutations` is explicitly enabled.
 
@@ -46,7 +46,7 @@ Three layers; do not blur responsibilities:
 | **Agent** | `agents/*/AGENT.md` | Task spec: goals, output format, tool strategy; references `skills[]`. |
 | **Harness** | `src/agent/*.rs`, `src/engine/*.rs` | Deterministic Rust: MCP, store, approvals, token budget, chat/workflow loops. |
 
-Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + `config.chat.preferred_tools` + [`src/agent/tool_catalog.rs`](./src/agent/tool_catalog.rs).
+Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`src/agent/tool_catalog.rs`](./src/agent/tool_catalog.rs).
 
 Prompt assembly: [`src/engine/prompt.rs`](./src/engine/prompt.rs) (`compose_system_prompt`, `load_chat_prompt_bundle`).
 
@@ -59,7 +59,7 @@ Entry: [`src/engine/chat.rs`](./src/engine/chat.rs) → [`src/agent/chat_loop.rs
 | Concern | Where |
 |---------|--------|
 | Native tool calling (Ollama/OpenAI `tools` / `tool_calls`) | [`src/llm/chat.rs`](./src/llm/chat.rs), [`src/llm/client.rs`](./src/llm/client.rs) |
-| Tool schemas exposed to the model | `ToolCatalog::native_tool_definitions()` in [`tool_catalog.rs`](./src/agent/tool_catalog.rs) |
+| Tool schemas exposed to the model | `ToolCatalog::native_tool_definitions_for_session(chat.tool_mode, warmed)` in [`tool_catalog.rs`](./src/agent/tool_catalog.rs) |
 | LLM message packing, trimming, token estimate | [`src/agent/context.rs`](./src/agent/context.rs) |
 | Full tool args + result/error in context | `format_tool_context_message()` in `context.rs` |
 | Harness nudges (missing args, duplicate tool, invalid name) | `tool_catalog.rs` + `push_harness_nudge` in `chat_loop.rs` — **chronological order**, not moved to tail |
@@ -76,7 +76,7 @@ Legacy JSON `action: reply | tool | approval` has been removed; chat uses native
 
 - Config: `mcp.command`, `mcp.args` (typically `["--lazy"]`) in `coworker.yaml`.
 - Implementation: [`src/mcp/subprocess.rs`](./src/mcp/subprocess.rs) — stdio JSON-RPC to unistar-mcp; no shell.
-- Lazy mode: model sees `tool_list` / `tool_describe` / `tool_call` meta-tools plus chat `preferred_tools` via native schemas.
+- Lazy mode (MCP): business tools via `tool_list` / `tool_describe` / `tool_call`. Chat default `tool_mode: lazy` exposes only meta + harness + mutating as native schemas.
 
 For MCP server behavior or new GitHub tools, change **unistar-mcp**, not duplicate `gh` calls in coworker.
 
@@ -91,7 +91,7 @@ For MCP server behavior or new GitHub tools, change **unistar-mcp**, not duplica
 | TUI (tabs, chat, context panel, approvals) | `src/tui/` |
 | CLI entry | `src/main.rs` |
 
-Default store backend is JSON under `./data` (gitignored). SQLite: `cargo test --features sqlite`, `store migrate`.
+Default store backend is JSON under `./data` (gitignored). SQLite backend and `store migrate` are built in.
 
 ---
 
@@ -99,7 +99,7 @@ Default store backend is JSON under `./data` (gitignored). SQLite: `cargo test -
 
 - Example: [`coworker.example.yaml`](./coworker.example.yaml).
 - Loaded from cwd or `~/.config/unistar-coworker/coworker.yaml` (see [`src/config.rs`](./src/config.rs)).
-- Key knobs: `repos`, `llm.context_limit` (64K), `chat.max_turns`, `chat.max_tool_calls`, `chat.preferred_tools`, `policy.auto_rerun_flaky`.
+- Key knobs: `repos`, `llm.context_limit` (64K), `chat.max_turns`, `chat.max_tool_calls`, `chat.tool_mode`, `policy.auto_rerun_flaky`.
 
 ---
 
@@ -109,7 +109,7 @@ Default store backend is JSON under `./data` (gitignored). SQLite: `cargo test -
 cargo check
 cargo clippy -- -D warnings    # CI-quality bar; fix all warnings
 cargo test
-cargo test --features sqlite
+cargo test
 cargo run --release            # TUI + scheduler
 cargo run --release -- chat --once "Summarize open PRs in acme/widget"
 cargo run --release -- run-once --workflow daily-work
@@ -129,11 +129,11 @@ List agents/skills: `cargo run --release -- agents list` / `skills list`.
 - **Mutating behavior** — must stay behind approval unless config explicitly opts out.
 - **Context budget** — 64K-oriented; history uses ~40% of input; when over budget, older turns batch into one `[earlier context summary]` via LLM (`trim_llm_messages_with_llm`), then incremental trim if needed; harness nudges are never folded into summaries.
 
-When adding a chat tool to the whitelist, update: `TOOLS.md` (if documented), `tool_catalog.rs` `TOOLS` table, tests, and optionally `chat.preferred_tools` in example yaml.
+When adding a chat tool, update: `TOOLS.md` (if documented), `tool_catalog.rs` `TOOLS` table, and tests.
 
 ---
 
 ## Related repos
 
-- [unistar-mcp](https://github.com/unistar-ai/unistar-mcp) — Go MCP server (`gh`/`git`); see its `AGENTS.md` for tool design principles.
+- [unistar-mcp](../unistar-mcp) — Go MCP server (`gh`/`git`); see its `AGENTS.md` for tool design principles.
 - MCP PR/CI triage skill: `unistar-mcp/.cursor/skills/pr-ci-triage/SKILL.md` (coworker loads `skills/ci-triage/SKILL.md` for workflows/chat).

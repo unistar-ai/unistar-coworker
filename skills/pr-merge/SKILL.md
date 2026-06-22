@@ -1,6 +1,15 @@
 ---
 name: pr-merge
-description: Interpret merge blockers and review state.
+description: Interpret merge blockers and review state. Use when user asks about merge, review, approval, or blocked PRs.
+intent_keywords: [merge, block, approve, review]
+intent_phrases: [needs to approve, merge blocked, waiting for review]
+tools:
+  - pr_get_merge_blockers
+  - pr_get_review_state
+  - pr_list_waiting_review
+  - pr_list_merge_blocked
+  - pr_list_merge_ready
+  - pr_get_overview
 ---
 
 ## Merge blockers

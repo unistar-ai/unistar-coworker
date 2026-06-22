@@ -4,10 +4,9 @@ use tokio::sync::broadcast;
 use crate::agent::parse::parse_pr_line;
 use crate::app::AppEvent;
 use crate::config::Config;
-use crate::engine::AgentSpec;
 use crate::error::{CoworkerError, Result};
-use crate::mcp::helpers::lazy_tool;
-use crate::mcp::McpClient;
+use crate::github::helpers::gh_tool;
+use crate::github::GithubHarness;
 use crate::output::digest::{publish_digest, IncrementalDigest};
 use crate::store::{PrSnapshot, Store};
 
@@ -58,19 +57,19 @@ impl ReviewRadarOutcome {
 
 pub async fn run_review_radar(
     config: &Config,
-    mcp: &dyn McpClient,
+    github: &GithubHarness,
     store: &dyn Store,
-    agent: &AgentSpec,
+    workflow_id: &str,
     events: &broadcast::Sender<AppEvent>,
     log: impl Fn(&str, String),
 ) -> Result<ReviewRadarOutcome> {
-    if !mcp.is_available() {
+    if !github.is_available() {
         return Err(CoworkerError::Workflow(
-            "unistar-mcp is required for review-radar".into(),
+            "GitHub harness (gh) is required for review-radar".into(),
         ));
     }
 
-    let mut digest = IncrementalDigest::begin(agent);
+    let mut digest = IncrementalDigest::begin(workflow_id);
     publish_digest(config, store, events, &digest.to_digest()).await?;
     log(
         "info",
@@ -84,8 +83,8 @@ pub async fn run_review_radar(
             "info",
             format!("review-radar: waiting-for-review PRs in {repo}"),
         );
-        let list_text = lazy_tool(
-            mcp,
+        let list_text = gh_tool(
+            github,
             "pr_list_waiting_review",
             serde_json::json!({
                 "repo": repo,

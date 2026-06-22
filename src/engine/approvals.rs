@@ -3,15 +3,20 @@ use std::sync::Arc;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::agent::bash_tool;
+use crate::agent::file_tools;
+use crate::agent::python_tool;
+use crate::config::{BashToolConfig, PythonToolConfig};
+use crate::agent::bash_tool::BASH_RUN_TOOL;
 use crate::app::append_audit;
 use crate::error::{CoworkerError, Result};
-use crate::mcp::helpers::lazy_tool;
-use crate::mcp::McpClient;
-use crate::store::{ApprovalKind, BackportStatus, RerunOutcome, Store};
+use crate::github::helpers::{gh_tool, mcp_text_indicates_failure};
+use crate::github::GithubHarness;
+use crate::store::{ApprovalKind, BackportStatus, Store};
 
 pub async fn process_decision(
     store: Arc<dyn Store>,
-    mcp: Arc<dyn McpClient>,
+    github: Arc<GithubHarness>,
     id: &Uuid,
     approve: bool,
 ) -> Result<String> {
@@ -33,19 +38,19 @@ pub async fn process_decision(
     }
 
     let exec_result = match item.kind {
-        ApprovalKind::RerunFlaky => execute_rerun(mcp.as_ref(), &item).await,
-        ApprovalKind::Backport => execute_backport(mcp.as_ref(), &item).await,
-        ApprovalKind::PostComment => execute_post_comment(mcp.as_ref(), &item).await,
+        ApprovalKind::RerunFlaky => execute_rerun(github.as_ref(), &item).await,
+        ApprovalKind::Backport => execute_backport(github.as_ref(), &item).await,
+        ApprovalKind::PostComment => execute_post_comment(github.as_ref(), &item).await,
+        ApprovalKind::IssueAddLabel => execute_issue_add_label(github.as_ref(), &item).await,
+        ApprovalKind::WriteFile => execute_file_mutation(&item, file_tools::WRITE_FILE).await,
+        ApprovalKind::EditFile => execute_file_mutation(&item, file_tools::EDIT_FILE).await,
+        ApprovalKind::BashRun => execute_bash_run_approval(&item).await,
+        ApprovalKind::PythonRun => execute_python_run_approval(&item).await,
     };
 
     match exec_result {
         Ok(detail) => {
             store.decide_approval(id, true).await?;
-            if let Some(incident_id) = item.incident_id {
-                store
-                    .update_flaky_rerun(&incident_id, RerunOutcome::Succeeded)
-                    .await?;
-            }
             if item.kind == ApprovalKind::Backport {
                 mark_backport_status(store.as_ref(), &item, BackportStatus::Created).await?;
             }
@@ -59,11 +64,6 @@ pub async fn process_decision(
             Ok(detail)
         }
         Err(e) => {
-            if let Some(incident_id) = item.incident_id {
-                let _ = store
-                    .update_flaky_rerun(&incident_id, RerunOutcome::Failed)
-                    .await;
-            }
             if item.kind == ApprovalKind::Backport {
                 let _ = mark_backport_status(store.as_ref(), &item, BackportStatus::Failed).await;
             }
@@ -79,18 +79,18 @@ pub async fn process_decision(
     }
 }
 
-async fn execute_rerun(mcp: &dyn McpClient, item: &crate::store::Approval) -> Result<String> {
+async fn execute_rerun(mcp: &GithubHarness, item: &crate::store::Approval) -> Result<String> {
     let run_id = item
         .run_id
         .ok_or_else(|| CoworkerError::Workflow("rerun approval missing run_id".into()))?;
     let repo = crate::agent::chat_loop::sanitize_repo_string(&item.repo);
-    let output = lazy_tool(
+    let output = gh_tool(
         mcp,
         "ci_rerun_workflow",
         json!({ "repo": repo, "run_id": run_id }),
     )
     .await?;
-    if output.to_ascii_lowercase().contains("error") {
+    if mcp_text_indicates_failure(&output) {
         return Err(CoworkerError::Workflow(format!(
             "ci_rerun_workflow failed: {output}"
         )));
@@ -98,7 +98,7 @@ async fn execute_rerun(mcp: &dyn McpClient, item: &crate::store::Approval) -> Re
     Ok(format!("rerun triggered for run {run_id}: {output}"))
 }
 
-async fn execute_backport(mcp: &dyn McpClient, item: &crate::store::Approval) -> Result<String> {
+async fn execute_backport(mcp: &GithubHarness, item: &crate::store::Approval) -> Result<String> {
     let pr_number = item
         .pr_number
         .ok_or_else(|| CoworkerError::Workflow("backport approval missing pr_number".into()))?;
@@ -106,7 +106,7 @@ async fn execute_backport(mcp: &dyn McpClient, item: &crate::store::Approval) ->
         .target_branch
         .as_deref()
         .ok_or_else(|| CoworkerError::Workflow("backport approval missing target_branch".into()))?;
-    let output = lazy_tool(
+    let output = gh_tool(
         mcp,
         "pr_create_backport",
         json!({
@@ -116,7 +116,7 @@ async fn execute_backport(mcp: &dyn McpClient, item: &crate::store::Approval) ->
         }),
     )
     .await?;
-    if output.to_ascii_lowercase().contains("error") {
+    if mcp_text_indicates_failure(&output) {
         return Err(CoworkerError::Workflow(format!(
             "pr_create_backport failed: {output}"
         )));
@@ -127,7 +127,7 @@ async fn execute_backport(mcp: &dyn McpClient, item: &crate::store::Approval) ->
 }
 
 async fn execute_post_comment(
-    mcp: &dyn McpClient,
+    mcp: &GithubHarness,
     item: &crate::store::Approval,
 ) -> Result<String> {
     let pr_number = item
@@ -136,7 +136,7 @@ async fn execute_post_comment(
     let body = item.comment_body.as_deref().ok_or_else(|| {
         CoworkerError::Workflow("post comment approval missing comment_body".into())
     })?;
-    let output = lazy_tool(
+    let output = gh_tool(
         mcp,
         "pr_post_comment",
         json!({
@@ -146,7 +146,7 @@ async fn execute_post_comment(
         }),
     )
     .await?;
-    if output.to_ascii_lowercase().contains("error") {
+    if mcp_text_indicates_failure(&output) {
         return Err(CoworkerError::Workflow(format!(
             "pr_post_comment failed: {output}"
         )));
@@ -155,6 +155,74 @@ async fn execute_post_comment(
         "comment posted on {}/#{}: {output}",
         item.repo, pr_number
     ))
+}
+
+async fn execute_issue_add_label(
+    mcp: &GithubHarness,
+    item: &crate::store::Approval,
+) -> Result<String> {
+    let issue_number = item.issue_number.ok_or_else(|| {
+        CoworkerError::Workflow("issue label approval missing issue_number".into())
+    })?;
+    let label = item.label.as_deref().ok_or_else(|| {
+        CoworkerError::Workflow("issue label approval missing label".into())
+    })?;
+    let output = gh_tool(
+        mcp,
+        "issue_add_label",
+        json!({
+            "repo": crate::agent::chat_loop::sanitize_repo_string(&item.repo),
+            "issue_number": issue_number,
+            "label": label,
+        }),
+    )
+    .await?;
+    if mcp_text_indicates_failure(&output) {
+        return Err(CoworkerError::Workflow(format!(
+            "issue_add_label failed: {output}"
+        )));
+    }
+    Ok(format!(
+        "label `{label}` added to {}/issue/{issue_number}: {output}",
+        item.repo
+    ))
+}
+
+async fn execute_file_mutation(item: &crate::store::Approval, tool_name: &str) -> Result<String> {
+    let payload = item.comment_body.as_deref().ok_or_else(|| {
+        CoworkerError::Workflow(format!("{tool_name} approval missing args payload"))
+    })?;
+    let args: serde_json::Value = serde_json::from_str(payload).map_err(|e| {
+        CoworkerError::Workflow(format!("{tool_name} approval args invalid JSON: {e}"))
+    })?;
+    let workspace = std::path::PathBuf::from(&item.repo);
+    let output = file_tools::execute_mutating_file_tool(&workspace, tool_name, &args)?;
+    Ok(format!("{tool_name} approved: {output}"))
+}
+
+async fn execute_bash_run_approval(item: &crate::store::Approval) -> Result<String> {
+    let args = approval_args_json(item, BASH_RUN_TOOL)?;
+    let workspace = std::path::PathBuf::from(&item.repo);
+    let config = BashToolConfig::default();
+    let output = bash_tool::execute_bash_approved(&config, &workspace, &args).await?;
+    Ok(format!("bash_run approved: {output}"))
+}
+
+async fn execute_python_run_approval(item: &crate::store::Approval) -> Result<String> {
+    let args = approval_args_json(item, python_tool::PYTHON_RUN_TOOL)?;
+    let workspace = std::path::PathBuf::from(&item.repo);
+    let config = PythonToolConfig::default();
+    let output = python_tool::execute_python_approved(&config, &workspace, &args).await?;
+    Ok(format!("python_run approved: {output}"))
+}
+
+fn approval_args_json(item: &crate::store::Approval, tool_name: &str) -> Result<serde_json::Value> {
+    let payload = item.comment_body.as_deref().ok_or_else(|| {
+        CoworkerError::Workflow(format!("{tool_name} approval missing args payload"))
+    })?;
+    serde_json::from_str(payload).map_err(|e| {
+        CoworkerError::Workflow(format!("{tool_name} approval args invalid JSON: {e}"))
+    })
 }
 
 async fn mark_backport_status(

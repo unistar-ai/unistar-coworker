@@ -2,17 +2,32 @@
 
 **Technique SSOT** — reusable judgment/style docs composed into agent prompts.
 
-| Path | Role |
-|------|------|
-| `ci-triage/` | CI verdict rules (flaky / real / policy) |
-| `digest-style/` | Ops digest writing |
-| `github-ops-tone/` | Secretary tone, no hallucination |
-| `pr-merge/` | Merge blockers interpretation |
-| `_base/TOOLS.md` | Shared tool catalog (see `load_skill_with_base` / `read_base_tools`) |
+| Skill | Scenario |
+|-------|----------|
+| `github-ops-tone/` | Secretary tone (`always: true`) |
+| `ci-triage/` | PR CI failures — flaky / real / policy |
+| `pr-merge/` | Merge blockers, review state |
+| `pr-review/` | Diff review, risk scan, CODEOWNERS |
+| `my-prs/` | Author's open PRs |
+| `pr-hygiene/` | Stale, mega, docs-only PRs |
+| `ci-health/` | Main branch / workflow CI stats |
+| `external-ci/` | Jenkins, Codecov, non-Actions checks |
+| `flaky-tests/` | Flaky ledger, rerun compare |
+| `issue-tracker/` | Issues list, search, detail |
+| `security-alerts/` | Dependabot / scanning alerts |
+| `release-backport/` | Tags, release notes, backports |
+| `digest-style/` | Ops digest writing format |
+| `oncall-store/` | Local digest, approvals, handoff |
+| `_base/TOOLS.md` | Full tool reference (workflows / native mode) |
 
-Task specs live in **`agents/<id>/AGENT.md`**. Configure workflows with `agent:` + optional `skills[]` in `coworker.yaml` — see [skill-agent-harness.md](../skill-agent-harness.md).
+Skills declare **`tools:`** in frontmatter — chat warms those schemas on load (`skill_load` too).  
+Use **`skill_search`** in auto mode for techniques not matched by intent.
+
+Chat loads skills from **`agents/chat/AGENT.md`** `skills:` list unless `chat.skills` overrides in yaml.
 
 ```bash
 unistar-coworker agents list
 unistar-coworker skills list
 ```
+
+Task specs: **`agents/<id>/AGENT.md`**. See [skill-agent-harness.md](../skill-agent-harness.md).

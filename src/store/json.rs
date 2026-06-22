@@ -3,16 +3,15 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use fs2::FileExt;
 use uuid::Uuid;
 
 use crate::agent::context::harness_nudge_base;
 use crate::error::{CoworkerError, Result};
 use crate::store::{
-    Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, ChatSession,
-    Classification, Digest, FlakyIncident, FlakyQuery, FlakyTestRollup, IssueSnapshot, MainAlert,
-    MainAlertQuery, PrSnapshot, RegressionLink, RerunOutcome, Store, Transcript, WorkflowRun,
+    Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, ChatRuntimeState,
+    ChatSession, Digest, PrSnapshot, Store, Transcript, WorkflowRun,
 };
 use async_trait::async_trait;
 
@@ -27,16 +26,12 @@ impl JsonStore {
         fs::create_dir_all(root.join("digests"))?;
         fs::create_dir_all(root.join("pr_snapshots"))?;
         fs::create_dir_all(root.join("approvals"))?;
-        fs::create_dir_all(root.join("flaky"))?;
         fs::create_dir_all(root.join("audit"))?;
         fs::create_dir_all(root.join("workflow_runs"))?;
         fs::create_dir_all(root.join("backport_queue"))?;
-        fs::create_dir_all(root.join("main_alerts"))?;
         fs::create_dir_all(root.join("chat/sessions"))?;
         fs::create_dir_all(root.join("chat/messages"))?;
-        fs::create_dir_all(root.join("issue_snapshots"))?;
         fs::create_dir_all(root.join("transcripts"))?;
-        fs::create_dir_all(root.join("regression_links"))?;
 
         Ok(Self { root })
     }
@@ -136,25 +131,6 @@ impl Store for JsonStore {
         files.sort_by_key(|e| e.file_name());
         if let Some(last) = files.pop() {
             return Ok(Some(read_json(&last.path())?));
-        }
-        Ok(None)
-    }
-
-    async fn get_digest_by_skill(&self, skill: &str) -> Result<Option<Digest>> {
-        let dir = self.root.join("digests");
-        if !dir.exists() {
-            return Ok(None);
-        }
-        let mut files: Vec<_> = fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .collect();
-        files.sort_by_key(|e| e.file_name());
-        for entry in files.into_iter().rev() {
-            let digest: Digest = read_json(&entry.path())?;
-            if digest.skill.as_deref() == Some(skill) {
-                return Ok(Some(digest));
-            }
         }
         Ok(None)
     }
@@ -268,88 +244,6 @@ impl Store for JsonStore {
         Self::append_jsonl(&path, entry)
     }
 
-    async fn record_flaky_incident(&self, incident: &FlakyIncident) -> Result<()> {
-        let path = self.root.join("flaky/incidents.jsonl");
-        Self::append_jsonl(&path, incident)?;
-        // Interior mutability workaround: re-read rollups, update, save
-        let mut rollups: HashMap<String, FlakyTestRollup> =
-            read_json(&self.root.join("flaky/tests.json")).unwrap_or_default();
-        let entry = rollups
-            .entry(incident.fingerprint.clone())
-            .or_insert_with(|| FlakyTestRollup {
-                fingerprint: incident.fingerprint.clone(),
-                repo: incident.repo.clone(),
-                workflow: incident.workflow.clone(),
-                job: incident.job.clone(),
-                test_name: incident.test_name.clone(),
-                first_seen: incident.ts,
-                last_seen: incident.ts,
-                incident_count: 0,
-                rerun_attempts: 0,
-                rerun_successes: 0,
-                last_error_signature: incident.log_excerpt.chars().take(200).collect(),
-            });
-        entry.last_seen = incident.ts;
-        entry.incident_count += 1;
-        entry.last_error_signature = incident.log_excerpt.chars().take(200).collect();
-        Self::write_json(&self.root.join("flaky/tests.json"), &rollups)
-    }
-
-    async fn update_flaky_rerun(&self, incident_id: &Uuid, outcome: RerunOutcome) -> Result<()> {
-        let path = self.root.join("flaky/incidents.jsonl");
-        if !path.exists() {
-            return Err(CoworkerError::Store(format!(
-                "incident {incident_id} not found"
-            )));
-        }
-        let raw = fs::read_to_string(&path)?;
-        let mut incidents: Vec<FlakyIncident> = raw
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(serde_json::from_str)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let idx = incidents
-            .iter()
-            .position(|i| &i.id == incident_id)
-            .ok_or_else(|| CoworkerError::Store(format!("incident {incident_id} not found")))?;
-        incidents[idx].rerun_outcome = Some(outcome);
-
-        let mut out = String::new();
-        for incident in &incidents {
-            out.push_str(&serde_json::to_string(incident)?);
-            out.push('\n');
-        }
-        fs::write(&path, out)?;
-
-        let incident = &incidents[idx];
-        let mut rollups: HashMap<String, FlakyTestRollup> =
-            read_json(&self.root.join("flaky/tests.json")).unwrap_or_default();
-        if let Some(entry) = rollups.get_mut(&incident.fingerprint) {
-            entry.rerun_attempts += 1;
-            if outcome == RerunOutcome::Succeeded {
-                entry.rerun_successes += 1;
-            }
-            Self::write_json(&self.root.join("flaky/tests.json"), &rollups)?;
-        }
-        Ok(())
-    }
-
-    async fn list_flaky_tests(&self, q: FlakyQuery) -> Result<Vec<FlakyTestRollup>> {
-        let rollups: HashMap<String, FlakyTestRollup> =
-            read_json(&self.root.join("flaky/tests.json")).unwrap_or_default();
-        let since = q
-            .since_days
-            .map(|d| Utc::now() - Duration::days(i64::from(d)));
-        let mut list: Vec<_> = rollups
-            .into_values()
-            .filter(|t| q.repo.as_ref().is_none_or(|r| &t.repo == r))
-            .filter(|t| since.is_none_or(|s| t.last_seen >= s))
-            .collect();
-        list.sort_by_key(|b| std::cmp::Reverse(b.incident_count));
-        list.truncate(q.limit);
-        Ok(list)
-    }
-
     async fn upsert_backport_queue(&self, item: &BackportQueueItem) -> Result<()> {
         let path = self.root.join("backport_queue/items.json");
         let mut items: HashMap<String, BackportQueueItem> = if path.exists() {
@@ -373,78 +267,6 @@ impl Store for JsonStore {
             .collect();
         list.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(list)
-    }
-
-    async fn record_main_alert(&self, alert: &MainAlert) -> Result<()> {
-        let path = self.root.join("main_alerts/alerts.jsonl");
-        Self::append_jsonl(&path, alert)
-    }
-
-    async fn list_main_alerts(&self, q: MainAlertQuery) -> Result<Vec<MainAlert>> {
-        let path = self.root.join("main_alerts/alerts.jsonl");
-        if !path.exists() {
-            return Ok(vec![]);
-        }
-        let raw = fs::read_to_string(path)?;
-        let since = q
-            .since_hours
-            .map(|h| Utc::now() - Duration::hours(i64::from(h)));
-        let mut out = Vec::new();
-        for line in raw.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let alert: MainAlert = serde_json::from_str(line)?;
-            if q.unacknowledged_only && alert.acknowledged {
-                continue;
-            }
-            if let Some(r) = &q.repo {
-                if alert.repo != *r {
-                    continue;
-                }
-            }
-            if let Some(since) = since {
-                if alert.ts < since {
-                    continue;
-                }
-            }
-            out.push(alert);
-        }
-        out.sort_by_key(|a| std::cmp::Reverse(a.ts));
-        out.truncate(q.limit);
-        Ok(out)
-    }
-
-    async fn acknowledge_main_alert(&self, id: &Uuid) -> Result<()> {
-        let path = self.root.join("main_alerts/alerts.jsonl");
-        if !path.exists() {
-            return Ok(());
-        }
-        let raw = fs::read_to_string(&path)?;
-        let mut alerts: Vec<MainAlert> = raw
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        let mut changed = false;
-        for alert in &mut alerts {
-            if alert.id == *id {
-                alert.acknowledged = true;
-                changed = true;
-            }
-        }
-        if !changed {
-            return Ok(());
-        }
-        let tmp = path.with_extension("tmp");
-        let mut data = String::new();
-        for alert in alerts {
-            data.push_str(&serde_json::to_string(&alert)?);
-            data.push('\n');
-        }
-        fs::write(&tmp, data)?;
-        fs::rename(tmp, path).map_err(CoworkerError::Io)?;
-        Ok(())
     }
 
     async fn start_workflow_run(&self, workflow_id: &str) -> Result<Uuid> {
@@ -488,6 +310,7 @@ impl Store for JsonStore {
             created_at: Utc::now(),
             title: title.unwrap_or("Chat").to_string(),
             repo_scope: repo_scope.map(str::to_string),
+            runtime_state: ChatRuntimeState::default(),
         };
         let path = self
             .root
@@ -503,6 +326,14 @@ impl Store for JsonStore {
             return Ok(None);
         }
         Ok(Some(read_json(&path)?))
+    }
+
+    async fn update_chat_session(&self, session: &ChatSession) -> Result<()> {
+        let path = self
+            .root
+            .join("chat/sessions")
+            .join(format!("{}.json", session.id));
+        Self::write_json(&path, session)
     }
 
     async fn append_chat_message(&self, msg: &ChatMessage) -> Result<()> {
@@ -589,43 +420,6 @@ impl Store for JsonStore {
         Ok(msgs)
     }
 
-    async fn upsert_issue_snapshot(&self, snap: &IssueSnapshot) -> Result<()> {
-        let path = self
-            .root
-            .join("issue_snapshots")
-            .join(format!("{}.json", Self::repo_file(&snap.repo)));
-        let mut map: HashMap<u32, IssueSnapshot> = if path.exists() {
-            read_json(&path)?
-        } else {
-            HashMap::new()
-        };
-        map.insert(snap.number, snap.clone());
-        Self::write_json(&path, &map)
-    }
-
-    async fn list_issue_snapshots(&self, repo: Option<&str>) -> Result<Vec<IssueSnapshot>> {
-        let dir = self.root.join("issue_snapshots");
-        if !dir.exists() {
-            return Ok(vec![]);
-        }
-        let mut out = Vec::new();
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            if repo.is_some_and(|r| {
-                !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains(&Self::repo_file(r))
-            }) {
-                continue;
-            }
-            let map: HashMap<u32, IssueSnapshot> = read_json(&entry.path())?;
-            out.extend(map.into_values());
-        }
-        out.sort_by_key(|b| std::cmp::Reverse(b.fetched_at));
-        Ok(out)
-    }
-
     async fn save_transcript(&self, t: &Transcript) -> Result<()> {
         self.with_lock(|| {
             let path = self.root.join("transcripts/all.jsonl");
@@ -647,64 +441,6 @@ impl Store for JsonStore {
         list.sort_by_key(|t| std::cmp::Reverse(t.created_at));
         list.truncate(limit);
         Ok(list)
-    }
-
-    async fn save_regression_link(&self, link: &RegressionLink) -> Result<()> {
-        self.with_lock(|| {
-            let path = self.root.join("regression_links/all.jsonl");
-            Self::append_jsonl(&path, link)
-        })
-    }
-
-    async fn list_regression_links(&self, limit: usize) -> Result<Vec<RegressionLink>> {
-        let path = self.root.join("regression_links/all.jsonl");
-        if !path.exists() {
-            return Ok(vec![]);
-        }
-        let raw = fs::read_to_string(&path)?;
-        let mut list: Vec<RegressionLink> = raw
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        list.sort_by_key(|l| std::cmp::Reverse(l.created_at));
-        list.truncate(limit);
-        Ok(list)
-    }
-
-    async fn reclassify_flaky(
-        &self,
-        fingerprint: &str,
-        classification: Classification,
-    ) -> Result<u32> {
-        self.with_lock(|| {
-            let path = self.root.join("flaky/incidents.jsonl");
-            if !path.exists() {
-                return Ok(0);
-            }
-            let raw = fs::read_to_string(&path)?;
-            let mut incidents: Vec<FlakyIncident> = raw
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(serde_json::from_str)
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let mut updated = 0u32;
-            for incident in &mut incidents {
-                if incident.fingerprint == fingerprint {
-                    incident.classification = classification;
-                    updated += 1;
-                }
-            }
-            if updated > 0 {
-                let mut out = String::new();
-                for incident in &incidents {
-                    out.push_str(&serde_json::to_string(incident)?);
-                    out.push('\n');
-                }
-                fs::write(&path, out)?;
-            }
-            Ok(updated)
-        })
     }
 
     async fn list_chat_sessions(&self, limit: usize) -> Result<Vec<ChatSession>> {

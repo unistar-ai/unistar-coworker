@@ -307,6 +307,24 @@ Failed logs (this page only):\n{logs}"
         messages: &serde_json::Value,
         think_override: Option<bool>,
     ) -> Result<String> {
+        self.chat_ollama_structured(
+            base,
+            messages,
+            think_override,
+            &classify_response_schema(),
+            self.llm_output_limit(),
+        )
+        .await
+    }
+
+    async fn chat_ollama_structured(
+        &self,
+        base: &str,
+        messages: &serde_json::Value,
+        think_override: Option<bool>,
+        schema: &serde_json::Value,
+        num_predict: u32,
+    ) -> Result<String> {
         let url = format!("{base}/api/chat");
         let think = think_override.unwrap_or(self.cfg.think);
         let mut body = serde_json::json!({
@@ -316,10 +334,15 @@ Failed logs (this page only):\n{logs}"
             "think": think,
             "options": {
                 "temperature": 0,
-                "num_predict": self.llm_output_limit(),
+                "num_predict": num_predict,
             },
         });
-        apply_structured_format(&mut body, self.cfg.structured_output);
+        apply_structured_format_named(
+            &mut body,
+            self.cfg.structured_output,
+            schema,
+            "structured_json",
+        );
 
         let v = self.post_json(&url, &body).await?;
         log_ollama_thinking_budget(&v, self.cfg.max_thinking_tokens, think);
@@ -328,6 +351,16 @@ Failed logs (this page only):\n{logs}"
 
     /// OpenAI-compatible `/v1/chat/completions` (OpenAI, vLLM, or Ollama fallback).
     async fn chat_openai_compatible(&self, messages: &serde_json::Value) -> Result<String> {
+        self.chat_openai_structured(messages, &classify_response_schema(), self.llm_output_limit())
+            .await
+    }
+
+    async fn chat_openai_structured(
+        &self,
+        messages: &serde_json::Value,
+        schema: &serde_json::Value,
+        max_tokens: u32,
+    ) -> Result<String> {
         let url = format!(
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
@@ -337,9 +370,14 @@ Failed logs (this page only):\n{logs}"
             "messages": messages,
             "stream": false,
             "temperature": 0,
-            "max_tokens": self.llm_output_limit(),
+            "max_tokens": max_tokens,
         });
-        apply_structured_format(&mut body, self.cfg.structured_output);
+        apply_structured_format_named(
+            &mut body,
+            self.cfg.structured_output,
+            schema,
+            "structured_json",
+        );
 
         let v = self.post_json(&url, &body).await?;
         extract_openai_chat_content(&v)
@@ -367,72 +405,88 @@ Failed logs (this page only):\n{logs}"
             .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm json: {e}")))
     }
 
-    /// Plain-text completion for Map-Reduce summaries (release-notes, light-review).
-    pub async fn summarize_plain(&self, prompt: &str) -> Result<String> {
+    /// LLM gate for `bash_run` (think=false, JSON verdict).
+    pub async fn review_bash_command_json(
+        &self,
+        prompt_template: &str,
+        command: &str,
+        schema: &serde_json::Value,
+        max_tokens: u32,
+    ) -> Result<String> {
+        self.review_code_snippet_json(
+            prompt_template,
+            command,
+            schema,
+            max_tokens,
+            "LLM offline — cannot review bash command",
+        )
+        .await
+    }
+
+    /// LLM gate for `python_run` (think=false, JSON verdict).
+    pub async fn review_python_code_json(
+        &self,
+        prompt_template: &str,
+        code: &str,
+        schema: &serde_json::Value,
+        max_tokens: u32,
+    ) -> Result<String> {
+        self.review_code_snippet_json(
+            prompt_template,
+            code,
+            schema,
+            max_tokens,
+            "LLM offline — cannot review python code",
+        )
+        .await
+    }
+
+    /// LLM gate for `edit_file` / `write_file` (think=false, JSON verdict).
+    pub async fn review_file_edit_json(
+        &self,
+        prompt_template: &str,
+        payload: &str,
+        schema: &serde_json::Value,
+        max_tokens: u32,
+    ) -> Result<String> {
+        self.review_code_snippet_json(
+            prompt_template,
+            payload,
+            schema,
+            max_tokens,
+            "LLM offline — cannot review file edit",
+        )
+        .await
+    }
+
+    async fn review_code_snippet_json(
+        &self,
+        prompt_template: &str,
+        snippet: &str,
+        schema: &serde_json::Value,
+        max_tokens: u32,
+        offline_message: &str,
+    ) -> Result<String> {
         if !self.online {
-            return Ok(String::new());
+            return Err(CoworkerError::Other(anyhow::anyhow!("{offline_message}")));
         }
-        let messages = serde_json::json!([{"role": "user", "content": prompt}]);
         let _permit = self
             .concurrency
             .acquire()
             .await
             .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm concurrency: {e}")))?;
+
+        let user_content = format!("{}\n{}", prompt_template.trim_end(), snippet);
+        let messages = serde_json::json!([{"role": "user", "content": user_content}]);
+        let think_override = Some(false);
+        let tokens = max_tokens.clamp(256, 2048);
+
         if let Some(ollama_base) = ollama_api_base(&self.cfg.base_url) {
-            let url = format!("{ollama_base}/api/chat");
-            let body = serde_json::json!({
-                "model": self.cfg.model,
-                "messages": messages,
-                "stream": false,
-                "options": { "num_predict": self.cfg.max_output_tokens.min(2048) },
-            });
-            let resp = self
-                .http
-                .post(&url)
-                .json(&body)
-                .send()
+            self.chat_ollama_structured(&ollama_base, &messages, think_override, schema, tokens)
                 .await
-                .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm request: {e}")))?;
-            if !resp.status().is_success() {
-                return Ok(String::new());
-            }
-            let v: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm json: {e}")))?;
-            return Ok(v["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .trim()
-                .to_string());
+        } else {
+            self.chat_openai_structured(&messages, schema, tokens).await
         }
-        let body = serde_json::json!({
-            "model": self.cfg.model,
-            "messages": messages,
-            "max_tokens": self.cfg.max_output_tokens.min(2048),
-        });
-        let resp = self
-            .http
-            .post(format!(
-                "{}/chat/completions",
-                self.cfg.base_url.trim_end_matches('/')
-            ))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm request: {e}")))?;
-        if !resp.status().is_success() {
-            return Ok(String::new());
-        }
-        let v: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm json: {e}")))?;
-        Ok(v["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string())
     }
 
     /// Multi-turn chat using native `tools` / `tool_calls`.
@@ -755,8 +809,44 @@ later context. Keep PR numbers, tool names, run IDs, and conclusions. No preambl
 
     /// Rolling summary of older chat turns (think=false).
     pub async fn summarize_session_history(&self, history_text: &str) -> Result<String> {
-        const SYSTEM: &str = "Summarize this chat session excerpt in 3-6 bullet lines for \
-later context. Keep PR numbers, decisions, tool outcomes, and open questions. No preamble.";
+        self.summarize_session_history_with_prompt(
+            history_text,
+            "Summarize this chat session excerpt in 3-6 bullet lines for \
+later context. Keep PR numbers, decisions, tool outcomes, and open questions. No preamble.",
+        )
+        .await
+    }
+
+    /// Coding chat rolling summary — preserve paths, errors, recent edits.
+    pub async fn summarize_coding_session_history(&self, history_text: &str) -> Result<String> {
+        self.summarize_session_history_with_prompt(
+            history_text,
+            "Summarize this coding chat excerpt in 3-6 bullet lines for later context. \
+KEEP verbatim: file paths with line numbers (path:line), compile/test error text, \
+recently edited file list, and the last tool conclusion. \
+COMPRESS: long read_file/grep output, duplicate grep hits, old bash stdout (note exit code only). \
+No preamble.",
+        )
+        .await
+    }
+
+    /// Ops / MCP triage rolling summary — preserve CI_KIND, verdicts, PR refs.
+    pub async fn summarize_ops_session_history(&self, history_text: &str) -> Result<String> {
+        self.summarize_session_history_with_prompt(
+            history_text,
+            "Summarize this GitHub ops chat excerpt in 3-6 bullet lines for later context. \
+KEEP verbatim: CI_KIND lines, verdict (flaky/real/policy/unknown), owner/repo#N PR refs, \
+digest counts (attention/flaky/policy), failing workflow names, and triage conclusions. \
+COMPRESS: raw log excerpts and duplicate tool dumps. No preamble.",
+        )
+        .await
+    }
+
+    async fn summarize_session_history_with_prompt(
+        &self,
+        history_text: &str,
+        system: &str,
+    ) -> Result<String> {
         let user = history_text.chars().take(10_000).collect::<String>();
         if user.trim().is_empty() {
             return Ok(String::new());
@@ -770,7 +860,7 @@ later context. Keep PR numbers, decisions, tool outcomes, and open questions. No
             .await
             .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm concurrency: {e}")))?;
         let messages = serde_json::json!([
-            { "role": "system", "content": SYSTEM },
+            { "role": "system", "content": system },
             { "role": "user", "content": user },
         ]);
         let limit = self.cfg.history_summary_tokens.clamp(128, 400);
@@ -792,6 +882,12 @@ later context. Keep PR numbers, decisions, tool outcomes, and open questions. No
                 Ok(crate::agent::context::truncate_reasoning_local(&user, 320))
             }
         }
+    }
+
+    /// Rolling summary of older chat turns (think=false) — ops path.
+    #[allow(dead_code)]
+    pub async fn summarize_session_history_legacy(&self, history_text: &str) -> Result<String> {
+        self.summarize_session_history(history_text).await
     }
 
     /// Plain-text chat completion — no JSON schema.
@@ -1117,17 +1213,31 @@ fn classify_response_schema() -> serde_json::Value {
 }
 
 /// Attach structured-output constraints for Ollama (`format`) and OpenAI (`response_format`).
+#[cfg(test)]
 fn apply_structured_format(body: &mut serde_json::Value, structured: bool) {
+    apply_structured_format_named(
+        body,
+        structured,
+        &classify_response_schema(),
+        "classify_ci_failure",
+    );
+}
+
+fn apply_structured_format_named(
+    body: &mut serde_json::Value,
+    structured: bool,
+    schema: &serde_json::Value,
+    schema_name: &str,
+) {
     let obj = body.as_object_mut().expect("request body object");
     if structured {
-        let schema = classify_response_schema();
         obj.insert("format".into(), schema.clone());
         obj.insert(
             "response_format".into(),
             serde_json::json!({
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "classify_ci_failure",
+                    "name": schema_name,
                     "strict": true,
                     "schema": schema
                 }
@@ -1544,22 +1654,6 @@ fn verdict_label(v: ClassifyVerdict) -> &'static str {
         ClassifyVerdict::Policy => "policy",
         ClassifyVerdict::Unknown => "unknown",
     }
-}
-
-pub fn llm_reason_text(classify: &ClassifyResult) -> String {
-    let diagnosis = classify.diagnosis.as_deref().unwrap_or(&classify.reason);
-    let action = classify
-        .recommended_action
-        .as_deref()
-        .unwrap_or("(no action given)");
-    format!(
-        "{diagnosis} | Action: {action} ({})",
-        if classify.used_llm {
-            "llm"
-        } else {
-            "heuristic"
-        }
-    )
 }
 
 /// Fast path for offline heuristics: log shape only (never workflow name).

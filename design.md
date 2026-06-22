@@ -9,9 +9,9 @@
 | 记账、digest、报表、代写草稿 | 无审批全自动 merge / 大范围改代码 |
 | TUI 内审批 mutating 动作 | 云端 SaaS、Web Dashboard |
 | 多工作流共用 Scheduler + Agent + Store | 一次性脚本合集 |
-| **Chat 模式**：自然语言驱动、按需调 MCP 工具（见下） | 无约束的通用编程 Agent / 自动 merge |
+| **Chat 模式**：轻量 **coding agent**（workspace + 文件工具 + bash）；GitHub MCP 按需 lazy | 无约束全自动改 repo / 无审批 merge |
 
-**定位一句话：GitHub 运维秘书** —— 在 64K 本地模型约束下，做「该看啥、该干啥、帮你想好草稿、等你拍板」；需要时也可 **用一句话让秘书自己去查、去跑只读工具**。
+**定位一句话：GitHub 运维秘书（Workflow）+ 轻量 coding Chat（默认入口）** —— Workflow/cron 仍做 digest 与 ops 批处理；用户打开 Chat 即在本地 workspace 读/搜/改代码，MCP 退居二线按需发现。
 
 ## Skill / Agent / Harness 三层（v0.3+）
 
@@ -23,7 +23,7 @@
 | **Agent** | `agents/*/AGENT.md` | 单次任务目标、步骤、输出格式、tool 策略；可引用 `skills[]` |
 | **Harness** | `src/agent/*.rs` | 确定性执行：MCP、Store、审批、budget、chat/workflow 循环 |
 
-工具名 SSOT：`skills/_base/TOOLS.md` + `config.chat.preferred_tools`。
+工具名 SSOT：`skills/_base/TOOLS.md` + `src/agent/tool_catalog.rs`。
 
 ---
 
@@ -134,31 +134,30 @@ workflows:
 
 **Tier A 优先级（产品）：** `daily-work` → `release-duty` → `main-guard` → `review-radar` → `flaky-govern` → 其余。
 
-### Chat 模式（交互层 · Phase 2+）
+### Chat 模式（交互层 · 轻量 coding agent）
 
-**不是新 cron 工作流**，而是与 Workflow **并列的交互入口**：用户在 TUI 或 CLI 里用自然语言下指令，本地 LLM 在 **unistar-mcp lazy 工具** 上做多轮 **plan → tool_call → 观察 → 回复**，直到答完或触达预算。
+**不是新 cron 工作流**，而是与 Workflow **并列的交互入口**：用户在 TUI 或 CLI 里用自然语言驱动本地 **workspace** 上的读/搜/改/跑命令，LLM 在 **file tools + bash_run** 上做多轮 **plan → tool_call → 观察 → 回复**，直到答完或触达预算。GitHub MCP 工具 **不预热**；用户提到 PR/CI 时走 `tool_search` → `tool_call`，或 `bash_run gh ...` 兜底。
 
 #### 目标场景
 
 | 用户说 | Agent 行为（示例） |
 |--------|-------------------|
-| 「acme/widget 有哪些 open PR CI 挂了？」 | `pr_list_open` → 过滤 → 自然语言列表 |
-| 「#19188 什么情况？」 | **`pr_get_overview`** → 摘要（含 failing run IDs） |
-| 「#19188 失败原因是什么？」 | `pr_get_overview` / `ci_analyze_pr_failures` → **`ci_get_run_summary`** → `ci_get_failed_logs`（分页）→ 摘要 |
-| 「为啥还不能 merge？」 | **`pr_get_merge_blockers`** |
-| 「有哪些 PR 在等 review？」 | **`pr_list_waiting_review`** |
-| 「今天 digest 说啥？」 | **`store_get_latest_digest`**（本地 Store，零 GitHub API） |
-| 「帮我看下 main 最近 CI」 | `ci_list_runs` → 归纳连续失败 |
-| 「跑一下 review-radar 并告诉我结果」 | 用 MCP 链（`pr_list_open`、`pr_list_waiting_review`、`store_get_latest_digest` 等）自行汇总；Chat **不能**调用其他 agent |
-| 「给这个 flaky run 提 rerun」 | 识别 mutating → **只生成 Approval**，不直接 `ci_rerun_workflow` |
+| 「这个 panic 在哪？」 | `grep` → `read_file` → 定位 → 小步 `edit_file` |
+| 「跑一下 cargo test」 | `bash_run cargo test` → 读失败 → 定位修复 |
+| 「find where Foo is defined」 | `glob` / `grep` → `read_file` 相关行 |
+| 「refactor rename X to Y」 | `grep` 引用 → 多次小 `edit_file` → `bash_run` 验证 |
+| 「git status / commit」 | `bash_run git …`（不 force push main） |
+| 「#19188 CI 为啥红？」（可选） | lazy MCP：`tool_search` → `pr_get_overview` / `ci_analyze_pr_failures` |
+| 「今天 digest 说啥？」（可选） | lazy MCP 或 `skill_load` ops skill → `store_get_latest_digest` |
 
 #### 与 Workflow 的区别
 
 | | Workflow | Chat |
 |---|----------|------|
-| 任务规格 | `agents/<workflow-id>/AGENT.md` | `agents/chat/AGENT.md` + **config 里 repos 上下文** |
-| 技巧 | 可选 `skills[]`（如 ci-triage） | `github-ops-tone`、`ci-triage` 等 |
-| 工具链 | Harness / Agent 文档写死的顺序 | LLM 每轮选择 preferred tools 或 lazy 三件套 |
+| 任务规格 | `agents/<workflow-id>/AGENT.md` | `agents/chat/AGENT.md` + **coding skills** |
+| 技巧 | ops skills（ci-triage、pr-merge…） | `code-edit`、`repo-explore`、`debug`、`test-run`、`git-workflow` |
+| 工具链 | Harness 写死的 MCP 顺序 | LLM 选 **read_file / grep / glob / edit_file / bash_run**；MCP lazy |
+| 上下文 | repos + Store digest | **workspace 路径 + git 一行摘要 + session recent edits** |
 | 输出 | Digest、Store 实体、报表 | 对话消息 + 可选 Approval |
 | 调度 | cron | 仅用户发起 |
 | 审计 | `workflow_runs` | `chat_sessions` + `transcripts` |
@@ -168,37 +167,39 @@ workflows:
 ```
 用户输入 (TUI Chat / CLI chat)
     → ChatSession（session_id, 最近 N 轮历史）
-    → System: compose(agents/chat + skills[] + TOOLS.md) + coworker.yaml 摘要（repos、policy）
-    → LLM 循环（max_turns、max_tool_calls 来自 policy，可与 workflow 共用上限）
-         ├─ 只读 tool → 直接执行，结果 cap 后回填 context
-         └─ mutating tool → 仅 push Approval；回复「已加入审批队列」
+    → System: compose(agents/chat + coding skills[]) + workspace runtime context
+    → LLM 循环（max_turns、max_tool_calls 来自 policy）
+         ├─ 只读 tool（read/grep/glob）→ 直接执行，结果 cap 后回填
+         └─ approval-required tool（GitHub mutating）→ push Approval
+         └─ no-approval path（bash_run/python_run/edit_file/write_file/reads）→ LLM safety review，可并行
     → assistant 消息 → TUI / stdout
-    → 可选：save_transcript(session_id, turns)
 ```
 
 **64K 约束（Chat 专用）：**
 
-- 会话历史 **滑动窗口**（最近 K 轮或 K token），完整 transcript 落 Store 不全量进 context  
-- 单轮 tool result 仍受 mcp cap；Chat 默认 **不** 一次拉 20 个 PR 的全量 log  
-- 复杂任务应 **用户从 TUI/CLI 触发 workflow**（如「做 morning triage」→ `daily-work`），Chat 只解读 Store / MCP 结果，**不在对话里 fork 其他 agent**
+- 会话历史 **滑动窗口** + **coding compaction**（保留 path:line、错误原文、recent edits）  
+- 长 `read_file` / `grep` 输出压缩；旧 bash stdout 留 exit code + 末 20 行  
+- 复杂 **ops** 任务仍应 **用户触发 workflow**（daily-work 等）；Chat 默认 coding，不在对话里 fork 其他 agent
 
-#### Agent 要点（`agents/chat/AGENT.md` + `skills/github-ops-tone`）
+#### Agent 要点（`agents/chat/AGENT.md` + coding skills）
 
-- 身份：GitHub 运维秘书，**只**通过 unistar-mcp 操作 GitHub；不臆造 PR/CI 状态（见 github-ops-tone skill）  
-- 工具：**`chat.preferred_tools` 白名单**（含 `store_get_latest_digest` 虚拟 tool）；lazy 三件套作 fallback  
-- Mutating：rerun / backport / comment **必须**说明将走审批，禁止假设已执行  
-- Store：`store_get_latest_digest` 读最新 digest + pending approvals；system prompt 仍注入简短 snapshot  
-- 失败：MCP/LLM 不可用时报错并建议检查 Config 视图
+- 身份：**轻量 coding assistant**，默认在 `chat.workspace` 内操作  
+- 工具：warm `read_file`、`grep`、`glob`、`edit_file`、`bash_run`；MCP 仅按需发现  
+- Mutating：`edit_file` / `write_file` / `bash_run` / `python_run` 走 **LLM safety review**（无人工审批）；GitHub mutating 每轮最多一个审批
+- 不臆造文件内容；只报告 tool 输出  
+- MCP 离线时 Chat 仍可用；GitHub 问题可用 `bash_run gh` 或等 MCP 恢复
 
-#### unistar-mcp Chat 工具包（Top 5 + 扩展）
+#### Chat 默认工具面
 
 | Tool | 层 | 用途 |
 |------|-----|------|
-| `pr_get_overview` | MCP | 单 PR 全貌（status + files + failing run IDs） |
-| `pr_get_merge_blockers` | MCP | 结构化 merge blockers |
-| `pr_list_waiting_review` | MCP | CI-green + review-required 列表 |
-| `ci_get_run_summary` | MCP | Run 摘要（failed job 名）先于全量 log |
-| `store_get_latest_digest` | **Coworker 虚拟** | 本地 digest / approvals |
+| `read_file` | 原生 | 按 path + 行范围读 |
+| `grep` | 原生 | ripgrep 搜内容 |
+| `glob` | 原生 | 找文件 |
+| `edit_file` / `write_file` | 原生 | 改代码（LLM review） |
+| `bash_run` | 原生 | test / build / git（LLM review） |
+| `python_run` | 原生 | 短 Python 片段（LLM review） |
+| MCP PR/CI 工具 | lazy | 用户问 GitHub 时再 `tool_search` |
 
 #### TUI / CLI
 
@@ -222,24 +223,21 @@ Chat 视图中 mutating 意图与 Approvals tab **联动**：模型提议 rerun 
 
 ```yaml
 chat:
-  enabled: true
+  workspace: .              # 默认 cwd，file tools 沙箱根
+  # bash: { timeout_secs: 30 }  # 可选；bash_run 始终可用，mutating 走审批
   agent: agents/chat/AGENT.md
-  skills:
-    - skills/github-ops-tone/SKILL.md
-    - skills/ci-triage/SKILL.md
-  max_turns: 8              # 单次用户消息触发的 agent 循环上限
+  max_turns: 8
   max_tool_calls: 6
-  history_messages: 12      # 进入 LLM 的最近消息条数
-  # preferred_tools: 省略则使用内置默认（pr_get_overview, store_get_latest_digest, …）
+  history_messages: 12
   # mutating 永远走 approval，无 auto 开关
 ```
 
 #### 产品边界（Chat 仍不做）
 
-- 不是 IDE 内嵌编程助手；不读全库 diff 做 review（交给 `light-review` workflow）  
-- 不支持多用户/权限模型；单操作者本地秘书  
-- 不做「自动 merge / 自动 push fix」  
-- 长任务（完整 daily-work）优先 **TUI/CLI 一键 workflow**，Chat 只负责用 tools 解释已有结果
+- 不是全库 RAG / AST 索引；靠 `grep` + 按需 `read_file`  
+- 不支持多用户/权限模型；单操作者本地助手  
+- 不做「自动 merge / 无审批大范围改 repo」  
+- 长 **ops** 任务（完整 daily-work）优先 **TUI/CLI 一键 workflow**；Chat 默认 coding，ops 走 lazy MCP 或 workflow
 
 **Phase：** Chat MVP 放在 **Phase 2 末 / Phase 3 初**（Tier A workflow 与审批链路稳定后）；TUI Chat 视图可与 CLI `chat` 分期交付（CLI 先行验证 Agent 循环）。
 
@@ -906,7 +904,7 @@ chat:
 - [x] TUI：`[6] Flaky` 完整报表（repo 筛选、7/30d、quarantine 建议、用户改判）  
 - [x] CLI：`report flaky`；`report oncall`；`report ci`；`triage-pr`  
 - [x] mcp（Tier B 首批）：`pr_list_changed_files`、`issue_*`、`ci_list_runs`、`alert_list_open`  
-- [x] `daemon`；`store migrate`（json↔sqlite，`--features sqlite`）  
+- [x] `daemon`；`store migrate`（json↔sqlite）
 - [x] TUI attach：`--attach` 共享 Store（JSON 文件锁 `.coworker.lock`）  
 - [x] 可选 Slack 通知（TUI 仍为主界面）  
 - [x] **Chat MVP（CLI）**：`chat` / `chat --once` + `agents/chat` + `chat_sessions` Store  
@@ -928,4 +926,4 @@ chat:
 
 ## 一句话总结
 
-**unistar-coworker 是带 TUI 的本地 GitHub 运维秘书：** 多工作流（Daily Work、Release 值班、Main 红线、Flaky 治理…）共用 Engine + Store + **Agent/Skill 分层**；**Chat 模式**用自然语言 adhoc 指挥 MCP 工具；unistar-mcp 脱水取数、Gemma 64K 内判断、TUI 审批后动手；JSON/SQLite 本地记账；不做 Web UI、不做自主程序员。
+**unistar-coworker 是带 TUI 的本地 GitHub 运维秘书 + 轻量 coding Chat：** Workflow/cron（Daily Work、Release 值班…）共用 Engine + Store + MCP；**Chat 默认**在 `chat.workspace` 读/搜/改代码；GitHub MCP 按需 lazy；mutating 走审批；不做 Web UI、不做无约束自主程序员。

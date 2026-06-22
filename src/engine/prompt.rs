@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use crate::error::Result;
 
-use super::skill::{load_skills, load_skills_from_refs, read_base_tools, AgentSpec, SkillSpec};
+use super::skill::{load_skills, load_skills_from_refs, skill_body_for_prompt, AgentSpec, SkillSpec};
+use super::skill_routing::SkillRegistry;
 
 /// Classify output contract — harness field limits (not domain technique).
 const CLASSIFY_OUTPUT_CONTRACT: &str = "\
@@ -17,6 +18,9 @@ Always fill ALL fields with specific, actionable content from the logs. Keep res
 You may receive one page of logs at a time; prior pages are summarized, not repeated. \
 If inconclusive on this page, use verdict unknown and fill page_summary for the next page.";
 
+/// Prefix for the per-session runtime block (injected as a user message, not system).
+pub const SESSION_CONTEXT_PREFIX: &str = "[session context]";
+
 #[derive(Debug, Clone)]
 pub struct PromptBundle {
     pub agent: AgentSpec,
@@ -27,41 +31,13 @@ pub struct PromptBundle {
 
 #[derive(Debug, Clone)]
 pub struct WorkflowSpec {
-    pub agent: AgentSpec,
+    pub id: String,
+    pub description: String,
     pub skills: Vec<SkillSpec>,
 }
 
-pub fn load_tools_doc() -> Result<String> {
-    let base = read_base_tools();
-    if base.trim().is_empty() {
-        tracing::warn!("missing skills/_base/TOOLS.md, using built-in tool summary");
-        Ok(DEFAULT_TOOLS_DOC.into())
-    } else {
-        Ok(base)
-    }
-}
-
-pub fn load_tools_doc_with_preferred(preferred: &[String]) -> Result<String> {
-    let base = load_tools_doc()?;
-    if preferred.is_empty() {
-        Ok(base)
-    } else {
-        Ok(format!(
-            "{base}\n\n## Preferred tools (this session)\n\
-             Call tools via the API when you need data; reply in plain text when done.\n\
-             {}",
-            preferred
-                .iter()
-                .map(|t| format!("- `{t}`"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ))
-    }
-}
-
-const DEFAULT_TOOLS_DOC: &str = "See unistar-mcp lazy tools: tool_list, tool_describe, tool_call.";
-
-pub fn join_skills(skills: &[SkillSpec]) -> String {
+/// Omit tool-chain playbooks from skill bodies — the model discovers tools itself.
+fn join_skills(skills: &[SkillSpec]) -> String {
     if skills.is_empty() {
         return String::new();
     }
@@ -73,40 +49,61 @@ pub fn join_skills(skills: &[SkillSpec]) -> String {
             } else {
                 s.name.clone()
             };
-            format!("### {title}\n{}", s.body)
+            format!("### {title}\n{}", skill_body_for_prompt(&s.body))
         })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-pub fn compose_system_prompt(bundle: &PromptBundle) -> String {
+pub fn compose_static_system_prompt(bundle: &PromptBundle) -> String {
     let techniques = join_skills(&bundle.skills);
+    let tools_section = if bundle.tools_doc.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n## Tools\n{}", bundle.tools_doc.trim())
+    };
     if techniques.is_empty() {
-        format!(
-            "{}\n\n## Tools\n{}\n\n## Context\n{}",
-            bundle.agent.body, bundle.tools_doc, bundle.runtime_context
-        )
+        if tools_section.is_empty() {
+            bundle.agent.body.clone()
+        } else {
+            format!("{}{}", bundle.agent.body, tools_section)
+        }
+    } else if tools_section.is_empty() {
+        format!("{}\n\n## Techniques\n{}", bundle.agent.body, techniques)
     } else {
         format!(
-            "{}\n\n## Techniques\n{}\n\n## Tools\n{}\n\n## Context\n{}",
-            bundle.agent.body, techniques, bundle.tools_doc, bundle.runtime_context
+            "{}\n\n## Techniques\n{}{}",
+            bundle.agent.body, techniques, tools_section
         )
     }
 }
 
-pub fn compose_classify_prompt(
-    playbook_prefix: &str,
-    skills: &[SkillSpec],
-    task_agent: Option<&AgentSpec>,
-) -> String {
+/// Full system prompt including runtime (legacy). Prefer [`compose_static_system_prompt`]
+/// plus [`format_session_context_message`] for chat sessions.
+#[allow(dead_code)]
+pub fn compose_system_prompt(bundle: &PromptBundle) -> String {
+    let static_part = compose_static_system_prompt(bundle);
+    if bundle.runtime_context.trim().is_empty() {
+        return static_part;
+    }
+    format!(
+        "{static_part}\n\n## Context\n{}",
+        bundle.runtime_context.trim()
+    )
+}
+
+pub fn format_session_context_message(runtime_context: &str) -> String {
+    let trimmed = runtime_context.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("{SESSION_CONTEXT_PREFIX}\n{trimmed}")
+}
+
+pub fn compose_classify_prompt(playbook_prefix: &str, skills: &[SkillSpec]) -> String {
     let mut parts = Vec::new();
     if !playbook_prefix.is_empty() {
         parts.push(playbook_prefix.trim().to_string());
-    }
-    if let Some(agent) = task_agent {
-        if !agent.body.is_empty() {
-            parts.push(agent.body.clone());
-        }
     }
     let techniques = join_skills(skills);
     if !techniques.is_empty() {
@@ -127,75 +124,50 @@ pub fn default_chat_skill_paths() -> Vec<PathBuf> {
     ]
 }
 
-pub fn default_workflow_skill_paths(workflow_id: &str) -> Vec<PathBuf> {
-    match workflow_id {
-        "daily-work" => vec![
-            PathBuf::from("skills/ci-triage/SKILL.md"),
-            PathBuf::from("skills/digest-style/SKILL.md"),
-        ],
-        "merge-health" | "release-duty" => {
-            vec![PathBuf::from("skills/pr-merge/SKILL.md")]
-        }
-        "review-radar" => vec![
-            PathBuf::from("skills/pr-merge/SKILL.md"),
-            PathBuf::from("skills/digest-style/SKILL.md"),
-        ],
-        "main-guard" | "my-pr-brief" | "comment-assist" => {
-            vec![PathBuf::from("skills/ci-triage/SKILL.md")]
-        }
-        "oncall-handoff" | "release-notes" | "security-digest" => {
-            vec![PathBuf::from("skills/digest-style/SKILL.md")]
-        }
-        _ => Vec::new(),
-    }
-}
-
-pub fn load_chat_prompt_bundle(
+pub fn load_chat_prompt_bundle_for_session(
     agent_path: &str,
     skill_paths: &[PathBuf],
     tools_doc: String,
     runtime_context: String,
-) -> Result<PromptBundle> {
+    user_message: &str,
+    lazy_skills: bool,
+) -> Result<(PromptBundle, SkillRegistry)> {
+    let registry = SkillRegistry::load_for_chat(agent_path, skill_paths)?;
+    let skills = registry.select_for_message(user_message, lazy_skills);
     let agent_path = if agent_path.is_empty() {
         default_chat_agent_path()
     } else {
         PathBuf::from(agent_path)
     };
     let agent = super::skill::load_agent(&agent_path)?;
-    let skills = if !skill_paths.is_empty() {
-        load_skills(skill_paths)?
-    } else if !agent.skill_refs.is_empty() {
-        load_skills_from_refs(&agent.skill_refs)?
-    } else {
-        load_skills(&default_chat_skill_paths())?
-    };
-    Ok(PromptBundle {
-        agent,
-        skills,
-        tools_doc,
-        runtime_context,
-    })
+    Ok((
+        PromptBundle {
+            agent,
+            skills,
+            tools_doc,
+            runtime_context,
+        },
+        registry,
+    ))
 }
 
-pub fn load_workflow_spec(
-    workflow_id: &str,
-    agent_path: &PathBuf,
-    skill_paths: &[PathBuf],
-) -> Result<WorkflowSpec> {
-    let agent = super::skill::load_agent_with_base(agent_path)?;
+pub fn load_workflow_spec(workflow_id: &str, skill_paths: &[PathBuf]) -> Result<WorkflowSpec> {
+    let meta = super::workflow_registry::require(workflow_id)?;
     let skills = if !skill_paths.is_empty() {
         load_skills(skill_paths)?
-    } else if !agent.skill_refs.is_empty() {
-        load_skills_from_refs(&agent.skill_refs)?
     } else {
-        let paths = default_workflow_skill_paths(workflow_id);
+        let paths = super::workflow_registry::default_skill_paths(workflow_id);
         if paths.is_empty() {
             Vec::new()
         } else {
             load_skills(&paths)?
         }
     };
-    Ok(WorkflowSpec { agent, skills })
+    Ok(WorkflowSpec {
+        id: workflow_id.to_string(),
+        description: meta.description.to_string(),
+        skills,
+    })
 }
 
 pub fn load_classify_skills_for_triage(explicit: &[PathBuf]) -> Result<Vec<SkillSpec>> {
@@ -220,6 +192,44 @@ mod tests {
     use crate::engine::skill::{AgentSpec, SkillSpec};
 
     #[test]
+    fn compose_static_system_prompt_omits_runtime_context() {
+        let bundle = PromptBundle {
+            agent: AgentSpec {
+                name: "chat".into(),
+                description: String::new(),
+                body: "Agent body".into(),
+                skill_refs: vec![],
+                tool_refs: vec![],
+                always_load: false,
+                intent_keywords: vec![],
+                intent_phrases: vec![],
+                intent_bonus_keywords: vec![],
+                intent_penalty_keywords: vec![],
+                intent_penalty_phrases: vec![],
+                intent_penalty: 0,
+            },
+            skills: vec![],
+            tools_doc: String::new(),
+            runtime_context: "repos: changed-store".into(),
+        };
+        let static_out = compose_static_system_prompt(&bundle);
+        assert!(static_out.contains("Agent body"));
+        assert!(!static_out.contains("changed-store"));
+        assert!(!static_out.contains("## Context"));
+
+        let mut bundle_b = bundle.clone();
+        bundle_b.runtime_context = "repos: other-store".into();
+        assert_eq!(compose_static_system_prompt(&bundle), compose_static_system_prompt(&bundle_b));
+    }
+
+    #[test]
+    fn format_session_context_message_prefix() {
+        let msg = format_session_context_message("repos: x");
+        assert!(msg.starts_with(SESSION_CONTEXT_PREFIX));
+        assert!(msg.contains("repos: x"));
+    }
+
+    #[test]
     fn compose_system_prompt_includes_sections() {
         let bundle = PromptBundle {
             agent: AgentSpec {
@@ -227,12 +237,28 @@ mod tests {
                 description: String::new(),
                 body: "Agent body".into(),
                 skill_refs: vec![],
+                tool_refs: vec![],
+                always_load: false,
+                intent_keywords: vec![],
+                intent_phrases: vec![],
+                intent_bonus_keywords: vec![],
+                intent_penalty_keywords: vec![],
+                intent_penalty_phrases: vec![],
+                intent_penalty: 0,
             },
             skills: vec![SkillSpec {
                 name: "tone".into(),
                 description: String::new(),
                 body: "Be concise".into(),
                 skill_refs: vec![],
+                tool_refs: vec![],
+                always_load: false,
+                intent_keywords: vec![],
+                intent_phrases: vec![],
+                intent_bonus_keywords: vec![],
+                intent_penalty_keywords: vec![],
+                intent_penalty_phrases: vec![],
+                intent_penalty: 0,
             }],
             tools_doc: "tool_a".into(),
             runtime_context: "repos: x".into(),
@@ -244,6 +270,86 @@ mod tests {
         assert!(out.contains("## Tools"));
         assert!(out.contains("tool_a"));
         assert!(out.contains("## Context"));
+        let static_only = compose_static_system_prompt(&bundle);
+        assert!(!static_only.contains("## Context"));
+    }
+
+    #[test]
+    fn compose_system_prompt_omits_empty_tools_section() {
+        let bundle = PromptBundle {
+            agent: AgentSpec {
+                name: "chat".into(),
+                description: String::new(),
+                body: "Agent body".into(),
+                skill_refs: vec![],
+                tool_refs: vec![],
+                always_load: false,
+                intent_keywords: vec![],
+                intent_phrases: vec![],
+                intent_bonus_keywords: vec![],
+                intent_penalty_keywords: vec![],
+                intent_penalty_phrases: vec![],
+                intent_penalty: 0,
+            },
+            skills: vec![],
+            tools_doc: String::new(),
+            runtime_context: "repos: x".into(),
+        };
+        let out = compose_system_prompt(&bundle);
+        assert!(!out.contains("## Tools"));
+        assert!(out.contains("## Context"));
+    }
+
+    #[test]
+    fn load_chat_prompt_bundle_eager_loads_all_skills() {
+        let (bundle, _) = load_chat_prompt_bundle_for_session(
+            "",
+            &[],
+            String::new(),
+            String::new(),
+            "",
+            false,
+        )
+        .unwrap();
+        assert!(bundle.skills.len() >= 5);
+        let names: Vec<_> = bundle.skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"code-edit"));
+        assert!(names.contains(&"debug"));
+    }
+
+    #[test]
+    fn lazy_session_loads_no_skills_by_default() {
+        let (bundle, _) = load_chat_prompt_bundle_for_session(
+            "",
+            &[],
+            String::new(),
+            String::new(),
+            "fix this bug and run cargo test",
+            true,
+        )
+        .unwrap();
+        assert!(bundle.skills.is_empty());
+    }
+
+    #[test]
+    fn join_skills_omits_tool_chains() {
+        let skills = vec![SkillSpec {
+            name: "ci-triage".into(),
+            description: String::new(),
+            body: "## Tool chains\n| x | y |\n\n## Rules\n- be careful".into(),
+            skill_refs: vec![],
+            tool_refs: vec![],
+            always_load: false,
+            intent_keywords: vec![],
+            intent_phrases: vec![],
+            intent_bonus_keywords: vec![],
+            intent_penalty_keywords: vec![],
+            intent_penalty_phrases: vec![],
+            intent_penalty: 0,
+        }];
+        let out = join_skills(&skills);
+        assert!(!out.contains("Tool chains"));
+        assert!(out.contains("be careful"));
     }
 
     #[test]
@@ -253,8 +359,16 @@ mod tests {
             description: String::new(),
             body: "- flaky: transient\n- real: code bug".into(),
             skill_refs: vec![],
+            tool_refs: vec![],
+            always_load: false,
+            intent_keywords: vec![],
+            intent_phrases: vec![],
+            intent_bonus_keywords: vec![],
+            intent_penalty_keywords: vec![],
+            intent_penalty_phrases: vec![],
+            intent_penalty: 0,
         }];
-        let out = compose_classify_prompt("", &skills, None);
+        let out = compose_classify_prompt("", &skills);
         assert!(out.contains("flaky: transient"));
         assert!(out.contains("reason: one line"));
     }

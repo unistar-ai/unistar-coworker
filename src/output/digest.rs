@@ -7,7 +7,6 @@ use uuid::Uuid;
 use crate::agent::triage::{TriageOutcome, TriageRunEntry};
 use crate::app::AppEvent;
 use crate::config::Config;
-use crate::engine::AgentSpec;
 use crate::error::Result;
 use crate::llm::ClassifyVerdict;
 use crate::output::export::maybe_export_digest;
@@ -37,96 +36,19 @@ pub struct IncrementalDigest {
 enum SummaryMode {
     Daily,
     Waiting,
-    Alerts,
-    Report,
-    MyBrief,
 }
 
 impl IncrementalDigest {
-    pub fn begin(agent: &AgentSpec) -> Self {
-        let agent_name = if agent.name.is_empty() {
-            "daily-work".into()
-        } else {
-            agent.name.clone()
-        };
+    pub fn begin(workflow_id: &str) -> Self {
+        let agent_name = workflow_id.to_string();
         let (title, attention_header, ok_header, policy_header, summary_mode) =
-            match agent_name.as_str() {
+            match workflow_id {
                 "review-radar" => (
                     "Review Radar",
                     "Needs attention",
                     "Waiting for review",
                     "Policy gates",
                     SummaryMode::Waiting,
-                ),
-                "main-guard" => (
-                    "Main Guard",
-                    "Main alerts",
-                    "Clear",
-                    "Policy gates",
-                    SummaryMode::Alerts,
-                ),
-                "flaky-govern" => (
-                    "Flaky Govern",
-                    "Report",
-                    "Notes",
-                    "Policy gates",
-                    SummaryMode::Report,
-                ),
-                "oncall-handoff" => (
-                    "On-call Handoff",
-                    "Handoff pack",
-                    "Notes",
-                    "Policy gates",
-                    SummaryMode::Report,
-                ),
-                "my-pr-brief" => (
-                    "My PR Brief",
-                    "CI failing",
-                    "Waiting for review",
-                    "Ready to merge",
-                    SummaryMode::MyBrief,
-                ),
-                "ci-efficiency" => (
-                    "CI Efficiency",
-                    "Report",
-                    "Notes",
-                    "Policy gates",
-                    SummaryMode::Report,
-                ),
-                "security-digest" => (
-                    "Security Digest",
-                    "Alerts",
-                    "Notes",
-                    "Policy gates",
-                    SummaryMode::Report,
-                ),
-                "pr-hygiene" | "merge-health" => (
-                    "PR Hygiene",
-                    "Findings",
-                    "Notes",
-                    "Policy gates",
-                    SummaryMode::Report,
-                ),
-                "release-notes" | "regression-link" => (
-                    "Release Notes",
-                    "Report",
-                    "Notes",
-                    "Policy gates",
-                    SummaryMode::Report,
-                ),
-                "comment-assist" => (
-                    "Comment Assist",
-                    "Drafts",
-                    "Notes",
-                    "Policy gates",
-                    SummaryMode::Report,
-                ),
-                "light-review" | "breaking-sniff" => (
-                    "Light Review",
-                    "Risks",
-                    "Notes",
-                    "Policy gates",
-                    SummaryMode::Report,
                 ),
                 _ => (
                     "Daily Digest",
@@ -148,7 +70,7 @@ impl IncrementalDigest {
             flaky_candidates: 0,
             policy_gates: 0,
             attention_section: format!("## {attention_header}\n\n"),
-            flaky_section: if matches!(summary_mode, SummaryMode::Report | SummaryMode::Alerts) {
+            flaky_section: if matches!(summary_mode, SummaryMode::Waiting) {
                 String::new()
             } else {
                 String::from("## Flaky candidates\n\n")
@@ -248,22 +170,6 @@ impl IncrementalDigest {
         let _ = remaining;
     }
 
-    pub fn push_alert_line(&mut self, line: &str) {
-        self.needs_attention += 1;
-        self.processed_prs += 1;
-        self.attention_section.push_str(&format!("{line}\n"));
-    }
-
-    pub fn push_report_line(&mut self, line: &str) {
-        self.attention_section.push_str(&format!("{line}\n"));
-    }
-
-    pub fn push_ready_line(&mut self, line: &str) {
-        self.policy_gates += 1;
-        self.processed_prs += 1;
-        self.policy_section.push_str(&format!("{line}\n"));
-    }
-
     pub fn push_waiting_review(
         &mut self,
         repo: &str,
@@ -298,12 +204,6 @@ impl IncrementalDigest {
         let duration_label = format_duration(duration_secs);
         let summary_counts = match self.summary_mode {
             SummaryMode::Waiting => format!("{} waiting for review", self.ignorable),
-            SummaryMode::Alerts => format!("{} main alert(s)", self.needs_attention),
-            SummaryMode::Report => "report ready".into(),
-            SummaryMode::MyBrief => format!(
-                "{} failing, {} waiting, {} ready",
-                self.needs_attention, self.ignorable, self.policy_gates
-            ),
             SummaryMode::Daily => format!(
                 "{} need attention, {} flaky, {} policy, {} ignorable",
                 self.needs_attention, self.flaky_candidates, self.policy_gates, self.ignorable
@@ -452,20 +352,10 @@ async fn maybe_notify_slack(config: &Config, digest: &Digest) {
 mod tests {
     use super::*;
     use crate::agent::triage::TriageRunEntry;
-    use crate::engine::AgentSpec;
-
-    fn test_agent() -> AgentSpec {
-        AgentSpec {
-            name: "daily-work".into(),
-            description: String::new(),
-            body: String::new(),
-            skill_refs: vec![],
-        }
-    }
 
     #[test]
     fn partial_digest_marks_in_progress() {
-        let mut d = IncrementalDigest::begin(&test_agent());
+        let mut d = IncrementalDigest::begin("daily-work");
         d.begin_repo("org/repo");
         d.push_ok(1, "fix", "pass", "approved");
         let digest = d.to_digest();
@@ -475,7 +365,7 @@ mod tests {
 
     #[test]
     fn waiting_review_includes_pr_link() {
-        let mut d = IncrementalDigest::begin(&test_agent());
+        let mut d = IncrementalDigest::begin("daily-work");
         d.begin_repo("acme/widget");
         d.push_waiting_review(
             "acme/widget",
@@ -492,7 +382,7 @@ mod tests {
 
     #[test]
     fn mixed_pr_splits_runs_by_verdict() {
-        let mut d = IncrementalDigest::begin(&test_agent());
+        let mut d = IncrementalDigest::begin("daily-work");
         d.begin_repo("acme/widget");
         let outcome = TriageOutcome {
             preamble: vec!["PR #1 open".into()],
@@ -526,7 +416,7 @@ mod tests {
 
     #[test]
     fn policy_only_skips_needs_attention() {
-        let mut d = IncrementalDigest::begin(&test_agent());
+        let mut d = IncrementalDigest::begin("daily-work");
         d.begin_repo("org/repo");
         let outcome = TriageOutcome {
             preamble: vec!["PR status".into()],

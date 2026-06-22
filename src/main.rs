@@ -5,10 +5,12 @@ mod engine;
 mod error;
 mod llm;
 mod logging;
-mod mcp;
+mod github;
 mod output;
 mod store;
+mod terminal;
 mod tui;
+mod web;
 
 use std::sync::Arc;
 
@@ -54,6 +56,12 @@ enum Commands {
     },
     /// Headless daemon: cron scheduler without TUI (Phase 2)
     Daemon,
+    /// Web UI server (browser)
+    Serve {
+        /// Override config `web.bind` (e.g. 127.0.0.1:8787)
+        #[arg(long)]
+        bind: Option<String>,
+    },
     /// Interactive chat REPL (Phase 2+)
     Chat {
         /// Single message then exit (script-friendly)
@@ -71,8 +79,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: StoreCommands,
     },
-    /// List configured task agents (agents/*/AGENT.md)
+    /// List chat agent spec (agents/chat/AGENT.md)
     Agents {
+        #[command(subcommand)]
+        cmd: CatalogCmd,
+    },
+    /// List built-in batch workflows (Rust registry)
+    Workflows {
         #[command(subcommand)]
         cmd: CatalogCmd,
     },
@@ -106,13 +119,6 @@ enum StoreCommands {
 
 #[derive(Subcommand)]
 enum ReportKind {
-    /// Top flaky tests from the local ledger
-    Flaky {
-        #[arg(long, default_value_t = 30)]
-        since_days: u32,
-        #[arg(long, default_value = "md")]
-        format: String,
-    },
     /// On-call handoff pack from local store (no MCP)
     Oncall,
     /// CI efficiency report (requires MCP)
@@ -144,6 +150,9 @@ async fn main() -> Result<()> {
         Some(Commands::Daemon) => {
             run_daemon(config, store).await?;
         }
+        Some(Commands::Serve { bind }) => {
+            run_web(config, config_path, store, cli.attach, bind).await?;
+        }
         Some(Commands::Chat {
             once,
             session,
@@ -161,6 +170,9 @@ async fn main() -> Result<()> {
         Some(Commands::Agents { cmd }) => {
             run_catalog_list("agents", "AGENT.md", cmd).await?;
         }
+        Some(Commands::Workflows { cmd }) => {
+            run_workflows_list(cmd).await?;
+        }
         Some(Commands::Skills { cmd }) => {
             run_catalog_list("skills", "SKILL.md", cmd).await?;
         }
@@ -172,50 +184,17 @@ async fn main() -> Result<()> {
 }
 
 async fn run_report(config: &Config, store: &dyn store::Store, kind: ReportKind) -> Result<()> {
-    use agent::flaky_govern::format_flaky_report_csv;
     use agent::oncall::build_handoff_markdown;
-    use store::FlakyQuery;
 
     match kind {
-        ReportKind::Flaky { since_days, format } => {
-            let tests = store
-                .list_flaky_tests(FlakyQuery {
-                    repo: None,
-                    since_days: Some(since_days),
-                    limit: 50,
-                })
-                .await?;
-            if format == "csv" {
-                print!("{}", format_flaky_report_csv(&tests));
-            } else {
-                println!("# Flaky tests (last {since_days}d)\n");
-                if tests.is_empty() {
-                    println!("_No flaky incidents recorded._");
-                } else {
-                    println!("| Test | Repo | Workflow | Count | Rerun |");
-                    println!("|------|------|----------|-------|-------|");
-                    for t in &tests {
-                        let name = t.test_name.as_deref().unwrap_or("(unknown)");
-                        println!(
-                            "| {name} | {} | {} | {} | {}/{} |",
-                            t.repo,
-                            t.workflow,
-                            t.incident_count,
-                            t.rerun_successes,
-                            t.rerun_attempts
-                        );
-                    }
-                }
-            }
-        }
         ReportKind::Oncall => {
             let md = build_handoff_markdown(store).await?;
             println!("{md}");
         }
         ReportKind::Ci { since_days: _ } => {
-            let mcp = mcp::spawn_mcp(config).await;
+            let github = github::spawn_github(config).await;
             let md =
-                agent::ci_efficiency::build_ci_efficiency_markdown(config, mcp.as_ref()).await?;
+                agent::ci_efficiency::build_ci_efficiency_markdown(config, github.as_ref()).await?;
             print!("{md}");
         }
     }
@@ -256,6 +235,24 @@ async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<()> {
                 to,
                 dest_path.display()
             );
+        }
+    }
+    Ok(())
+}
+
+async fn run_workflows_list(cmd: CatalogCmd) -> Result<()> {
+    use engine::WORKFLOWS;
+
+    match cmd {
+        CatalogCmd::List => {
+            for wf in WORKFLOWS {
+                let skills = if wf.default_skills.is_empty() {
+                    "—".into()
+                } else {
+                    wf.default_skills.join(", ")
+                };
+                println!("{}\t{}\tskills: {skills}", wf.id, wf.description);
+            }
         }
     }
     Ok(())
@@ -327,13 +324,13 @@ async fn run_triage_pr(
     use agent::triage::triage_pr;
     use engine::load_classify_skills_for_triage;
 
-    let mcp = mcp::spawn_mcp(&config).await;
+    let github = github::spawn_github(&config).await;
     let llm_online = llm::ollama::probe(&config.llm).await;
     let llm = llm::LlmClient::new(config.llm.clone(), llm_online);
     let classify_skills = load_classify_skills_for_triage(&[])?;
 
-    let list_text = mcp::helpers::lazy_tool(
-        mcp.as_ref(),
+    let list_text = github::helpers::gh_tool(
+        github.as_ref(),
         "pr_list_open",
         serde_json::json!({ "repo": repo, "limit": 50 }),
     )
@@ -351,12 +348,13 @@ async fn run_triage_pr(
 
     let outcome = triage_pr(
         &config,
-        mcp.as_ref(),
+        github.as_ref(),
         &llm,
         store.as_ref(),
         &classify_skills,
         repo,
         &pr_line,
+        None,
     )
     .await?;
 
@@ -402,7 +400,7 @@ async fn run_headless(config: Config, store: Arc<dyn store::Store>, workflow: &s
                     } else {
                         "digest updated"
                     };
-                    if d.body_md.contains("Agent: review-radar") {
+                    if d.body_md.contains("Review Radar") {
                         eprintln!(
                             "→ {label} (waiting:{} in {})",
                             d.summary.ignorable,
@@ -420,7 +418,8 @@ async fn run_headless(config: Config, store: Arc<dyn store::Store>, workflow: &s
                 AppEvent::StoreUpdated
                 | AppEvent::StatusMessage(_)
                 | AppEvent::ChatReply
-                | AppEvent::ChatProgress(_) => {}
+                | AppEvent::ChatProgress(_)
+                | AppEvent::PrOverviewReady { .. } => {}
             }
         }
     });
@@ -558,6 +557,48 @@ async fn list_chat_sessions(store: &dyn store::Store) -> Result<()> {
     Ok(())
 }
 
+async fn run_web(
+    config: Config,
+    config_path: String,
+    store: Arc<dyn store::Store>,
+    attach: bool,
+    bind_override: Option<String>,
+) -> Result<()> {
+    let bind_str = bind_override.unwrap_or_else(|| config.web.bind.clone());
+    let bind: std::net::SocketAddr = bind_str.parse().map_err(|e| {
+        crate::error::CoworkerError::Config(format!("invalid web bind `{bind_str}`: {e}"))
+    })?;
+
+    let (tx, rx) = event_channel();
+    let state: SharedState = Arc::new(tokio::sync::RwLock::new(AppState::new(
+        config.clone(),
+        config_path,
+    )));
+    hydrate_from_store(&state, store.as_ref()).await?;
+
+    {
+        let mut s = state.write().await;
+        s.chat_context_visible = true;
+        s.push_log("info", format!("WebUI listening on http://{bind}"));
+    }
+
+    let engine =
+        Arc::new(Engine::new(config, Arc::clone(&store), tx.clone(), Arc::clone(&state)).await);
+    engine.clone().spawn_background();
+    if attach {
+        let mut s = state.write().await;
+        s.attach_mode = true;
+        s.push_log(
+            "info",
+            "attach mode — scheduler disabled (shared store with daemon)",
+        );
+    } else {
+        engine.clone().spawn_scheduler();
+    }
+
+    web::run(bind, state, engine, store, rx, attach).await
+}
+
 async fn run_tui(
     config: Config,
     config_path: String,
@@ -582,6 +623,7 @@ async fn run_tui(
     if attach {
         {
             let mut s = state.write().await;
+            s.attach_mode = true;
             s.push_log(
                 "info",
                 "attach mode — scheduler disabled (shared store with daemon)",

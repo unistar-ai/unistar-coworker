@@ -1,7 +1,11 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::StorageBackend;
 use crate::error::{CoworkerError, Result};
+
+use super::json::JsonStore;
+use super::sqlite::SqliteStore;
 
 #[derive(Debug, Default, Clone)]
 pub struct MigrateStats {
@@ -9,8 +13,6 @@ pub struct MigrateStats {
     pub pr_snapshots: u32,
     pub approvals: u32,
     pub backport_items: u32,
-    pub main_alerts: u32,
-    pub flaky_incidents: u32,
     pub chat_messages: u32,
 }
 
@@ -34,7 +36,7 @@ pub async fn migrate(
             )))
         }
         _ => Err(CoworkerError::Store(
-            "unsupported migrate direction (requires --features sqlite)".into(),
+            "unsupported migrate direction".into(),
         )),
     }
 }
@@ -44,33 +46,20 @@ async fn migrate_json_to_sqlite(
     sqlite_path: &Path,
     wal: bool,
 ) -> Result<MigrateStats> {
-    #[cfg(not(feature = "sqlite"))]
-    {
-        let _ = (json_root, sqlite_path, wal);
-        Err(CoworkerError::Store(
-            "sqlite backend requires `cargo build --features sqlite`".into(),
-        ))
+    if !json_root.is_dir() {
+        return Err(CoworkerError::Store(format!(
+            "json source not found: {}",
+            json_root.display()
+        )));
     }
-
-    #[cfg(feature = "sqlite")]
-    {
-        use super::sqlite::SqliteStore;
-
-        if !json_root.is_dir() {
-            return Err(CoworkerError::Store(format!(
-                "json source not found: {}",
-                json_root.display()
-            )));
-        }
-        if sqlite_path.exists() {
-            return Err(CoworkerError::Store(format!(
-                "destination sqlite file already exists: {}",
-                sqlite_path.display()
-            )));
-        }
-        let dst = SqliteStore::open(sqlite_path.to_path_buf(), wal)?;
-        import_json_tree(json_root, &dst).await
+    if sqlite_path.exists() {
+        return Err(CoworkerError::Store(format!(
+            "destination sqlite file already exists: {}",
+            sqlite_path.display()
+        )));
     }
+    let dst = SqliteStore::open(sqlite_path.to_path_buf(), wal)?;
+    import_json_tree(json_root, &dst).await
 }
 
 async fn migrate_sqlite_to_json(
@@ -78,47 +67,27 @@ async fn migrate_sqlite_to_json(
     json_root: &Path,
     wal: bool,
 ) -> Result<MigrateStats> {
-    #[cfg(not(feature = "sqlite"))]
-    {
-        let _ = (sqlite_path, json_root, wal);
-        Err(CoworkerError::Store(
-            "sqlite backend requires `cargo build --features sqlite`".into(),
-        ))
+    if !sqlite_path.is_file() {
+        return Err(CoworkerError::Store(format!(
+            "sqlite source not found: {}",
+            sqlite_path.display()
+        )));
     }
-
-    #[cfg(feature = "sqlite")]
-    {
-        use super::json::JsonStore;
-        use super::sqlite::SqliteStore;
-
-        if !sqlite_path.is_file() {
-            return Err(CoworkerError::Store(format!(
-                "sqlite source not found: {}",
-                sqlite_path.display()
-            )));
-        }
-        if json_root.exists() && dir_not_empty(json_root)? {
-            return Err(CoworkerError::Store(format!(
-                "destination json directory is not empty: {}",
-                json_root.display()
-            )));
-        }
-        let src = SqliteStore::open(sqlite_path.to_path_buf(), wal)?;
-        let dst = JsonStore::open(json_root.to_path_buf())?;
-        export_store_to_json(&src, &dst).await
+    if json_root.exists() && dir_not_empty(json_root)? {
+        return Err(CoworkerError::Store(format!(
+            "destination json directory is not empty: {}",
+            json_root.display()
+        )));
     }
+    let src = SqliteStore::open(sqlite_path.to_path_buf(), wal)?;
+    let dst = JsonStore::open(json_root.to_path_buf())?;
+    export_store_to_json(&src, &dst).await
 }
 
-#[cfg(feature = "sqlite")]
-use std::fs;
-
-#[cfg(feature = "sqlite")]
 async fn import_json_tree(json_root: &Path, dst: &dyn crate::store::Store) -> Result<MigrateStats> {
     use std::collections::HashMap;
 
-    use crate::store::{
-        Approval, BackportQueueItem, ChatMessage, Digest, FlakyIncident, MainAlert, PrSnapshot,
-    };
+    use crate::store::{Approval, BackportQueueItem, ChatMessage, Digest, PrSnapshot};
 
     let mut stats = MigrateStats::default();
 
@@ -155,16 +124,6 @@ async fn import_json_tree(json_root: &Path, dst: &dyn crate::store::Store) -> Re
         }
     }
 
-    for alert in read_jsonl_file::<MainAlert>(&json_root.join("main_alerts/alerts.jsonl"))? {
-        dst.record_main_alert(&alert).await?;
-        stats.main_alerts += 1;
-    }
-
-    for incident in read_jsonl_file::<FlakyIncident>(&json_root.join("flaky/incidents.jsonl"))? {
-        dst.record_flaky_incident(&incident).await?;
-        stats.flaky_incidents += 1;
-    }
-
     let messages_dir = json_root.join("chat/messages");
     if messages_dir.is_dir() {
         for entry in fs::read_dir(&messages_dir)? {
@@ -178,7 +137,6 @@ async fn import_json_tree(json_root: &Path, dst: &dyn crate::store::Store) -> Re
     Ok(stats)
 }
 
-#[cfg(feature = "sqlite")]
 async fn export_store_to_json(
     src: &dyn crate::store::Store,
     dst: &dyn crate::store::Store,
@@ -205,23 +163,9 @@ async fn export_store_to_json(
         stats.backport_items += 1;
     }
 
-    for alert in src
-        .list_main_alerts(crate::store::MainAlertQuery {
-            repo: None,
-            unacknowledged_only: false,
-            since_hours: None,
-            limit: 10_000,
-        })
-        .await?
-    {
-        dst.record_main_alert(&alert).await?;
-        stats.main_alerts += 1;
-    }
-
     Ok(stats)
 }
 
-#[cfg(feature = "sqlite")]
 fn dir_not_empty(path: &Path) -> Result<bool> {
     if !path.is_dir() {
         return Ok(false);
@@ -229,13 +173,11 @@ fn dir_not_empty(path: &Path) -> Result<bool> {
     Ok(fs::read_dir(path)?.next().is_some())
 }
 
-#[cfg(feature = "sqlite")]
 fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let data = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&data)?)
 }
 
-#[cfg(feature = "sqlite")]
 fn read_jsonl_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
     if !path.exists() {
         return Ok(vec![]);
@@ -247,7 +189,6 @@ fn read_jsonl_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>
         .collect()
 }
 
-#[cfg(feature = "sqlite")]
 fn read_json_glob<T: serde::de::DeserializeOwned>(dir: &Path, ext: &str) -> Result<Vec<T>> {
     if !dir.is_dir() {
         return Ok(vec![]);
@@ -264,13 +205,11 @@ fn read_json_glob<T: serde::de::DeserializeOwned>(dir: &Path, ext: &str) -> Resu
 
 pub fn format_migrate_summary(stats: &MigrateStats) -> String {
     format!(
-        "migrated: {} digests, {} PR snapshots, {} approvals, {} backport items, {} main alerts, {} flaky incidents, {} chat messages",
+        "migrated: {} digests, {} PR snapshots, {} approvals, {} backport items, {} chat messages",
         stats.digests,
         stats.pr_snapshots,
         stats.approvals,
         stats.backport_items,
-        stats.main_alerts,
-        stats.flaky_incidents,
         stats.chat_messages
     )
 }

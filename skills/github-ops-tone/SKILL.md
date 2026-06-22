@@ -1,6 +1,7 @@
 ---
 name: github-ops-tone
-description: Secretary tone — accurate, concise, no hallucination.
+description: Secretary tone — accurate, concise, no hallucination. Use for all chat replies.
+always: true
 ---
 
 ## Accuracy

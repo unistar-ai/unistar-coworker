@@ -26,7 +26,7 @@ static SIMPLE_PR_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^#(\d+)\s+(.+?)\s+@(\S+)\s+(?:updated|merged):").unwrap());
 
 static RUN_LINE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\d+)\s+(.+?)\s+(\S+)\s*$").unwrap());
+    LazyLock::new(|| Regex::new(r"^(\d+)\s+(.+?)\s+(\S+)(?:\s+(\S+))?\s*$").unwrap());
 
 static BRANCH_HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^branch:\s+(\S+)").unwrap());
 
@@ -35,6 +35,8 @@ pub struct ParsedBranchRun {
     pub run_id: i64,
     pub workflow: String,
     pub conclusion: String,
+    /// Wall-clock duration when MCP includes it (e.g. `4m12s`); `-` when pending.
+    pub duration: Option<String>,
 }
 
 pub fn parse_branch_runs(text: &str) -> (Option<String>, Vec<ParsedBranchRun>) {
@@ -58,6 +60,7 @@ pub fn parse_branch_runs(text: &str) -> (Option<String>, Vec<ParsedBranchRun>) {
                     run_id,
                     workflow: caps[2].trim().to_string(),
                     conclusion: caps[3].trim().to_string(),
+                    duration: caps.get(4).map(|m| m.as_str().to_string()),
                 });
             }
         }
@@ -72,52 +75,55 @@ pub fn run_conclusion_is_failure(conclusion: &str) -> bool {
     )
 }
 
-pub fn leading_failure_streak(runs: &[ParsedBranchRun]) -> u32 {
-    let mut count = 0u32;
-    for run in runs {
-        let c = run.conclusion.to_ascii_lowercase();
-        if c.is_empty() || matches!(c.as_str(), "in_progress" | "queued" | "waiting" | "pending") {
+/// Parse MCP compact duration strings (`45s`, `4m12s`, `2h5m`). Returns `None` for `-` or empty.
+pub fn parse_compact_duration(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() || s == "-" {
+        return None;
+    }
+    let mut total = 0u64;
+    let mut num = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
             continue;
         }
-        if run_conclusion_is_failure(&c) {
-            count += 1;
-        } else {
-            break;
+        let n: u64 = num.parse().ok()?;
+        num.clear();
+        match ch {
+            'h' => total += n * 3600,
+            'm' => total += n * 60,
+            's' => total += n,
+            _ => return None,
         }
     }
-    count
+    if !num.is_empty() {
+        return None;
+    }
+    Some(total)
 }
 
-pub fn github_actions_run_url(repo: &str, run_id: i64) -> String {
-    format!("https://github.com/{repo}/actions/runs/{run_id}")
-}
-
-pub fn github_pr_url(repo: &str, number: u32) -> String {
-    format!("https://github.com/{repo}/pull/{number}")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MyPrCategory {
-    Draft,
-    CiFailing,
-    WaitingReview,
-    Ready,
-}
-
-pub fn categorize_my_pr(pr: &ParsedPrLine) -> MyPrCategory {
-    if pr.is_draft {
-        return MyPrCategory::Draft;
+/// Format seconds into MCP-style compact duration (`4m12s`, `2h5m`, `45s`).
+pub fn format_compact_duration(secs: u64) -> String {
+    if secs >= 3600 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h{m}m")
+        }
+    } else if secs >= 60 {
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m{s}s")
+        }
+    } else {
+        format!("{secs}s")
     }
-    if ci_is_failing(&pr.ci) {
-        return MyPrCategory::CiFailing;
-    }
-    if needs_review(&pr.review) && pr.review != "approved" {
-        return MyPrCategory::WaitingReview;
-    }
-    if ci_is_passing(&pr.ci) && pr.review == "approved" {
-        return MyPrCategory::Ready;
-    }
-    MyPrCategory::WaitingReview
 }
 
 pub fn parse_pr_line(line: &str) -> Option<ParsedPrLine> {
@@ -159,6 +165,7 @@ pub fn parse_failing_runs(text: &str) -> Vec<ParsedRunLine> {
         let line = line.trim();
         if line.is_empty()
             || line.starts_with("No failing")
+            || line.starts_with("CI_KIND:")
             || line.contains("failing run(s)")
             || line.starts_with('(')
         {
@@ -177,6 +184,12 @@ pub fn parse_failing_runs(text: &str) -> Vec<ParsedRunLine> {
     out
 }
 
+/// First-line `CI_KIND` from `ci_analyze_pr_failures` (actions_only / external_only / mixed / …).
+pub fn extract_ci_kind(text: &str) -> Option<&str> {
+    text.lines()
+        .find_map(|l| l.strip_prefix("CI_KIND:").map(str::trim))
+}
+
 /// Reuse the failing-runs block from `pr_get_overview` to skip a separate analyze call.
 pub fn extract_failing_runs_from_overview(overview: &str) -> Option<String> {
     if overview.contains("Failing CI runs: none") {
@@ -188,28 +201,6 @@ pub fn extract_failing_runs_from_overview(overview: &str) -> Option<String> {
         }
     }
     None
-}
-
-pub fn merge_blockers_summary(text: &str) -> String {
-    let mut out = Vec::new();
-    let mut in_blockers = false;
-    for line in text.lines() {
-        if line.starts_with("Blockers:") {
-            in_blockers = true;
-            if line.contains("(none)") {
-                return String::new();
-            }
-            continue;
-        }
-        if in_blockers {
-            if let Some(rest) = line.strip_prefix("- ") {
-                out.push(rest.to_string());
-            }
-        } else if line.starts_with("Mergeable:") {
-            out.push(line.to_string());
-        }
-    }
-    out.join("; ")
 }
 
 pub fn ci_is_failing(ci: &str) -> bool {
@@ -275,15 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_blockers_summary_parses_list() {
-        let text =
-            "PR #1 t\nMergeable: no\nBlockers:\n- review required\n- CI failing: lint (failure)";
-        let s = merge_blockers_summary(text);
-        assert!(s.contains("review required"));
-        assert!(s.contains("CI failing"));
-    }
-
-    #[test]
     fn parse_pr() {
         let p = parse_pr_line("#42  fix bug  @alice  CI:failing(1)  review:none").unwrap();
         assert_eq!(p.number, 42);
@@ -301,19 +283,19 @@ mod tests {
     }
 
     #[test]
-    fn categorize_my_pr_states() {
-        let failing = parse_pr_line("#1  a  @me  CI:failing(1)  review:none").unwrap();
-        assert_eq!(categorize_my_pr(&failing), MyPrCategory::CiFailing);
-        let ready = parse_pr_line("#2  b  @me  CI:passing  review:approved").unwrap();
-        assert_eq!(categorize_my_pr(&ready), MyPrCategory::Ready);
-    }
-
-    #[test]
     fn parse_runs() {
         let text = "2 failing run(s) for PR #1 @abc:\n12345  CI  failure\n";
         let runs = parse_failing_runs(text);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, 12345);
+    }
+
+    #[test]
+    fn parse_runs_skips_ci_kind() {
+        let text = "CI_KIND: actions_only\n2 failing run(s) for PR #1 @abc:\n12345  CI  failure\n";
+        let runs = parse_failing_runs(text);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(extract_ci_kind(text), Some("actions_only"));
     }
 
     #[test]
@@ -325,11 +307,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_branch_runs_and_streak() {
-        let text = "branch: main\n3 run(s) for org/repo:\n100  CI  failure\n101  Build  failure\n102  Lint  success\n";
-        let (branch, runs) = parse_branch_runs(text);
+    fn parse_compact_duration_variants() {
+        assert_eq!(parse_compact_duration("45s"), Some(45));
+        assert_eq!(parse_compact_duration("4m12s"), Some(252));
+        assert_eq!(parse_compact_duration("2h5m"), Some(7500));
+        assert_eq!(parse_compact_duration("-"), None);
+        assert_eq!(parse_compact_duration(""), None);
+    }
+
+    #[test]
+    fn format_compact_duration_roundtrip() {
+        assert_eq!(format_compact_duration(45), "45s");
+        assert_eq!(format_compact_duration(252), "4m12s");
+        assert_eq!(format_compact_duration(7500), "2h5m");
+    }
+
+    #[test]
+    fn parse_branch_run_lines() {
+        let text = "branch: main\n3 run(s) for org/repo:\n100  CI  failure  4m12s\n101  Build  failure  2m0s\n102  Lint  success  1m30s\n";
+        let (branch, runs) = super::parse_branch_runs(text);
         assert_eq!(branch.as_deref(), Some("main"));
         assert_eq!(runs.len(), 3);
-        assert_eq!(leading_failure_streak(&runs), 2);
+        assert_eq!(runs[0].duration.as_deref(), Some("4m12s"));
     }
 }

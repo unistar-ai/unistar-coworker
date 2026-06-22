@@ -62,9 +62,6 @@ impl Scheduler {
         if let Some(ref c) = config.schedule.ci_rescan {
             push("daily-work", c, "ci_rescan");
         }
-        if let Some(ref c) = config.schedule.main_guard {
-            push("main-guard", c, "main_guard");
-        }
 
         for (id, wf) in &config.workflows {
             if wf.enabled {
@@ -143,21 +140,21 @@ mod tests {
     fn picks_enabled_workflow_schedules() {
         let yaml = r#"
 llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
-mcp: { command: unistar-mcp }
+github: { gh_command: gh }
 storage: { backend: json, path: ./data }
 repos: [org/repo]
 workflows:
   daily-work:
     enabled: true
-    agent: agents/daily-work/AGENT.md
-  release-duty:
+  review-radar:
     enabled: true
-    agent: agents/release-duty/AGENT.md
     schedule: "0 9 * * 1-5"
 schedule:
   daily_digest: "0 6 * * *"
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let mut config = config;
+        config.finalize();
         let sched = Scheduler::from_config(&config);
         assert!(!sched.jobs.is_empty());
         assert!(

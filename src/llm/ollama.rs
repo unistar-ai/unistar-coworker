@@ -1,30 +1,35 @@
 use crate::config::LlmConfig;
 
 pub async fn probe(cfg: &LlmConfig) -> bool {
+    probe_latency_ms(cfg).await.is_some()
+}
+
+/// Round-trip latency for the LLM health check (`/models` or `/api/tags`).
+pub async fn probe_latency_ms(cfg: &LlmConfig) -> Option<u128> {
     let base = cfg.base_url.trim_end_matches('/');
-    // OpenAI-compatible base (e.g. http://localhost:11434/v1) → /v1/models
     let url = format!("{base}/models");
+    let start = std::time::Instant::now();
     match reqwest::Client::new()
         .get(&url)
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => true,
+        Ok(r) if r.status().is_success() => Some(start.elapsed().as_millis()),
         Ok(_) | Err(_) => {
-            // Fallback: native Ollama API
             let native = format!(
                 "{}/api/tags",
                 base.trim_end_matches("/v1").trim_end_matches('/')
             );
+            let start = std::time::Instant::now();
             match reqwest::Client::new()
                 .get(&native)
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await
             {
-                Ok(r) => r.status().is_success(),
-                Err(_) => false,
+                Ok(r) if r.status().is_success() => Some(start.elapsed().as_millis()),
+                _ => None,
             }
         }
     }

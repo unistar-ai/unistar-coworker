@@ -1,22 +1,26 @@
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Scrollbar, ScrollbarOrientation};
 use unicode_width::UnicodeWidthStr;
 
+use crate::agent::chat_loop::ActivityFlowKind;
+use crate::agent::chat_loop::ChatActivityFlow;
 use crate::app::AppState;
 use crate::tui::context_panel::draw_context_panel;
 use crate::tui::scroll::paragraph_scrollbar_state;
 use crate::tui::spinner;
 use crate::tui::theme::{self, ThemePalette};
+use crate::tui::markdown::StreamingMarkdownRenderer;
 
 const CHAT_SCROLL_PAGE: u16 = 8;
 const INPUT_PREFIX: &str = "▸ ";
 
 struct CachedMessageEntry {
     source: String,
+    format_width: u16,
     lines: Vec<Line<'static>>,
 }
 
@@ -32,8 +36,17 @@ static RENDER_CACHE: Mutex<ChatRenderCache> = Mutex::new(ChatRenderCache {
     entries: Vec::new(),
 });
 
+static STREAMING_MD: LazyLock<Mutex<StreamingMarkdownRenderer>> =
+    LazyLock::new(|| Mutex::new(StreamingMarkdownRenderer::new()));
+
+pub fn reset_streaming_markdown_cache() {
+    if let Ok(mut cache) = STREAMING_MD.lock() {
+        cache.clear();
+    }
+}
+
 fn palette(state: &AppState) -> ThemePalette {
-    ThemePalette::from_mode(state.config.tui.theme)
+    ThemePalette::from_tui(&state.config.tui)
 }
 
 pub fn scroll_page_up(state: &mut AppState) {
@@ -99,8 +112,12 @@ fn thinking_status_line(th: ThemePalette) -> Line<'static> {
     activity_status_line(th, "waiting for model")
 }
 
-fn tool_running_lines(th: ThemePalette, name: &str) -> Vec<Line<'static>> {
-    vec![activity_status_line(th, &format!("running {name}"))]
+fn tool_running_lines(th: ThemePalette, name: &str, detail: Option<&str>) -> Vec<Line<'static>> {
+    let label = match detail {
+        Some(d) if !d.is_empty() => format!("running {name} ({d})"),
+        _ => format!("running {name}"),
+    };
+    vec![activity_status_line(th, &label)]
 }
 
 fn reasoning_compressing_line(th: ThemePalette) -> Line<'static> {
@@ -197,30 +214,55 @@ fn reasoning_body_lines(th: ThemePalette, text: &str, panel_width: u16) -> Vec<L
     )
 }
 
+fn activity_flow_label(kind: ActivityFlowKind) -> &'static str {
+    match kind {
+        ActivityFlowKind::Skill => "skill",
+        ActivityFlowKind::Github => "github",
+    }
+}
+
+fn activity_flow_preview_lines(
+    th: ThemePalette,
+    flow: &ChatActivityFlow,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    let mut out = vec![activity_status_line(
+        th,
+        activity_flow_label(flow.kind),
+    )];
+    out.extend(reasoning_body_lines(th, &flow.text, panel_width));
+    out
+}
+
 fn reasoning_preview_lines(th: ThemePalette, text: &str, panel_width: u16) -> Vec<Line<'static>> {
     let mut out = vec![activity_status_line(th, "reasoning")];
     out.extend(reasoning_body_lines(th, text, panel_width));
     out
 }
 
+fn indent_body_lines(indent: &str, lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|line| {
+            if line.spans.is_empty() {
+                Line::from("")
+            } else {
+                let mut spans = vec![Span::raw(indent.to_string())];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }
+        })
+        .collect()
+}
+
 fn streaming_preview_lines(th: ThemePalette, text: &str, panel_width: u16) -> Vec<Line<'static>> {
     let body = theme::normalize_message_layout(text);
     let max_width = theme::tail_content_max_width(panel_width);
-    let tail = reasoning_stream_tail(
-        body.trim(),
-        max_width
-            .saturating_mul(REASONING_TAIL_MAX_ROWS)
-            .saturating_mul(4),
-    );
     let content_style = Style::default().fg(th.assistant);
+    let mut cache = STREAMING_MD.lock().expect("streaming markdown cache");
+    let md_lines = cache.render(th, &body, content_style, Some(max_width));
     let mut out = vec![activity_status_line(th, "streaming reply")];
-    out.extend(tail_body_lines(
-        tail,
-        content_style,
-        "        ",
-        panel_width,
-        REASONING_TAIL_MAX_ROWS,
-    ));
+    out.extend(indent_body_lines("        ", md_lines));
     out
 }
 
@@ -230,6 +272,7 @@ fn chat_shows_thinking_spinner(state: &AppState) -> bool {
         && state.chat_tool_pending.is_none()
         && state.chat_tool_running.is_none()
         && state.chat_reasoning.is_none()
+        && state.chat_activity_flow.is_none()
         && !state.chat_reasoning_compressing
 }
 
@@ -248,7 +291,9 @@ fn sync_message_entries(
     }
     let content_w = theme::chat_content_max_width(panel_width);
     for (i, source) in state.chat_lines.iter().enumerate() {
-        let stale = entries.get(i).is_none_or(|entry| entry.source != *source);
+        let stale = entries
+            .get(i)
+            .is_none_or(|entry| entry.source != *source || entry.format_width != panel_width);
         if !stale {
             continue;
         }
@@ -256,11 +301,13 @@ fn sync_message_entries(
         if i < entries.len() {
             entries[i] = CachedMessageEntry {
                 source: source.clone(),
+                format_width: panel_width,
                 lines,
             };
         } else {
             entries.push(CachedMessageEntry {
                 source: source.clone(),
+                format_width: panel_width,
                 lines,
             });
         }
@@ -289,6 +336,74 @@ fn should_skip_tool_transcript_echo(entries: &[CachedMessageEntry], index: usize
     })
 }
 
+fn is_tool_activity_source(source: &str) -> bool {
+    source.starts_with("  → ")
+        || source.starts_with("  ✓ ")
+        || source.starts_with("  ✗ ")
+        || source.starts_with("  ⚠ ")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolGroupPos {
+    None,
+    Single,
+    First,
+    Middle,
+    Last,
+}
+
+fn entry_visible_in_history(entries: &[CachedMessageEntry], index: usize) -> bool {
+    !should_skip_reasoning_transcript(&entries[index])
+        && !should_skip_tool_transcript_echo(entries, index)
+}
+
+fn prev_visible_entry_index(entries: &[CachedMessageEntry], index: usize) -> Option<usize> {
+    (0..index).rev().find(|&i| entry_visible_in_history(entries, i))
+}
+
+fn next_visible_entry_index(entries: &[CachedMessageEntry], index: usize) -> Option<usize> {
+    ((index + 1)..entries.len()).find(|&i| entry_visible_in_history(entries, i))
+}
+
+fn tool_group_pos(entries: &[CachedMessageEntry], index: usize) -> ToolGroupPos {
+    if !is_tool_activity_source(&entries[index].source) {
+        return ToolGroupPos::None;
+    }
+    let has_prev = prev_visible_entry_index(entries, index)
+        .is_some_and(|i| is_tool_activity_source(&entries[i].source));
+    let has_next = next_visible_entry_index(entries, index)
+        .is_some_and(|i| is_tool_activity_source(&entries[i].source));
+    match (has_prev, has_next) {
+        (false, false) => ToolGroupPos::Single,
+        (false, true) => ToolGroupPos::First,
+        (true, true) => ToolGroupPos::Middle,
+        (true, false) => ToolGroupPos::Last,
+    }
+}
+
+fn apply_tool_group_connector(
+    lines: Vec<Line<'static>>,
+    pos: ToolGroupPos,
+) -> Vec<Line<'static>> {
+    if !matches!(
+        pos,
+        ToolGroupPos::First | ToolGroupPos::Middle | ToolGroupPos::Last
+    ) {
+        return lines;
+    }
+    lines
+        .into_iter()
+        .map(|mut line| {
+            if let Some(span) = line.spans.first_mut() {
+                if span.content.as_ref() == "      " {
+                    span.content = "      │ ".into();
+                }
+            }
+            line
+        })
+        .collect()
+}
+
 fn entry_compose_lines(
     th: ThemePalette,
     entry: &CachedMessageEntry,
@@ -304,20 +419,11 @@ fn entry_compose_lines(
     lines
 }
 
-fn panel_line_count(lines: &[Line], width: u16) -> u16 {
+fn panel_line_count(lines: &[Line], _width: u16) -> u16 {
     if lines.is_empty() {
         return 0;
     }
-    let w = width.max(1) as usize;
-    if lines
-        .iter()
-        .all(|line| crate::tui::markdown::line_display_width(line) <= w)
-    {
-        return lines.len().min(u16::MAX as usize) as u16;
-    }
-    Paragraph::new(Text::from(lines.to_vec()))
-        .wrap(Wrap { trim: false })
-        .line_count(width.max(1)) as u16
+    lines.len().min(u16::MAX as usize) as u16
 }
 
 fn tail_status_lines(th: ThemePalette, state: &AppState, panel_width: u16) -> Vec<Line<'static>> {
@@ -326,6 +432,7 @@ fn tail_status_lines(th: ThemePalette, state: &AppState, panel_width: u16) -> Ve
         || state.chat_tool_pending.is_some()
         || state.chat_tool_running.is_some()
         || state.chat_reasoning.is_some()
+        || state.chat_activity_flow.is_some()
         || state.chat_reasoning_compressing)
     {
         return Vec::new();
@@ -341,6 +448,12 @@ fn tail_status_lines(th: ThemePalette, state: &AppState, panel_width: u16) -> Ve
             lines.extend(reasoning_preview_lines(th, reasoning, panel_width));
         }
     }
+    if let Some(ref flow) = state.chat_activity_flow {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.extend(activity_flow_preview_lines(th, flow, panel_width));
+    }
     if let Some(ref pending) = state.chat_tool_pending {
         if !lines.is_empty() {
             lines.push(Line::from(""));
@@ -350,7 +463,11 @@ fn tail_status_lines(th: ThemePalette, state: &AppState, panel_width: u16) -> Ve
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        lines.extend(tool_running_lines(th, name));
+        lines.extend(tool_running_lines(
+            th,
+            name,
+            state.chat_tool_running_detail.as_deref(),
+        ));
     } else if let Some(ref partial) = state.chat_streaming {
         if !lines.is_empty() {
             lines.push(Line::from(""));
@@ -387,16 +504,22 @@ fn compose_history_lines(
         if should_skip_tool_transcript_echo(entries, i) {
             continue;
         }
-        let composed = entry_compose_lines(th, entry, i, state);
+        let group_pos = tool_group_pos(entries, i);
+        let composed = apply_tool_group_connector(
+            entry_compose_lines(th, entry, i, state),
+            group_pos,
+        );
         if composed.is_empty() {
             continue;
         }
-        if !lines.is_empty() {
+        let skip_gap = matches!(group_pos, ToolGroupPos::Middle | ToolGroupPos::Last);
+        if !lines.is_empty() && !skip_gap {
             lines.push(Line::from(""));
         }
         lines.extend(composed);
     }
-    crate::tui::markdown::ensure_chat_lines_fit_panel(lines, panel_width)
+    let pad_style = Style::default().bg(th.panel);
+    crate::tui::markdown::finalize_panel_lines(lines, panel_width, pad_style, true)
 }
 
 const MAX_LIVE_STATUS_ROWS: usize = 12;
@@ -410,12 +533,13 @@ fn compose_live_status_lines(
     if raw.is_empty() {
         return Vec::new();
     }
+    let pad_style = Style::default().bg(th.panel);
     let mut fitted = crate::tui::markdown::reflow_chat_lines_to_width(raw, panel_width);
     if fitted.len() > MAX_LIVE_STATUS_ROWS {
         let drop = fitted.len() - MAX_LIVE_STATUS_ROWS;
         fitted = fitted.split_off(drop);
     }
-    fitted
+    crate::tui::markdown::pad_lines_to_panel_width(fitted, panel_width, pad_style)
 }
 
 fn compose_chat_lines(
@@ -424,6 +548,9 @@ fn compose_chat_lines(
     entries: &[CachedMessageEntry],
     panel_width: u16,
 ) -> Vec<Line<'static>> {
+    if state.chat_streaming.is_none() {
+        reset_streaming_markdown_cache();
+    }
     let mut lines = compose_history_lines(th, state, entries, panel_width);
     let live = compose_live_status_lines(th, state, panel_width);
     if live.is_empty() {
@@ -568,10 +695,10 @@ fn draw_chat_pane(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let scroll_y = max_scroll.saturating_sub(scroll_from_bottom);
 
     frame.render_widget(history_block, chunks[0]);
+    frame.render_widget(Clear, inner);
     frame.render_widget(
         Paragraph::new(Text::from(vp.lines))
             .style(Style::default().bg(th.panel))
-            .wrap(Wrap { trim: false })
             .scroll((scroll_y, 0)),
         inner,
     );
@@ -691,6 +818,7 @@ mod tests {
         let width = 30u16;
         let entries = vec![CachedMessageEntry {
             source: "you> hello".into(),
+            format_width: width,
             lines: theme::format_chat_lines(th, "you> hello", None),
         }];
         let config = crate::config::Config::load(concat!(
@@ -755,7 +883,8 @@ mod tests {
         ))
         .expect("example config");
 
-        let cases: Vec<(&str, Box<dyn FnOnce(&mut crate::app::AppState)>)> = vec![
+        type ChatRenderCase = (&'static str, Box<dyn FnOnce(&mut crate::app::AppState)>);
+        let cases: Vec<ChatRenderCase> = vec![
             (
                 "thinking",
                 Box::new(|s| {
@@ -802,6 +931,7 @@ mod tests {
 
         let entries = vec![CachedMessageEntry {
             source: "you> hello".into(),
+            format_width: width,
             lines: theme::format_chat_lines(th, "you> hello", None),
         }];
 
@@ -898,6 +1028,7 @@ mod tests {
     fn skips_reasoning_transcript_lines() {
         let entry = CachedMessageEntry {
             source: "  … reasoning: Checked CI on PR #42".into(),
+            format_width: 0,
             lines: vec![Line::from("hidden")],
         };
         assert!(should_skip_reasoning_transcript(&entry));
@@ -905,12 +1036,13 @@ mod tests {
 
     #[test]
     fn scrollbar_max_scroll_at_bottom_pin() {
-        let lines = vec![
+        let raw = vec![
             Line::from("Hello world this is a long line that should wrap across cells"),
             Line::from("short"),
         ];
         let width = 12u16;
         let visible = 3u16;
+        let lines = crate::tui::markdown::reflow_chat_lines_to_width(raw, width);
         let total = panel_line_count(&lines, width);
         let max_scroll = total.saturating_sub(visible);
         let scroll_y = max_scroll;
@@ -922,11 +1054,13 @@ mod tests {
         let entries = vec![
             CachedMessageEntry {
                 source: "  ✓ pr_list_changed_files(repo=acme/widget, pr_number=19275) (120ms)".into(),
+                format_width: 0,
                 lines: vec![],
             },
             CachedMessageEntry {
                 source: "assistant> tool_result(pr_list_changed_files, pr_number=19275):\n1 changed file(s)"
                     .into(),
+                format_width: 0,
                 lines: vec![],
             },
         ];
@@ -936,13 +1070,13 @@ mod tests {
 
     #[test]
     fn assistant_message_table_rows_stay_single_line() {
-        use ratatui::widgets::{Paragraph, Wrap};
         let th = ThemePalette::dark();
         let width = 48u16;
         let max_width = width.saturating_sub(8) as usize;
         let body = "| PR | CI | Review |\n|----|----|--------|\n| #19274 | failing | pending |\n| #19273 | ok | approved |";
         let rows = theme::format_assistant_message_lines(th, body, Some(max_width));
-        let table_line_count = rows
+        let fitted = crate::tui::markdown::ensure_chat_lines_fit_panel(rows, width);
+        let table_line_count = fitted
             .iter()
             .filter(|l| {
                 let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -951,10 +1085,78 @@ mod tests {
             })
             .count();
         assert!(table_line_count >= 2, "expected formatted table rows");
-        let p = Paragraph::new(Text::from(rows)).wrap(Wrap { trim: false });
         assert!(
-            p.line_count(width) >= table_line_count,
-            "table rows should not be word-wrapped into extra lines"
+            fitted.iter().all(|line| {
+                crate::tui::markdown::line_display_width_for_test(line) <= width as usize
+            }),
+            "table rows should fit panel without Paragraph re-wrap"
+        );
+    }
+
+    #[test]
+    fn assistant_long_markdown_no_vertical_glyph_bleed() {
+        let th = ThemePalette::dark();
+        let width = 42u16;
+        let body = "## 4. How We Work Together\n\n* **Enhancements** — iterative workflow.\n* **Productivity** — use read_file before edit_file.";
+        let rows = theme::format_assistant_message_lines(th, body, Some(theme::chat_content_max_width(width)));
+        let fitted = crate::tui::markdown::pad_lines_to_panel_width(
+            crate::tui::markdown::ensure_chat_lines_fit_panel(rows, width),
+            width,
+            Style::default(),
+        );
+        assert!(fitted.len() > 2);
+        for line in &fitted {
+            let w = crate::tui::markdown::line_display_width_for_test(line);
+            assert_eq!(w, width as usize, "padded row must fill panel: {w} != {width}: {line:?}");
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                !text.starts_with('▌') || text.contains("AI") || text.trim() == "▌",
+                "orphan bar glyph column: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn go_code_block_fits_panel_without_horizontal_bleed() {
+        let th = ThemePalette::dark();
+        let width = 50u16;
+        let body = "4. Create routes/user.go\n\n```go\nuserRoutes := router.Group(\"/users\")\nuserRoutes.GET(\"/\", handlers.GetUsers)\nuserRoutes.POST(\"/\", handlers.CreateUser)\n```";
+        let rows = theme::format_assistant_message_lines(
+            th,
+            body,
+            Some(theme::chat_content_max_width(width)),
+        );
+        let fitted = crate::tui::markdown::pad_lines_to_panel_width(
+            crate::tui::markdown::ensure_chat_lines_fit_panel(rows, width),
+            width,
+            Style::default(),
+        );
+        assert!(
+            fitted.iter().all(|line| {
+                crate::tui::markdown::line_display_width_for_test(line) == width as usize
+            }),
+            "every row must be exactly panel width to avoid ghost columns"
+        );
+    }
+
+    #[test]
+    fn system_session_header_fits_panel() {
+        let th = ThemePalette::dark();
+        let width = 48u16;
+        let rows = theme::format_chat_lines(
+            th,
+            "system> recent sessions (use /session <id-prefix>):",
+            Some(theme::chat_content_max_width(width)),
+        );
+        let fitted = crate::tui::markdown::pad_lines_to_panel_width(
+            crate::tui::markdown::ensure_chat_lines_fit_panel(rows, width),
+            width,
+            Style::default(),
+        );
+        assert!(
+            fitted.iter().all(|line| {
+                crate::tui::markdown::line_display_width_for_test(line) == width as usize
+            })
         );
     }
 
@@ -983,5 +1185,75 @@ mod tests {
             focus_pane_at(area, false, messages.x + 2, messages.y + 2),
             None
         );
+    }
+
+    #[test]
+    fn consecutive_tool_rows_group_without_blank_gap() {
+        let th = ThemePalette::dark();
+        let width = 60u16;
+        let entries = vec![
+            CachedMessageEntry {
+                source: "you> list PRs".into(),
+                format_width: width,
+                lines: theme::format_chat_lines(th, "you> list PRs", None),
+            },
+            CachedMessageEntry {
+                source: "  ✓ pr_list_open(repo=acme/widget)".into(),
+                format_width: width,
+                lines: theme::format_chat_lines(th, "  ✓ pr_list_open(repo=acme/widget)", None),
+            },
+            CachedMessageEntry {
+                source: "  ✓ pr_get_overview(repo=acme/widget, pr=42)".into(),
+                format_width: width,
+                lines: theme::format_chat_lines(
+                    th,
+                    "  ✓ pr_get_overview(repo=acme/widget, pr=42)",
+                    None,
+                ),
+            },
+        ];
+        let config = crate::config::Config::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/coworker.example.yaml"
+        ))
+        .expect("example config");
+        let state = crate::app::AppState::new(config, "test.yaml".into());
+        let rows = compose_history_lines(th, &state, &entries, width);
+        let joined: Vec<String> = rows
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+        let first_tool = joined
+            .iter()
+            .position(|l| l.contains("pr_list_open"))
+            .expect("first tool row");
+        let second_tool = joined
+            .iter()
+            .position(|l| l.contains("pr_get_overview"))
+            .expect("second tool row");
+        assert_eq!(
+            second_tool,
+            first_tool + 1,
+            "tool rows in a group should not have blank spacer: {joined:?}"
+        );
+        assert!(
+            joined[first_tool].starts_with("      │ "),
+            "first tool row should use group connector: {:?}",
+            joined[first_tool]
+        );
+        assert!(
+            joined[second_tool].starts_with("      │ "),
+            "second tool row should use group connector: {:?}",
+            joined[second_tool]
+        );
+    }
+
+    #[test]
+    fn tool_running_line_shows_progress_detail() {
+        let th = ThemePalette::dark();
+        let rows = tool_running_lines(th, "ci_get_failed_logs", Some("page 2, 5s"));
+        let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("ci_get_failed_logs"));
+        assert!(text.contains("page 2, 5s"));
     }
 }

@@ -4,7 +4,7 @@
 
 unistar-coworker watches PRs and CI, classifies failures, produces digests, and queues mutating actions for human approval. It is **not** a coding agent: no auto-merge, no auto-push fixes, no replacement for GitHub Actions.
 
-Built on [unistar-mcp](https://github.com/unistar-ai/unistar-mcp) (Go + `gh`), with a Rust harness, ratatui TUI, and Ollama/vLLM chat.
+Built on [unistar-mcp](../unistar-mcp) (Go + `gh`), with a Rust harness, ratatui TUI, and Ollama/vLLM chat.
 
 ---
 
@@ -46,7 +46,7 @@ Details: [design.md](./design.md) · harness notes: [skill-agent-harness.md](./s
 | Dependency | Purpose |
 |------------|---------|
 | **Rust 1.75+** | Build unistar-coworker |
-| **[unistar-mcp](https://github.com/unistar-ai/unistar-mcp)** | GitHub/CI MCP server (`mcp.command` in config) |
+| **[unistar-mcp](../unistar-mcp)** | GitHub/CI MCP server (`mcp.command` in config) |
 | **`gh` CLI** | Used by MCP; `gh auth login` or `GH_TOKEN` |
 | **Ollama** (optional) | Local LLM at `llm.base_url`; some paths work offline with heuristics |
 
@@ -55,13 +55,11 @@ Details: [design.md](./design.md) · harness notes: [skill-agent-harness.md](./s
 ## Quick start
 
 ```bash
-# 1. Build MCP
-git clone https://github.com/unistar-ai/unistar-mcp.git
-cd unistar-mcp && go build -o unistar-mcp .
+# 1. Build MCP (sibling checkout or your fork)
+cd ../unistar-mcp && go build -o unistar-mcp .
 
 # 2. Build coworker
-git clone https://github.com/unistar-ai/unistar-coworker.git
-cd unistar-coworker && cargo build --release
+cd ../unistar-coworker && cargo build --release
 
 # 3. Configure
 cp coworker.example.yaml coworker.yaml
@@ -89,6 +87,11 @@ repos:
 mcp:
   command: /path/to/unistar-mcp
   args: ["--lazy"]
+  lazy: true              # false = direct tools/call (skip meta-tool hop)
+  timeout_secs: 120       # default MCP RPC timeout
+  tool_timeouts:
+    ci_get_failed_logs: 180   # per-tool overrides
+  env: {}
 
 llm:
   base_url: http://localhost:11434/v1
@@ -154,7 +157,7 @@ Press **`0`** or **`?`** in the TUI for full-screen chat.
 
 Mutating tools (`ci_rerun_workflow`, `pr_create_backport`, `pr_post_comment`) enqueue **Approvals** — never run directly from chat. When pending, a **centered approval popup** appears: **click Approve/Deny**, or use **←/→** / **Tab** to choose and **Enter** (or **y**/**n**). You can also use `/approve` `/deny` or tab **3** for the full queue. Set `chat.auto_approve_mutations: true` to skip the popup and run mutations immediately (default **off**).
 
-Default read tools: `pr_get_overview`, `pr_list_open`, `ci_analyze_pr_failures`, `ci_get_failed_logs`, `store_get_latest_digest`, …
+Default read tools are documented in [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) (workflows). Chat default **`tool_mode: auto`**: skill chains → `tool_search` / `tool_list_category` → `tool_call` (+ optional `resource_read`); session caches `tool_list` and warms native schemas for tools used. Set `native` for full schemas. See [base-tool-plan.md](./base-tool-plan.md).
 
 ---
 
@@ -169,7 +172,7 @@ Default read tools: `pr_get_overview`, `pr_list_open`, `ci_analyze_pr_failures`,
 | `chat [--once MSG] [--session UUID]` | Interactive or one-shot chat |
 | `triage-pr --repo O/R --pr N` | Debug triage for one PR |
 | `report flaky [--since-days 30]` | Flaky ledger export |
-| `store migrate --from json --to sqlite` | Migrate store (`--features sqlite`) |
+| `store migrate --from json --to sqlite` | Migrate store (json ↔ sqlite) |
 
 ---
 
@@ -187,7 +190,7 @@ Default read tools: `pr_get_overview`, `pr_list_open`, `ci_analyze_pr_failures`,
 | `7` | Release |
 | `8` | Issues |
 
-`Tab` / `Shift+Tab` cycle tabs. `r` daily-work · `R` release-duty · `q` quit. Theme: `tui.theme: dark | light`.
+`Tab` / `Shift+Tab` cycle tabs. `r` daily-work · `R` release-duty · `q` quit. Theme: `tui.theme: dark | light | none`; optional `tui.accent: "#RRGGBB"`. `--attach` polls the daemon store every 2s.
 
 ---
 
@@ -197,7 +200,7 @@ PR: `pr_list_open`, `pr_get_overview`, `pr_get_status`, `pr_get_diff`, `pr_list_
 
 CI: `ci_analyze_pr_failures`, `ci_get_run_summary`, `ci_get_failed_logs`, `ci_rerun_workflow`, …
 
-With `--lazy`, the agent also has `tool_list`, `tool_describe`, `tool_call`. Parameter reference: [skills/_base/TOOLS.md](./skills/_base/TOOLS.md).
+With `--lazy`, MCP exposes `tool_search`, `tool_list_category`, `tool_list`, `tool_describe`, `tool_call`. Coworker chat adds `resource_read` for MCP resources. See [unistar-mcp/docs/TOOLS.md](../unistar-mcp/docs/TOOLS.md).
 
 ---
 
@@ -207,7 +210,7 @@ With `--lazy`, the agent also has `tool_list`, `tool_describe`, `tool_call`. Par
 cargo check
 cargo clippy -- -D warnings
 cargo test
-cargo test --features sqlite
+cargo test
 ```
 
 ```
@@ -229,7 +232,7 @@ unistar-coworker/
 - **64K context** — compaction, reasoning compression, live context panel with token budget
 - **18 workflows** + cron scheduler and daemon attach mode
 - **Flaky CI triage** — heuristic + LLM classify, rerun approval queue
-- **TUI polish** — Markdown chat, virtual scroll, dark/light theme, streaming status tail
+- **TUI polish** — Markdown chat, virtual scroll, dark/light/none theme, streaming status tail
 
 Crate version: **1.0.0** ([Cargo.toml](./Cargo.toml))
 
@@ -237,7 +240,7 @@ Crate version: **1.0.0** ([Cargo.toml](./Cargo.toml))
 
 ## Related
 
-- [unistar-mcp](https://github.com/unistar-ai/unistar-mcp) — MCP server wrapping `gh`
+- [unistar-mcp](../unistar-mcp) — MCP server wrapping `gh`
 - [design.md](./design.md) — product spec and boundaries
 
 ## License
