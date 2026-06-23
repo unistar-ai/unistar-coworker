@@ -190,7 +190,7 @@ Default read tools are documented in [`skills/_base/TOOLS.md`](./skills/_base/TO
 | `7` | Release |
 | `8` | Issues |
 
-`Tab` / `Shift+Tab` cycle tabs. `r` daily-work · `R` release-duty · `q` quit. Theme: `tui.theme: dark | light | none`; optional `tui.accent: "#RRGGBB"`. `--attach` polls the daemon store every 2s.
+`Tab` / `Shift+Tab` cycle tabs. `r` daily-work · `R` release-duty · `q` quit. Theme: `theme: dark | light | none` (TUI + Web); optional `tui.accent: "#RRGGBB"`. `--attach` polls the daemon store every 2s.
 
 ---
 

@@ -70,9 +70,9 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "pr_get_diff",
-        blurb: "Capped unified diff",
+        blurb: "Unified diff (full or single path)",
         required: &["repo", "pr_number"],
-        optional: &["max_bytes"],
+        optional: &["path", "max_bytes"],
     },
     ToolSpec {
         name: "repo_get_info",
@@ -1297,7 +1297,7 @@ fn inferred_spec_fields(name: &str) -> (&'static [&'static str], &'static [&'sta
         return (&["repo"], &["since", "label", "limit"]);
     }
     if name == "pr_get_diff" {
-        return (&["repo", "pr_number"], &["max_bytes"]);
+        return (&["repo", "pr_number"], &["path", "max_bytes"]);
     }
     if name == "issue_list_open" || name == "alert_list_open" || name == "alert_summarize_open" {
         return (&["repo"], &["limit"]);
@@ -1371,7 +1371,9 @@ fn example_native_tool_args(
         | "pr_list_changed_files"
         | "pr_get_ci_snapshot"
         | "ci_analyze_pr_failures" => format!("{{\"repo\":\"{repo}\",\"pr_number\":{pr}}}"),
-        "pr_get_diff" => format!("{{\"repo\":\"{repo}\",\"pr_number\":{pr},\"max_bytes\":48000}}"),
+        "pr_get_diff" => {
+            format!("{{\"repo\":\"{repo}\",\"pr_number\":{pr},\"path\":\"src/lib.rs\"}}")
+        }
         "pr_list_open" => format!(r#"{{"repo":"{repo}","author":"@me","limit":20}}"#),
         "repo_get_info" => format!(r#"{{"repo":"{repo}"}}"#),
         "pr_list_waiting_review"

@@ -46,7 +46,7 @@ pub fn reset_streaming_markdown_cache() {
 }
 
 fn palette(state: &AppState) -> ThemePalette {
-    ThemePalette::from_tui(&state.config.tui)
+    ThemePalette::from_tui(&state.config.tui, state.config.theme())
 }
 
 pub fn scroll_page_up(state: &mut AppState) {

@@ -516,6 +516,11 @@ fn split_unified_diff(diff: &str) -> Vec<(String, String)> {
 
 /// Per-file diff excerpts so large PRs fit context without losing file names.
 pub fn structure_pr_get_diff_output(text: &str) -> String {
+    // Single-file fetch already targets one path; keep the patch intact (cap only).
+    if text.contains(" path=") {
+        return cap_tool_result("pr_get_diff", text);
+    }
+
     const MAX_FILES: usize = 16;
     const PER_FILE_CHARS: usize = 1_200;
 
@@ -553,12 +558,14 @@ pub fn structure_pr_get_diff_output(text: &str) -> String {
     }
     if files.len() > MAX_FILES {
         out.push_str(&format!(
-            "\n… and {} more file(s) — call pr_list_changed_files for the full path list",
+            "\n… and {} more file(s) — call pr_list_changed_files, then pr_get_diff with path=<file>",
             files.len() - MAX_FILES
         ));
     }
     if text.contains("[diff truncated at max_bytes]") {
-        out.push_str("\n[upstream diff truncated at max_bytes — summarize listed files only]");
+        out.push_str(
+            "\n[upstream diff truncated at max_bytes — use pr_get_diff with path=<file> per file]",
+        );
     }
     cap_tool_result("pr_get_diff", &out)
 }
@@ -1496,6 +1503,18 @@ diff --git a/bar.rs b/bar.rs\n\
         assert!(structured.contains("### foo.rs"));
         assert!(structured.contains("### bar.rs"));
         assert!(structured.contains("+line one"));
+    }
+
+    #[test]
+    fn structure_pr_get_diff_single_path_keeps_patch() {
+        let raw = "Diff for o/r#1 path=src/lib.rs (80 bytes):\n\n\
+diff --git a/src/lib.rs b/src/lib.rs\n\
+--- a/src/lib.rs\n+++ b/src/lib.rs\n\
++fn main() {}\n";
+        let structured = structure_tool_result("pr_get_diff", raw);
+        assert!(structured.contains("path=src/lib.rs"));
+        assert!(structured.contains("+fn main()"));
+        assert!(!structured.contains("Per-file excerpts"));
     }
 
     #[test]

@@ -73,6 +73,16 @@ struct PrFileChange {
 }
 
 #[derive(Debug, Deserialize)]
+struct PrFilePatchRow {
+    filename: String,
+    additions: i32,
+    deletions: i32,
+    status: String,
+    #[serde(default)]
+    patch: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct PrUpdatedRow {
     number: u32,
     title: String,
@@ -288,6 +298,9 @@ pub async fn pr_get_diff(exec: &GhExec, args: &Value) -> Result<String> {
     let repo = require_str(args, "repo")?;
     let pr_num = require_u32(args, "pr_number")?;
     let max_bytes = optional_u32(args, "max_bytes", 48_000) as usize;
+    if let Some(path) = optional_str(args, "path") {
+        return pr_get_diff_for_path(exec, &repo, pr_num, &path, max_bytes).await;
+    }
     let pr_num_s = pr_num.to_string();
     let gh_args = ["pr", "diff", &pr_num_s, "-R", &repo];
     let res = exec.run_retry(&gh_args).await;
@@ -297,6 +310,50 @@ pub async fn pr_get_diff(exec: &GhExec, args: &Value) -> Result<String> {
         diff.truncate(max_bytes);
     }
     let mut out = format!("Diff for {repo}#{pr_num} ({} bytes", diff.len());
+    if truncated {
+        out.push_str(", truncated");
+    }
+    out.push_str("):\n\n");
+    out.push_str(&diff);
+    if truncated {
+        out.push_str("\n\n[diff truncated at max_bytes]");
+        out.push_str("\nNext: pr_list_changed_files, then pr_get_diff with path=<file> per file.");
+    }
+    Ok(out)
+}
+
+async fn pr_get_diff_for_path(
+    exec: &GhExec,
+    repo: &str,
+    pr_num: u32,
+    path: &str,
+    max_bytes: usize,
+) -> Result<String> {
+    let file = fetch_pr_file_patch(exec, repo, pr_num, path)
+        .await?
+        .ok_or_else(|| {
+            CoworkerError::Workflow(format!(
+                "path not in PR #{pr_num} changed files: {path}\n\
+Next: pr_list_changed_files for exact paths."
+            ))
+        })?;
+    let patch = match file.patch.filter(|p| !p.trim().is_empty()) {
+        Some(patch) => patch,
+        None => {
+            return Ok(format!(
+                "Diff for {repo}#{pr_num} path={path}:\n\n\
+No patch available (status={}, +{}/-{}). File may be binary or exceed GitHub's per-file patch limit.\n\
+Next: pr_list_changed_files; use read_file in workspace if the branch is checked out.",
+                file.status, file.additions, file.deletions
+            ));
+        }
+    };
+    let mut diff = format!("diff --git a/{path} b/{path}\n{patch}");
+    let truncated = diff.len() > max_bytes;
+    if truncated {
+        diff.truncate(max_bytes);
+    }
+    let mut out = format!("Diff for {repo}#{pr_num} path={path} ({} bytes", diff.len());
     if truncated {
         out.push_str(", truncated");
     }
@@ -698,6 +755,35 @@ async fn fetch_pr_file_changes(
     Ok(out)
 }
 
+async fn fetch_pr_file_patch(
+    exec: &GhExec,
+    repo: &str,
+    pr_num: u32,
+    path: &str,
+) -> Result<Option<PrFilePatchRow>> {
+    let api_path = format!("repos/{repo}/pulls/{pr_num}/files");
+    let gh_args = [
+        "api",
+        &api_path,
+        "--paginate",
+        "--jq",
+        ".[] | {filename, additions, deletions, status, patch}",
+    ];
+    let res = exec.run_retry(&gh_args).await;
+    let stdout = GhExec::into_result(res, "failed to fetch PR file patch")?;
+    for line in stdout.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(f) = serde_json::from_str::<PrFilePatchRow>(line) {
+            if f.filename == path {
+                return Ok(Some(f));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn format_changed_files_list(
     repo: &str,
     pr_num: u32,
@@ -718,6 +804,9 @@ fn format_changed_files_list(
         ));
     }
     lines.push(format!("totals: +{total_add}/-{total_del}"));
+    lines.push(
+        "Next: pr_get_diff with path=<filename> for one file at a time on large PRs.".into(),
+    );
     Ok(lines.join("\n"))
 }
 

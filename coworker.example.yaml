@@ -31,5 +31,9 @@ chat:
 web:
   bind: 127.0.0.1:8787
 
+# UI theme for TUI and Web (`dark` | `light` | `none` — Web treats `none` as `dark`)
+theme: dark
+
 tui:
-  theme: dark
+  # osc8_links: true
+  # accent: "#3b82f6"

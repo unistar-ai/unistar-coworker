@@ -204,8 +204,7 @@ pub struct ChatActivityFlow {
 pub fn is_flow_activity_tool(name: &str) -> bool {
     matches!(
         name,
-        "skill_load"
-            | "tool_list"
+        "tool_list"
             | "tool_list_category"
             | "tool_search"
             | "tool_describe"
@@ -913,7 +912,9 @@ pub async fn run_chat_turn(
     let max_duration_secs = config.chat.max_duration_secs;
     let mut tool_calls = Vec::new();
     let mut tools_used = 0u32;
-    let mut tool_exec_records = rehydrate_tool_exec_records_from_messages(&history);
+    // Duplicate guard is scoped to this user-message turn only. Do not rehydrate from
+    // session history — PR/CI snapshots go stale after pushes and users re-fetch.
+    let mut tool_exec_records: HashMap<String, ToolExecRecord> = HashMap::new();
     let mut duplicate_tool_nudges: HashMap<String, u32> = HashMap::new();
     let mut duplicate_ui_shown: HashSet<String> = HashSet::new();
     let mut duplicate_forced_reply_nudged = false;
@@ -1283,6 +1284,9 @@ from tool results already in context.";
                 }
 
                 if let Some(duplicate) = prepared.iter().find_map(|call| {
+                    if tool_allows_repeat_fetch(&call.name) {
+                        return None;
+                    }
                     duplicate_tool_block_reason(tool_exec_records.get(&call.fingerprint))
                         .map(|block| (call.clone(), block))
                 }) {
@@ -1804,7 +1808,11 @@ fn finalize_tool_args_inner(
 
 fn fill_default_diff_max_bytes(tool_name: &str, tool_args: &mut Value) {
     if tool_name == "pr_get_diff" && tool_args.get("max_bytes").is_none() {
-        tool_args["max_bytes"] = json!(48_000);
+        let has_path = tool_args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        tool_args["max_bytes"] = json!(if has_path { 64_000 } else { 48_000 });
     }
 }
 
@@ -2101,6 +2109,11 @@ fn tool_requires_pr_number(tool_name: &str) -> bool {
     )
 }
 
+/// Live GitHub/CI reads can go stale; always execute fresh instead of replaying cache.
+fn tool_allows_repeat_fetch(tool_name: &str) -> bool {
+    !is_mutating_tool(tool_name) && tool_requires_pr_number(tool_name)
+}
+
 fn tool_call_names(tool_calls: &[ToolCallSummary]) -> Vec<&str> {
     tool_calls.iter().map(|tc| tc.tool_name.as_str()).collect()
 }
@@ -2144,6 +2157,16 @@ fn semantic_tool_fingerprint(tool_name: &str, tool_args: &Value) -> Option<Strin
         .map(str::trim)
         .filter(|s| !s.is_empty())?;
     let pr = normalized_pr_number(tool_args)?;
+    if tool_name == "pr_get_diff" {
+        if let Some(path) = tool_args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(format!("{tool_name}:repo={repo},pr_number={pr},path={path}"));
+        }
+    }
     Some(format!("{tool_name}:repo={repo},pr_number={pr}"))
 }
 
@@ -2197,6 +2220,7 @@ fn normalize_bash_fingerprint(command: &str) -> String {
         .join("\n")
 }
 
+#[cfg(test)]
 fn rehydrate_tool_output_succeeded(tool_name: &str, content: &str) -> bool {
     if content.contains("Approval denied") || content.starts_with("tool_error(") {
         return false;
@@ -2216,6 +2240,7 @@ fn rehydrate_tool_output_succeeded(tool_name: &str, content: &str) -> bool {
     !tool_output_indicates_failure(tool_name, content)
 }
 
+#[cfg(test)]
 fn rehydrate_tool_exec_records_from_messages(
     messages: &[ChatMessage],
 ) -> HashMap<String, ToolExecRecord> {
@@ -4312,7 +4337,7 @@ mod tests {
 
     #[test]
     fn flow_activity_tools_are_transient() {
-        assert!(is_flow_activity_tool("skill_load"));
+        assert!(!is_flow_activity_tool("skill_load"));
         assert!(is_flow_activity_tool("tool_call"));
         assert!(!is_flow_activity_tool("pr_get_overview"));
     }
@@ -4492,6 +4517,45 @@ mod tests {
             tool_call_fingerprint("python_run", &a),
             tool_call_fingerprint("python_run", &b)
         );
+    }
+
+    #[test]
+    fn pr_fetch_tools_allow_repeat_even_when_record_succeeded() {
+        let args = json!({"repo": "acme/widget", "pr_number": 42});
+        let fp = tool_call_fingerprint("pr_get_diff", &args);
+        let mut records = HashMap::new();
+        records.insert(
+            fp,
+            ToolExecRecord {
+                succeeded: true,
+                fail_count: 0,
+            },
+        );
+        assert!(tool_allows_repeat_fetch("pr_get_diff"));
+        assert!(!tool_allows_repeat_fetch("python_run"));
+    }
+
+    #[test]
+    fn turn_start_tool_exec_records_are_empty_not_rehydrated() {
+        let args = json!({"code": "print('ok')"});
+        let msg = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            role: ChatRole::Tool,
+            content: "tool_result(python_run):\nreview: APPROVE (HUMAN_APPROVE)\nexit: 0 (56ms)\nstdout:\nok"
+                .into(),
+            ts: Utc::now(),
+            tool_name: Some("python_run".into()),
+            tool_calls_json: Some(args.to_string()),
+        };
+        let from_history = rehydrate_tool_exec_records_from_messages(&[msg]);
+        let fp = tool_call_fingerprint("python_run", &args);
+        assert_eq!(
+            duplicate_tool_block_reason(from_history.get(&fp)),
+            Some(DuplicateToolBlock::AlreadySucceeded)
+        );
+        let turn_start: HashMap<String, ToolExecRecord> = HashMap::new();
+        assert_eq!(duplicate_tool_block_reason(turn_start.get(&fp)), None);
     }
 
     #[test]

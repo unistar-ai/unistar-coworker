@@ -899,11 +899,17 @@ Call one or more tools or reply to the user in plain text."
     /// Compress a long thinking trace into bullet lines for chat context (always think=false).
     pub async fn summarize_reasoning_trace(&self, reasoning: &str) -> Result<String> {
         const SYSTEM: &str = "You compress internal agent reasoning into 2-5 short bullet lines for \
-later context. Keep PR numbers, tool names, run IDs, and conclusions. No preamble or markdown fences.";
-        let user = reasoning.chars().take(12_000).collect::<String>();
-        if user.trim().is_empty() {
+later context. Keep PR numbers, tool names, run IDs, and conclusions. \
+Output plain-text bullets only — do NOT call tools or emit tool_calls JSON. \
+No preamble or markdown fences.";
+        let trimmed = reasoning.trim();
+        if trimmed.is_empty() {
             return Ok(String::new());
         }
+        let user = format!(
+            "Summarize this past agent reasoning trace (read-only):\n\n---\n{}\n---",
+            trimmed.chars().take(12_000).collect::<String>()
+        );
         if !self.online {
             return Err(CoworkerError::Other(anyhow::anyhow!(
                 "LLM offline — cannot compress reasoning"
@@ -919,7 +925,7 @@ later context. Keep PR numbers, tool names, run IDs, and conclusions. No preambl
             { "role": "system", "content": SYSTEM },
             { "role": "user", "content": user },
         ]);
-        let limit = self.cfg.reasoning_summary_tokens.clamp(128, 512);
+        let limit = self.cfg.reasoning_summary_tokens.clamp(256, 768).max(512);
         match self
             .chat_plain_messages(&messages, limit, Some(false))
             .await
@@ -1051,9 +1057,10 @@ COMPRESS: raw log excerpts and duplicate tool dumps. No preamble.",
                 "stream": false,
                 "temperature": 0,
                 "max_tokens": num_predict,
+                "tool_choice": "none",
             });
             let v = self.post_json(&url, &body).await?;
-            extract_openai_chat_content(&v)
+            extract_openai_plain_content(&v)
         }
     }
 }
@@ -1177,11 +1184,9 @@ fn parse_openai_tools_turn(v: &serde_json::Value) -> Result<super::chat::ChatToo
 
 fn extract_openai_message_reasoning(msg: &serde_json::Value) -> String {
     for key in ["reasoning_content", "reasoning", "thinking"] {
-        if let Some(reasoning) = msg.get(key).and_then(|c| c.as_str()) {
-            let trimmed = reasoning.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
+        let text = openai_message_text_field(msg, key);
+        if !text.trim().is_empty() {
+            return text.trim().to_string();
         }
     }
     String::new()
@@ -1189,13 +1194,63 @@ fn extract_openai_message_reasoning(msg: &serde_json::Value) -> String {
 
 /// User-visible assistant text only (not internal reasoning).
 fn extract_openai_visible_content(msg: &serde_json::Value) -> String {
-    if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return content.to_string();
+    let text = openai_message_text_field(msg, "content");
+    if text.trim().is_empty() {
+        String::new()
+    } else {
+        text
+    }
+}
+
+fn openai_message_text_field(msg: &serde_json::Value, key: &str) -> String {
+    let Some(value) = msg.get(key) else {
+        return String::new();
+    };
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    if let Some(parts) = value.as_array() {
+        let mut out = String::new();
+        for part in parts {
+            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                out.push_str(text);
+            } else if let Some(text) = part.as_str() {
+                out.push_str(text);
+            }
         }
+        return out;
     }
     String::new()
+}
+
+fn is_degenerate_plain_llm_text(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let thought_hits = t.matches("<thought").count();
+    thought_hits >= 3 || (thought_hits >= 1 && t.len() < 120)
+}
+
+fn summarize_openai_tool_calls_for_plain(msg: &serde_json::Value) -> Option<String> {
+    let calls = msg.get("tool_calls")?.as_array()?;
+    if calls.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for call in calls.iter().take(5) {
+        let name = call
+            .pointer("/function/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tool");
+        let args = call
+            .pointer("/function/arguments")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let short_name = name.rsplit([':', '.']).next().unwrap_or(name);
+        lines.push(format!("- Planned tool: {short_name}({args})"));
+    }
+    Some(lines.join("\n"))
 }
 
 fn extract_openai_message_content(msg: &serde_json::Value) -> String {
@@ -1226,6 +1281,38 @@ fn extract_openai_chat_content(v: &serde_json::Value) -> Result<String> {
         )));
     }
     Ok(content)
+}
+
+/// Plain-text OpenAI completion — accepts reasoning fields when thinking models
+/// emit summaries only in `reasoning_content` (common on oMLX / Qwen-style APIs).
+fn extract_openai_plain_content(v: &serde_json::Value) -> Result<String> {
+    let msg = v
+        .pointer("/choices/0/message")
+        .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm missing choices[0].message")))?;
+
+    let visible = extract_openai_visible_content(msg);
+    if !is_degenerate_plain_llm_text(&visible) {
+        return Ok(visible.trim().to_string());
+    }
+
+    let reasoning = extract_openai_message_reasoning(msg);
+    if !is_degenerate_plain_llm_text(&reasoning) {
+        tracing::debug!("openai plain reply recovered from reasoning field");
+        return Ok(reasoning.trim().to_string());
+    }
+
+    if let Some(summary) = summarize_openai_tool_calls_for_plain(msg) {
+        tracing::debug!("openai plain reply recovered from tool_calls plan");
+        return Ok(summary);
+    }
+
+    let finish = v
+        .pointer("/choices/0/finish_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    Err(CoworkerError::Other(anyhow::anyhow!(
+        "llm empty message content (finish_reason={finish})"
+    )))
 }
 
 /// When thinking models exhaust `num_predict`, JSON may only appear in thinking/reasoning.
@@ -2133,6 +2220,77 @@ mod tests {
         });
         let text = extract_ollama_plain_content(&v).unwrap();
         assert!(text.contains("#19240"));
+    }
+
+    #[test]
+    fn extract_openai_plain_content_from_reasoning_only() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "* PR #17671 overview retrieved.\n* Next: list changed files."
+                }
+            }]
+        });
+        let text = extract_openai_plain_content(&v).unwrap();
+        assert!(text.contains("#17671"));
+    }
+
+    #[test]
+    fn extract_openai_plain_content_from_tool_calls_only() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "github:pr_get_diff",
+                            "arguments": "{\"file_path\": \"scripts/smart_router.py\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let text = extract_openai_plain_content(&v).unwrap();
+        assert!(text.contains("pr_get_diff"));
+        assert!(text.contains("smart_router.py"));
+    }
+
+    #[test]
+    fn extract_openai_plain_content_rejects_thought_spam() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "content": "<thought\n<thought\n<thought\n<thought",
+                    "reasoning_content": "* PR #42: checked CI."
+                }
+            }]
+        });
+        let text = extract_openai_plain_content(&v).unwrap();
+        assert!(text.contains("#42"));
+    }
+
+    #[test]
+    fn extract_openai_plain_content_from_reasoning_bullets() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "- PR #42: checked CI\n- Next: pr_get_diff"
+                }
+            }]
+        });
+        let text = extract_openai_plain_content(&v).unwrap();
+        assert!(text.contains("#42"));
+        assert!(text.contains("pr_get_diff"));
     }
 
     #[test]

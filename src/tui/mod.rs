@@ -1386,7 +1386,7 @@ async fn handle_mouse(
 }
 
 fn draw_ui(frame: &mut ratatui::Frame, state: &AppState, list_state: &mut ListState) {
-    let th = ThemePalette::from_tui(&state.config.tui);
+    let th = ThemePalette::from_tui(&state.config.tui, state.config.theme());
     frame.render_widget(Clear, frame.area());
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(th.bg)),
@@ -1640,7 +1640,7 @@ fn draw_list(
                 "llm probe: {}",
                 context_panel::format_probe_latency(state.llm_ok, state.llm_latency_ms)
             )),
-            ListItem::new(format!("tui theme: {:?}", state.config.tui.theme)),
+            ListItem::new(format!("theme: {:?}", state.config.theme())),
         ],
     };
 
@@ -1985,7 +1985,7 @@ fn copy_detail_text_from_state(
     sel_lo: u16,
     sel_hi: u16,
 ) -> Option<String> {
-    let th = ThemePalette::from_tui(&state.config.tui);
+    let th = ThemePalette::from_tui(&state.config.tui, state.config.theme());
     let (body, render_markdown) = detail_body(state);
     let lines = detail_render_lines(th, &body, render_markdown, width);
     if lines.is_empty() {

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders};
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::{TuiConfig, TuiThemeMode};
+use crate::config::{ThemeMode, TuiConfig};
 
 /// Full TUI color palette (dark or light).
 #[derive(Debug, Clone, Copy)]
@@ -43,18 +43,18 @@ pub struct ThemePalette {
 }
 
 impl ThemePalette {
-    pub fn from_mode(mode: TuiThemeMode) -> Self {
+    pub fn from_mode(mode: ThemeMode) -> Self {
         match mode {
-            TuiThemeMode::Dark => Self::dark(),
-            TuiThemeMode::Light => Self::light(),
-            TuiThemeMode::None => Self::none(),
+            ThemeMode::Dark => Self::dark(),
+            ThemeMode::Light => Self::light(),
+            ThemeMode::None => Self::none(),
         }
     }
 
-    pub fn from_tui(tui: &TuiConfig) -> Self {
-        let mut palette = Self::from_mode(tui.theme);
+    pub fn from_tui(tui: &TuiConfig, theme: ThemeMode) -> Self {
+        let mut palette = Self::from_mode(theme);
         palette.osc8_links = tui.osc8_links;
-        if tui.theme != TuiThemeMode::None {
+        if theme != ThemeMode::None {
             if let Some(accent) = tui
                 .accent
                 .as_deref()
@@ -960,7 +960,7 @@ mod tests {
             accent: Some("#ff5500".into()),
             ..Default::default()
         };
-        let th = ThemePalette::from_tui(&tui);
+        let th = ThemePalette::from_tui(&tui, ThemeMode::Dark);
         assert_eq!(th.accent, Color::Rgb(255, 85, 0));
         assert_eq!(th.accent_dim, Color::Rgb(170, 56, 0));
     }

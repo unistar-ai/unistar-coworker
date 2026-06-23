@@ -29,6 +29,9 @@ pub struct Config {
     pub main_guard: MainGuardConfig,
     #[serde(default)]
     pub chat: ChatConfig,
+    /// UI theme for TUI and Web (`dark`, `light`, or `none` for terminal defaults in TUI only).
+    #[serde(default)]
+    pub theme: Option<ThemeMode>,
     #[serde(default)]
     pub tui: TuiConfig,
     #[serde(default)]
@@ -633,34 +636,29 @@ impl Default for ChatConfig {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TuiThemeMode {
+pub enum ThemeMode {
     #[default]
     Dark,
     Light,
-    /// Terminal default colors — no Catppuccin RGB backgrounds.
+    /// Terminal default colors — TUI only; Web UI uses `dark`.
     None,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Back-compat alias for docs / external references.
+#[allow(dead_code)]
+pub type TuiThemeMode = ThemeMode;
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TuiConfig {
-    #[serde(default)]
-    pub theme: TuiThemeMode,
+    /// Deprecated: use top-level `theme`.
+    #[serde(default, skip_serializing)]
+    pub theme: Option<ThemeMode>,
     /// Emit OSC 8 hyperlinks for markdown links (iTerm/WezTerm/Windows Terminal).
     #[serde(default)]
     pub osc8_links: bool,
     /// Optional `#RRGGBB` accent for dark/light themes (ignored when `theme: none`).
     #[serde(default)]
     pub accent: Option<String>,
-}
-
-impl Default for TuiConfig {
-    fn default() -> Self {
-        Self {
-            theme: TuiThemeMode::Dark,
-            osc8_links: false,
-            accent: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -782,6 +780,24 @@ impl Config {
         if let Ok(canonical) = self.chat.workspace.canonicalize() {
             self.chat.workspace = canonical;
         }
+        if self.theme.is_some() && self.tui.theme.is_some() {
+            tracing::warn!(
+                "coworker.yaml sets both `theme` and `tui.theme` — using top-level `theme`"
+            );
+        }
+    }
+
+    /// Resolved UI theme (`theme` overrides deprecated `tui.theme`).
+    pub fn theme(&self) -> ThemeMode {
+        self.theme.or(self.tui.theme).unwrap_or_default()
+    }
+
+    /// Web UI `data-theme` id (`none` maps to `dark`).
+    pub fn web_theme_id(&self) -> &'static str {
+        match self.theme() {
+            ThemeMode::Light => "light",
+            ThemeMode::Dark | ThemeMode::None => "dark",
+        }
     }
 
     pub fn discover() -> Result<(Self, PathBuf)> {
@@ -850,6 +866,19 @@ mod tests {
     }
 
     #[test]
+    fn root_theme_deserializes() {
+        let yaml = r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+storage: { backend: json, path: ./data }
+repos: [acme/widget]
+theme: light
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.theme(), ThemeMode::Light);
+        assert_eq!(cfg.web_theme_id(), "light");
+    }
+
+    #[test]
     fn tui_theme_none_deserializes() {
         let yaml = r#"
 llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
@@ -860,7 +889,7 @@ tui:
   theme: none
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.tui.theme, TuiThemeMode::None);
+        assert_eq!(cfg.theme(), ThemeMode::None);
     }
 
     #[test]

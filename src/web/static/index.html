@@ -1,9 +1,19 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>unistar-coworker</title>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("unistar-web-theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.setAttribute("data-theme", t);
+        }
+      } catch (_) {}
+    })();
+  </script>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -14,6 +24,7 @@
     </div>
     <nav id="tabs" class="tabs" aria-label="main tabs"></nav>
     <div class="topbar-meta">
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light mode" title="Switch to light mode">☀️</button>
       <div id="ctx-usage" class="ctx-usage hidden" title="LLM context usage"></div>
       <div id="status" class="status">connecting…</div>
     </div>

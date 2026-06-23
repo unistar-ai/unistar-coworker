@@ -485,7 +485,7 @@ fn draw_context_header(
 }
 
 pub fn draw_context_panel(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let th = theme::ThemePalette::from_tui(&state.config.tui);
+    let th = theme::ThemePalette::from_tui(&state.config.tui, state.config.theme());
     let header_h = 4u16.min(area.height);
     let chunks = Layout::default()
         .direction(Direction::Vertical)

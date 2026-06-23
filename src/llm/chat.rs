@@ -397,8 +397,9 @@ pub async fn materialize_reasoning_for_context(
         }
         tracing::warn!(
             reasoning_chars = trimmed.len(),
-            "reasoning summarizer failed; keeping verbatim trace (no local truncation)"
+            "reasoning summarizer failed; using local truncation"
         );
+        return Ok(crate::agent::context::truncate_reasoning_local(trimmed, 720));
     }
     Ok(trimmed.to_string())
 }
@@ -417,7 +418,7 @@ async fn maybe_compress_reasoning(
         "compressing reasoning ~{} chars via summarizer",
         reasoning.len()
     );
-    const MAX_ATTEMPTS: u32 = 3;
+    const MAX_ATTEMPTS: u32 = 2;
     for attempt in 1..=MAX_ATTEMPTS {
         match tokio::time::timeout(
             std::time::Duration::from_secs(90),
@@ -618,7 +619,7 @@ After tool results are in context, reply in natural language."
     if reply_claims_cannot_see_changes(message) {
         return format!(
             "You replied without file/diff data. User asked: \"{user_task}\"\n\
-pr_list_changed_files or pr_get_diff may help if change detail is needed."
+pr_list_changed_files then pr_get_diff with path=<file> (one file per call) may help on large PRs."
         );
     }
     if reply_claims_implementation_done(message) {

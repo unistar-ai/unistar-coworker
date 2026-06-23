@@ -66,13 +66,14 @@ Heuristic risk flags: lockfile, migration, workflow edits, large diffs. **In def
 | `pr_number` | yes | |
 
 ### `pr_get_diff`
-Capped unified diff (harness compresses per-file). Use after `pr_list_changed_files` when patch detail is needed.
+Unified diff. On **large PRs**, prefer `pr_list_changed_files` then fetch **one file at a time** with `path`.
 
 | Param | Required | Notes |
 |-------|----------|-------|
 | `repo` | yes | |
 | `pr_number` | yes | |
-| `max_bytes` | no | Max diff bytes returned (default **48000**) |
+| `path` | no | Single changed-file path (exact match from `pr_list_changed_files`) |
+| `max_bytes` | no | Max diff bytes returned (default **48000** full PR, **64000** with `path`) |
 
 ### `repo_get_info`
 Repository metadata: default branch, visibility, language, license, topics, label names.

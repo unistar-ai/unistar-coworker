@@ -37,7 +37,7 @@ Do not:
 1. **Anchor the PR** — `repo` + `pr_number` from the URL or user text.
 2. **Scope first** — `pr_get_overview` → `pr_list_changed_files`.
 3. **Risk before full diff** — on large PRs, `pr_diff_risk_scan` before `pr_get_diff` (set `max_bytes` when needed).
-4. **Patch detail** — `pr_get_diff` only when risk scan or the user needs line-level evidence.
+4. **Patch detail** — `pr_get_diff` with `path=<file>` (one file per call) when risk scan or the user needs line-level evidence; use full PR diff only on small PRs.
 5. **People** — `pr_get_review_routing` → `pr_get_review_state` when the question is who should review or approval status.
 6. **Review angles** — incorrect vs intent, security/permissions, breaking API/config/migrations, reliability, hot-path performance, repo guidance in changed paths.
 7. **Strict findings** — actionable, evidenced, file/line when available; skip style nits unless asked.

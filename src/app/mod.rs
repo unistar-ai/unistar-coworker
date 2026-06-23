@@ -1022,23 +1022,46 @@ pub async fn hydrate_from_store(
     Ok(())
 }
 
+fn chat_tool_args_short(msg: &ChatMessage) -> Option<String> {
+    let json = msg.tool_calls_json.as_deref()?;
+    let args: serde_json::Value = serde_json::from_str(json).ok()?;
+    let short = crate::agent::chat_loop::format_tool_args_short(&args);
+    if short.is_empty() {
+        None
+    } else {
+        Some(short)
+    }
+}
+
+fn chat_tool_start_display_line(msg: &ChatMessage) -> String {
+    let name = msg.tool_name.as_deref().unwrap_or("tool");
+    match chat_tool_args_short(msg) {
+        Some(args) => format!("  → {name}({args})"),
+        None => format!("  → {name}"),
+    }
+}
+
+fn chat_tool_result_display_line(msg: &ChatMessage) -> String {
+    let name = msg.tool_name.as_deref().unwrap_or("tool");
+    if crate::agent::context::is_tool_approval_pending_transcript(&msg.content)
+        || msg.content.contains("awaiting approval")
+    {
+        return format!("  → approval: {name}");
+    }
+    let ok = !crate::agent::context::tool_transcript_indicates_failure(&msg.content);
+    let mark = if ok { "✓" } else { "✗" };
+    match chat_tool_args_short(msg) {
+        Some(args) => format!("  {mark} {name}({args})"),
+        None => format!("  {mark} {name}"),
+    }
+}
+
 /// Map a stored chat message to a TUI transcript line (`you>`, `assistant>`, tool rows).
 pub fn chat_message_display_line(msg: &ChatMessage) -> String {
     match msg.role {
         ChatRole::User => format!("you> {}", msg.content),
         ChatRole::Assistant => format!("assistant> {}", msg.content),
-        ChatRole::Tool => {
-            let name = msg.tool_name.as_deref().unwrap_or("tool");
-            if crate::agent::context::is_tool_approval_pending_transcript(&msg.content)
-                || msg.content.contains("awaiting approval")
-            {
-                format!("  → approval: {name}")
-            } else if crate::agent::context::tool_transcript_indicates_failure(&msg.content) {
-                format!("  ✗ {name}")
-            } else {
-                format!("  ✓ {name}")
-            }
-        }
+        ChatRole::Tool => chat_tool_result_display_line(msg),
         ChatRole::Harness => {
             let preview = msg.content.lines().next().unwrap_or(&msg.content);
             let preview = if preview.chars().count() > 100 {
@@ -1089,11 +1112,10 @@ pub async fn load_chat_session_ui(
             {
                 continue;
             }
-            let name = msg.tool_name.as_deref().unwrap_or("tool");
             if !crate::agent::context::is_tool_approval_pending_transcript(&msg.content)
                 && !msg.content.contains("awaiting approval")
             {
-                state.push_chat_line(format!("  → {name}"));
+                state.push_chat_line(chat_tool_start_display_line(&msg));
             }
             let idx = state.chat_lines.len();
             state.push_chat_line(chat_message_display_line(&msg));
@@ -1213,6 +1235,29 @@ diff --git a/x.go b/x.go\n\
             tool_calls_json: None,
         };
         assert!(chat_message_display_line(&msg).starts_with("  ✗ "));
+    }
+
+    #[test]
+    fn chat_message_display_line_skill_load_includes_args() {
+        use chrono::Utc;
+        use uuid::Uuid;
+        let msg = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            role: ChatRole::Tool,
+            content: "tool_result(skill_load):\nargs: {\"name\":\"pr-review\"}\n\n### pr-review".into(),
+            ts: Utc::now(),
+            tool_name: Some("skill_load".into()),
+            tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),
+        };
+        assert_eq!(
+            chat_message_display_line(&msg),
+            "  ✓ skill_load(name=pr-review)"
+        );
+        assert_eq!(
+            chat_tool_start_display_line(&msg),
+            "  → skill_load(name=pr-review)"
+        );
     }
 
     #[test]

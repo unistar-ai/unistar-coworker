@@ -1,3 +1,40 @@
+const THEME_STORAGE_KEY = "unistar-web-theme";
+
+function getStoredTheme() {
+  try {
+    const t = localStorage.getItem(THEME_STORAGE_KEY);
+    if (t === "light" || t === "dark") return t;
+  } catch (_) {
+    /* localStorage unavailable */
+  }
+  return null;
+}
+
+function initThemeFromConfig(configTheme) {
+  applyTheme(getStoredTheme() || configTheme || "dark");
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch (_) {
+    /* localStorage unavailable */
+  }
+  const btn = document.getElementById("theme-toggle");
+  if (!btn) return;
+  const isLight = theme === "light";
+  const label = isLight ? "Switch to dark mode" : "Switch to light mode";
+  btn.setAttribute("aria-label", label);
+  btn.title = label;
+  btn.textContent = isLight ? "🌙" : "☀️";
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute("data-theme") || "dark";
+  applyTheme(current === "light" ? "dark" : "light");
+}
+
 let state = null;
 let prevState = null;
 let ws = null;
@@ -450,6 +487,7 @@ function mergeAdjacentOrderedLists(html) {
   const re = /<ol class="md-ol">(\s*<li>[\s\S]*?<\/li>\s*)<\/ol>/g;
   let out = html;
   let prev;
+  let guard = 0;
   do {
     prev = out;
     out = out.replace(
@@ -459,7 +497,8 @@ function mergeAdjacentOrderedLists(html) {
         return `<ol class="md-ol">${lis.join("")}</ol>`;
       },
     );
-  } while (out !== prev);
+    guard += 1;
+  } while (out !== prev && guard < 24);
   return out.replace(re, '<ol class="md-ol">$1</ol>');
 }
 
@@ -467,6 +506,14 @@ function mergeAdjacentOrderedLists(html) {
 function streamingPlainHtml(text) {
   if (!text) return "";
   return escapeHtml(text).replace(/\n/g, "<br>");
+}
+
+function scrollLiveBodyIfNeeded(body) {
+  if (!body) return;
+  const gap = body.scrollHeight - body.scrollTop - body.clientHeight;
+  if (ui.chatStickBottom || gap < 96) {
+    body.scrollTop = body.scrollHeight;
+  }
 }
 
 function paintStreamingBody(body, text) {
@@ -478,6 +525,7 @@ function paintStreamingBody(body, text) {
   ui.lastStreamingPaint = now;
   body.dataset.streamLen = String(text.length);
   body.innerHTML = streamingPlainHtml(text);
+  scrollLiveBodyIfNeeded(body);
 }
 
 const REASONING_COLLAPSE_LINES = 6;
@@ -508,7 +556,17 @@ function isReasoningLong(text) {
   return lines.length > REASONING_COLLAPSE_LINES || n.length > REASONING_COLLAPSE_CHARS;
 }
 
-function fillReasoningBody(bodyEl, text, { live = false } = {}) {
+function reasoningPreviewHtml(text) {
+  const normalized = normalizeReasoningText(text);
+  if (!normalized) return "";
+  let clipped = normalized.split("\n").slice(0, REASONING_COLLAPSE_LINES).join("\n");
+  if (clipped.length > REASONING_COLLAPSE_CHARS) {
+    clipped = `${clipped.slice(0, REASONING_COLLAPSE_CHARS)}…`;
+  }
+  return `<div class="reasoning-plain preview">${escapeHtml(clipped)}</div>`;
+}
+
+function fillReasoningBody(bodyEl, text, { live = false, expanded = true } = {}) {
   const normalized = normalizeReasoningText(text);
   if (!normalized) {
     bodyEl.innerHTML = live
@@ -517,15 +575,20 @@ function fillReasoningBody(bodyEl, text, { live = false } = {}) {
     bodyEl.classList.toggle("is-live", live);
     return;
   }
-  const html = `<div class="reasoning-md md">${renderMarkdown(normalized)}</div>${
-    live ? '<span class="reasoning-cursor" aria-hidden="true"></span>' : ""
-  }`;
-  bodyEl.innerHTML = html;
+  let inner;
+  if (live) {
+    inner = `<div class="reasoning-plain is-live">${streamingPlainHtml(normalized)}</div>`;
+  } else if (!expanded && isReasoningLong(text)) {
+    inner = reasoningPreviewHtml(text);
+  } else {
+    inner = `<div class="reasoning-md md">${renderMarkdown(normalized)}</div>`;
+  }
+  bodyEl.innerHTML = `${inner}${live ? '<span class="reasoning-cursor" aria-hidden="true"></span>' : ""}`;
   bodyEl.classList.toggle("is-live", live);
-  if (live) bodyEl.scrollTop = bodyEl.scrollHeight;
+  if (live) scrollLiveBodyIfNeeded(bodyEl);
 }
 
-function paintReasoningBody(body, text) {
+function paintReasoningBody(body, text, expanded = true) {
   const now = performance.now();
   if (now - ui.lastReasoningPaint < 120 && body.dataset.reasoningLen) {
     const delta = text.length - Number(body.dataset.reasoningLen || 0);
@@ -533,7 +596,7 @@ function paintReasoningBody(body, text) {
   }
   ui.lastReasoningPaint = now;
   body.dataset.reasoningLen = String(text.length);
-  fillReasoningBody(body, text, { live: true });
+  fillReasoningBody(body, text, { live: true, expanded });
 }
 
 function updateReasoningMeta(card, text, { live = false } = {}) {
@@ -585,7 +648,7 @@ function buildReasoningCard(text, { live = false, expanded, onToggle } = {}) {
   card.appendChild(head);
 
   const body = el("div", "activity-reasoning-body");
-  fillReasoningBody(body, text, { live });
+  fillReasoningBody(body, text, { live, expanded: isExpanded });
   card.appendChild(body);
   return card;
 }
@@ -817,26 +880,63 @@ function summarizeToolGroup(steps) {
   return { toolName, status, ms, args };
 }
 
-/** Split consecutive tool transcript lines into one group per tool invocation. */
+/** Pair tool start/done rows — parallel tools interleave `→` before all `✓`. */
 function splitToolStepGroups(steps) {
+  const pending = [];
   const groups = [];
-  let current = [];
-  for (const step of steps) {
-    if (step.kind === "start" && current.length > 0) {
-      const priorStart = current.some((s) => s.kind === "start");
-      const priorDone = current.some((s) => s.kind === "done");
-      if (priorStart || priorDone) {
-        groups.push(current);
-        current = [];
-      }
-    } else if (step.kind === "done" && current.some((s) => s.kind === "done")) {
-      // Store reload / transcript without matching `→` rows — one `✓` per tool.
-      groups.push(current);
-      current = [];
-    }
-    current.push(step);
+
+  function pushGroup(stepList) {
+    if (stepList.length) groups.push(stepList);
   }
-  if (current.length) groups.push(current);
+
+  function firstPendingStartIndex(toolName) {
+    if (!toolName) return -1;
+    for (let i = 0; i < pending.length; i++) {
+      const start = pending[i].steps.find((s) => s.kind === "start");
+      if (start?.name === toolName) return i;
+    }
+    return -1;
+  }
+
+  for (const step of steps) {
+    if (step.kind === "start") {
+      pending.push({ steps: [step] });
+      continue;
+    }
+    if (step.kind === "done") {
+      const matchIdx = firstPendingStartIndex(step.name);
+      if (matchIdx >= 0) {
+        const group = pending.splice(matchIdx, 1)[0];
+        group.steps.push(step);
+        pushGroup(group.steps);
+      } else {
+        pushGroup([step]);
+      }
+      continue;
+    }
+    if (step.kind === "approval") {
+      const matchIdx = firstPendingStartIndex(splitToolCall(step.text).name);
+      if (matchIdx >= 0) {
+        pending[matchIdx].steps.push(step);
+      } else if (pending.length) {
+        pending[pending.length - 1].steps.push(step);
+      } else {
+        pushGroup([step]);
+      }
+      continue;
+    }
+    if (pending.length) {
+      pending[pending.length - 1].steps.push(step);
+    } else if (groups.length) {
+      groups[groups.length - 1].push(step);
+    } else {
+      pushGroup([step]);
+    }
+  }
+
+  for (const g of pending) {
+    pushGroup(g.steps);
+  }
   return groups;
 }
 
@@ -1220,7 +1320,7 @@ function renderToolReasoningNote(parent, domId, texts, stepIndices = []) {
   note.appendChild(head);
 
   const body = el("div", "tool-reasoning-body");
-  fillReasoningBody(body, full);
+  fillReasoningBody(body, full, { expanded: !long || expanded });
   note.appendChild(body);
   parent.appendChild(note);
 }
@@ -1449,15 +1549,16 @@ function syncMessageHistory(historyEl, lines) {
   return blocks.length;
 }
 
-function liveFingerprint() {
+/** Live-zone layout only — streaming/reasoning text is patched in place. */
+function liveStructureFingerprint() {
+  const flow = state.chat_activity_flow;
   return JSON.stringify({
-    reasoning: state.chat_reasoning,
-    reasoningExpanded: ui.liveReasoningExpanded,
     reasoningCompressing: state.chat_reasoning_compressing,
-    activityFlow: state.chat_activity_flow,
+    activityFlowKind: flow?.kind || null,
+    hasActivityFlow: Boolean(flow),
     tool: state.chat_tool_running || state.chat_tool_pending,
-    toolDetail: state.chat_tool_running_detail,
-    streaming: state.chat_streaming,
+    hasReasoning: Boolean(state.chat_reasoning),
+    hasStreaming: Boolean(state.chat_streaming),
     thinking: Boolean(
       state.chat_busy &&
         !state.chat_streaming &&
@@ -1469,6 +1570,69 @@ function liveFingerprint() {
   });
 }
 
+function syncLiveZoneChrome(liveEl) {
+  const hasActivity = Boolean(
+    state.chat_tool_running ||
+      state.chat_tool_pending ||
+      state.chat_reasoning ||
+      state.chat_reasoning_compressing ||
+      state.chat_activity_flow ||
+      state.chat_streaming ||
+      (state.chat_busy &&
+        !state.chat_streaming &&
+        !state.chat_tool_running &&
+        !state.chat_reasoning &&
+        !state.chat_reasoning_compressing &&
+        !state.chat_activity_flow),
+  );
+  liveEl.classList.toggle("has-activity", hasActivity);
+}
+
+function patchLiveToolDetail(liveEl) {
+  const detail = state.chat_tool_running_detail;
+  if (!detail) return false;
+  const card = liveEl.querySelector(".live-tool");
+  const titleWrap = card?.querySelector(".tool-card-title-wrap");
+  if (!titleWrap || titleWrap.querySelector(".tool-arg-chips")) return false;
+  titleWrap.querySelector(".tool-card-status-hint")?.remove();
+  appendToolArgChips(titleWrap, detail);
+  return true;
+}
+
+function patchLiveZoneContent(liveEl, activeTool) {
+  if (state.chat_streaming && !state.chat_reasoning && !activeTool) {
+    const body = liveEl.querySelector(".activity-streaming-body");
+    if (!body) return false;
+    paintStreamingBody(body, state.chat_streaming);
+    return true;
+  }
+  if (state.chat_reasoning && !state.chat_streaming && !activeTool) {
+    const card = liveEl.querySelector(".activity-reasoning");
+    const body = card?.querySelector(".activity-reasoning-body");
+    if (!body) return false;
+    paintReasoningBody(body, state.chat_reasoning, true);
+    updateReasoningMeta(card, state.chat_reasoning, { live: true });
+    card.classList.remove("collapsed");
+    return true;
+  }
+  if (activeTool && !state.chat_reasoning && !state.chat_streaming) {
+    return patchLiveToolDetail(liveEl);
+  }
+  if (
+    state.chat_activity_flow &&
+    !state.chat_reasoning &&
+    !state.chat_streaming &&
+    !activeTool
+  ) {
+    const body = liveEl.querySelector(".activity-flow-body");
+    if (!body) return false;
+    const text = state.chat_activity_flow?.text || "";
+    if (body.textContent !== text) body.textContent = text;
+    return true;
+  }
+  return false;
+}
+
 function buildLiveToolCard(name, detail, pending) {
   const meta = toolMeta(name);
   const card = el("div", "tool-card status-running live-tool is-compact");
@@ -1478,11 +1642,9 @@ function buildLiveToolCard(name, detail, pending) {
 }
 
 function buildLiveReasoningCard(text) {
-  const long = isReasoningLong(text);
-  const expanded = !long || ui.liveReasoningExpanded;
   return buildReasoningCard(text, {
     live: true,
-    expanded,
+    expanded: true,
     onToggle: () => {
       ui.liveReasoningExpanded = !ui.liveReasoningExpanded;
       scheduleRender(true);
@@ -1530,75 +1692,20 @@ function buildLiveThinkingCard() {
 }
 
 function syncLiveZone(liveEl) {
-  const fp = liveFingerprint();
-  if (liveEl.dataset.fp === fp) return;
-
-  const prev = liveEl.dataset.fp ? JSON.parse(liveEl.dataset.fp) : null;
-
-  // Patch running tool detail only.
+  const structFp = liveStructureFingerprint();
   const activeTool = state.chat_tool_running || state.chat_tool_pending;
-  if (
-    activeTool &&
-    prev?.tool === activeTool &&
-    prev?.toolDetail !== state.chat_tool_running_detail &&
-    !state.chat_reasoning &&
-    !state.chat_streaming
-  ) {
-    const card = liveEl.querySelector(".live-tool");
-    const detail = state.chat_tool_running_detail;
-    if (card && detail) {
-      const titleWrap = card.querySelector(".tool-card-title-wrap");
-      const existing = titleWrap?.querySelector(".tool-arg-chips");
-      if (titleWrap && !existing) {
-        titleWrap.querySelector(".tool-card-status-hint")?.remove();
-        appendToolArgChips(titleWrap, detail);
-      }
+
+  if (liveEl.dataset.structFp === structFp) {
+    if (patchLiveZoneContent(liveEl, activeTool)) {
+      syncLiveZoneChrome(liveEl);
+      return;
     }
-    liveEl.dataset.fp = fp;
+    syncLiveZoneChrome(liveEl);
     return;
   }
 
-  // Patch streaming text only.
-  if (
-    state.chat_streaming &&
-    prev?.streaming &&
-    !state.chat_reasoning &&
-    !state.chat_tool_running &&
-    !state.chat_tool_pending
-  ) {
-    const body = liveEl.querySelector(".activity-streaming-body");
-    if (body) {
-      paintStreamingBody(body, state.chat_streaming);
-      liveEl.dataset.fp = fp;
-      return;
-    }
-  }
-
-  // Patch reasoning text only (keep expand state).
-  if (
-    state.chat_reasoning &&
-    prev?.reasoning &&
-    prev.reasoningExpanded === ui.liveReasoningExpanded &&
-    !state.chat_tool_running &&
-    !state.chat_tool_pending &&
-    !state.chat_streaming
-  ) {
-    const card = liveEl.querySelector(".activity-reasoning");
-    const body = card?.querySelector(".activity-reasoning-body");
-    if (body) {
-      paintReasoningBody(body, state.chat_reasoning);
-      updateReasoningMeta(card, state.chat_reasoning, { live: true });
-      const long = isReasoningLong(state.chat_reasoning);
-      const expanded = !long || ui.liveReasoningExpanded;
-      card.classList.toggle("collapsed", long && !expanded);
-      const toggle = card.querySelector(".activity-toggle");
-      if (toggle) toggle.textContent = expanded ? "Collapse" : "Expand";
-      liveEl.dataset.fp = fp;
-      return;
-    }
-  }
-
-  liveEl.dataset.fp = fp;
+  liveEl.dataset.structFp = structFp;
+  delete liveEl.dataset.fp;
   liveEl.replaceChildren();
   const stack = el("div", "activity-stack");
 
@@ -1635,11 +1742,9 @@ function syncLiveZone(liveEl) {
   }
 
   if (stack.childNodes.length) {
-    liveEl.classList.add("has-activity");
     liveEl.appendChild(stack);
-  } else {
-    liveEl.classList.remove("has-activity");
   }
+  syncLiveZoneChrome(liveEl);
 }
 
 function contextData() {
@@ -2112,6 +2217,11 @@ function resetChatUiState() {
   const main = document.getElementById("main");
   const history = main?.querySelector(".msg-history");
   if (history) delete history.dataset.fp;
+  const live = main?.querySelector(".live-zone");
+  if (live) {
+    delete live.dataset.fp;
+    delete live.dataset.structFp;
+  }
 }
 
 function shortSessionId(id) {
@@ -3320,6 +3430,7 @@ function connectWs() {
       ui.lastHistoryRevision = state.chat_history_revision;
       ui.lastContextRevision = state.chat_context_revision;
       ui.lastHistoryLineCount = (state.chat_lines || []).length;
+      initThemeFromConfig(state.ui_theme);
       scheduleRender();
     } catch (e) {
       console.error(e);
@@ -3338,8 +3449,11 @@ fetch("/api/state")
     ui.lastHistoryRevision = state.chat_history_revision;
     ui.lastContextRevision = state.chat_context_revision;
     ui.lastHistoryLineCount = (state.chat_lines || []).length;
+    initThemeFromConfig(state.ui_theme);
     scheduleRender(true);
   })
   .catch(console.error);
+
+document.getElementById("theme-toggle")?.addEventListener("click", toggleTheme);
 
 connectWs();
