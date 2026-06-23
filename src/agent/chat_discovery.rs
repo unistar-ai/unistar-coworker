@@ -95,6 +95,31 @@ impl ChatDiscoveryState {
         }
     }
 
+    /// Restore warmed skills/tools from prior successful `skill_load` tool rows in the session.
+    pub fn rehydrate_from_tool_history(&mut self, messages: &[crate::store::ChatMessage]) {
+        use crate::store::ChatRole;
+        for msg in messages {
+            if msg.role != ChatRole::Tool || msg.tool_name.as_deref() != Some("skill_load") {
+                continue;
+            }
+            if !msg.content.starts_with("tool_result(") {
+                continue;
+            }
+            let Some(args_json) = msg.tool_calls_json.as_deref() else {
+                continue;
+            };
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) else {
+                continue;
+            };
+            let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if let Some(skill) = self.skill_registry.get(name).cloned() {
+                self.warm_skill_tools(&skill);
+            }
+        }
+    }
+
     pub fn cached_tool_list(&self) -> Option<String> {
         self.tool_list_cache
             .as_ref()
@@ -243,7 +268,7 @@ mod tests {
     #[test]
     fn warm_skips_meta_tools() {
         let mut state = ChatDiscoveryState::new();
-        state.warm_tool("skill_search");
+        state.warm_tool("tool_search");
         assert!(state.warmed_tools.is_empty());
         state.warm_tool("pr_get_overview");
         assert!(state.warmed_tools.contains("pr_get_overview"));
@@ -370,5 +395,38 @@ mod tests {
         assert!(state.warmed_tools.contains("pr_get_overview"));
         assert!(state.warmed_tools.contains("pr_get_diff"));
         assert!(state.loaded_skills.contains("pr-review"));
+    }
+
+    #[test]
+    fn rehydrate_from_tool_history_warms_prior_skill_load() {
+        use crate::engine::SkillRegistry;
+        use crate::store::{ChatMessage, ChatRole};
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let registry = SkillRegistry::from_skills(vec![SkillSpec {
+            name: "pr-review".into(),
+            description: String::new(),
+            body: String::new(),
+            skill_refs: vec![],
+            tool_refs: vec!["pr_get_overview".into()],
+            always_load: false,
+            ..Default::default()
+        }]);
+        let mut state = ChatDiscoveryState::with_bootstrap("review pr", registry, &[]);
+        assert!(!state.loaded_skills.contains("pr-review"));
+
+        let history = vec![ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            role: ChatRole::Tool,
+            content: "tool_result(skill_load):\nargs: {\"name\":\"pr-review\"}\n\n### pr-review".into(),
+            ts: Utc::now(),
+            tool_name: Some("skill_load".into()),
+            tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),
+        }];
+        state.rehydrate_from_tool_history(&history);
+        assert!(state.loaded_skills.contains("pr-review"));
+        assert!(state.warmed_tools.contains("pr_get_overview"));
     }
 }

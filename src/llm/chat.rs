@@ -37,6 +37,8 @@ pub struct LlmToolCall {
 #[derive(Debug, Clone, Default)]
 pub struct ChatToolsTurn {
     pub content: String,
+    /// Internal reasoning trace (`reasoning_content` / Ollama `thinking`), not the user reply.
+    pub reasoning: String,
     pub tool_calls: Vec<LlmToolCall>,
 }
 
@@ -91,40 +93,98 @@ impl LlmTurnMessage {
     }
 }
 
-/// Serialize chat turns for Ollama/OpenAI `/chat` APIs (incl. native tool messages).
+/// Serialize chat turns for Ollama native `/api/chat` (incl. `tool_name` on tool results).
 pub fn llm_messages_to_api_value(messages: &[LlmTurnMessage]) -> Value {
     messages
         .iter()
-        .map(|m| {
-            let mut obj = serde_json::Map::new();
-            obj.insert("role".into(), Value::String(m.role.to_string()));
-            obj.insert("content".into(), Value::String(m.content.clone()));
-            if let Some(name) = &m.tool_name {
-                obj.insert("tool_name".into(), Value::String(name.clone()));
-            }
-            if let Some(id) = &m.tool_call_id {
-                obj.insert("tool_call_id".into(), Value::String(id.clone()));
-            }
-            if let Some(calls) = &m.tool_calls {
-                let api_calls: Vec<Value> = calls
-                    .iter()
-                    .map(|tc| {
-                        serde_json::json!({
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": tc.arguments,
-                            }
-                        })
-                    })
-                    .collect();
-                obj.insert("tool_calls".into(), Value::Array(api_calls));
-            }
-            Value::Object(obj)
-        })
+        .map(ollama_api_message)
         .collect::<Vec<_>>()
         .into()
+}
+
+/// Serialize chat turns for OpenAI-compatible `/v1/chat/completions` (oMLX, vLLM, etc.).
+pub fn llm_messages_to_openai_api_value(messages: &[LlmTurnMessage]) -> Value {
+    messages
+        .iter()
+        .map(openai_api_message)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn ollama_api_message(m: &LlmTurnMessage) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("role".into(), Value::String(m.role.to_string()));
+    obj.insert("content".into(), Value::String(m.content.clone()));
+    if let Some(name) = &m.tool_name {
+        obj.insert("tool_name".into(), Value::String(name.clone()));
+    }
+    if let Some(id) = &m.tool_call_id {
+        obj.insert("tool_call_id".into(), Value::String(id.clone()));
+    }
+    if let Some(calls) = &m.tool_calls {
+        let api_calls: Vec<Value> = calls
+            .iter()
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    }
+                })
+            })
+            .collect();
+        obj.insert("tool_calls".into(), Value::Array(api_calls));
+    }
+    Value::Object(obj)
+}
+
+fn openai_api_message(m: &LlmTurnMessage) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("role".into(), Value::String(m.role.to_string()));
+
+    if m.role == "tool" {
+        obj.insert("content".into(), Value::String(m.content.clone()));
+        if let Some(id) = &m.tool_call_id {
+            obj.insert("tool_call_id".into(), Value::String(id.clone()));
+        }
+        return Value::Object(obj);
+    }
+
+    if let Some(calls) = &m.tool_calls {
+        if m.content.trim().is_empty() {
+            obj.insert("content".into(), Value::Null);
+        } else {
+            obj.insert("content".into(), Value::String(m.content.clone()));
+        }
+        let api_calls: Vec<Value> = calls
+            .iter()
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": openai_tool_arguments(&tc.arguments),
+                    }
+                })
+            })
+            .collect();
+        obj.insert("tool_calls".into(), Value::Array(api_calls));
+        return Value::Object(obj);
+    }
+
+    obj.insert("content".into(), Value::String(m.content.clone()));
+    Value::Object(obj)
+}
+
+fn openai_tool_arguments(args: &Value) -> String {
+    if let Some(s) = args.as_str() {
+        s.to_string()
+    } else {
+        serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string())
+    }
 }
 
 /// Build a harness step from native `tool_calls` + optional assistant `content`.
@@ -262,7 +322,11 @@ impl LlmClient {
     where
         F: FnMut(ChatStreamUpdate) + Send,
     {
-        let msgs = llm_messages_to_api_value(messages);
+        let msgs = if self.uses_ollama_native_chat() {
+            llm_messages_to_api_value(messages)
+        } else {
+            llm_messages_to_openai_api_value(messages)
+        };
 
         let mut last_reasoning = String::new();
         let turn = self
@@ -286,6 +350,9 @@ impl LlmClient {
                 },
             )
             .await?;
+        if last_reasoning.is_empty() && !turn.reasoning.trim().is_empty() {
+            last_reasoning = turn.reasoning.clone();
+        }
         let step = step_from_native_turn(&turn.content, &turn.tool_calls)?;
         let reasoning_for_context =
             if should_capture_reasoning_for_context(options.compress_reasoning, &last_reasoning) {
@@ -570,6 +637,36 @@ Call tools via the native tool API before replying."
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_api_message_serializes_tool_arguments_as_json_string() {
+        let msgs = vec![LlmTurnMessage::assistant_tool_call(
+            String::new(),
+            vec![LlmToolCall {
+                id: "call_1".into(),
+                name: "skill_load".into(),
+                arguments: serde_json::json!({"name": "pr-review"}),
+            }],
+        )];
+        let v = llm_messages_to_openai_api_value(&msgs);
+        let args = v[0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert_eq!(args, r#"{"name":"pr-review"}"#);
+    }
+
+    #[test]
+    fn openai_api_tool_result_omits_tool_name() {
+        let msgs = vec![LlmTurnMessage::tool_result_with_id(
+            Some("call_1".into()),
+            "pr_get_overview",
+            "overview body",
+        )];
+        let v = llm_messages_to_openai_api_value(&msgs);
+        assert_eq!(v[0]["role"], "tool");
+        assert_eq!(v[0]["tool_call_id"], "call_1");
+        assert!(v[0].get("tool_name").is_none());
+    }
 
     #[test]
     fn step_from_native_tool_call() {

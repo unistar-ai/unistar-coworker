@@ -32,14 +32,15 @@ use crate::agent::hooks::{HookRunner, TurnContext};
 use crate::agent::workflow_harness::{self, WorkflowHarnessCtx};
 use crate::agent::parse::parse_failing_runs;
 use crate::agent::runtime_context::{
-    build_message_focus_lines, build_workspace_git_summary, plan_runtime_context,
+    build_message_focus_lines, build_workspace_git_summary, load_workspace_agents_md,
+    plan_runtime_context,
     RuntimeContextInput,
 };
 use crate::agent::tool_catalog;
 use crate::app::{append_audit, AppEvent};
 use crate::config::{BashToolConfig, ChatToolMode, Config, PythonToolConfig};
 use crate::engine::{
-    approvals, compose_static_system_prompt, format_session_context_message,
+    approvals, compose_chat_system_prompt, format_session_context_message,
     load_chat_prompt_bundle_for_session,
     SkillRegistry,
 };
@@ -173,6 +174,8 @@ pub enum ChatProgress {
     /// Reasoning summary materialized and persisted to the session store.
     ReasoningSummary {
         preview: String,
+        /// Full reasoning body for expandable transcript rows.
+        body: String,
     },
     /// Transient skill / MCP flow in Messages (live only — like reasoning).
     ActivityFlow {
@@ -201,8 +204,7 @@ pub struct ChatActivityFlow {
 pub fn is_flow_activity_tool(name: &str) -> bool {
     matches!(
         name,
-        "skill_search"
-            | "skill_load"
+        "skill_load"
             | "tool_list"
             | "tool_list_category"
             | "tool_search"
@@ -213,7 +215,7 @@ pub fn is_flow_activity_tool(name: &str) -> bool {
 }
 
 fn activity_flow_kind_for_tool(name: &str) -> ActivityFlowKind {
-    if matches!(name, "skill_search" | "skill_load") {
+    if matches!(name, "skill_load") {
         ActivityFlowKind::Skill
     } else {
         ActivityFlowKind::Github
@@ -375,7 +377,7 @@ impl ChatProgress {
             Self::HarnessNudge { retry, preview } => {
                 format!("  ⚠ harness retry {retry}: {preview}")
             }
-            Self::ReasoningSummary { preview } => format!("  … reasoning: {preview}"),
+            Self::ReasoningSummary { preview, .. } => format!("  … reasoning: {preview}"),
             Self::ActivityFlow { .. } | Self::ActivityFlowClear => String::new(),
         }
     }
@@ -837,23 +839,26 @@ pub async fn run_chat_turn(
         None
     };
     let recent_edits = session.runtime_state.recent_edits.clone();
+    let project_agents = load_workspace_agents_md(&workspace);
     let runtime_plan = plan_runtime_context(RuntimeContextInput {
         workspace_path: &workspace_display,
         git_summary: &git_summary,
         recent_edits: &recent_edits,
         loaded_skills: loaded_skill_names,
         focus_lines,
+        project_instructions: project_agents.as_deref(),
         prev_state,
     });
     session.runtime_state = runtime_plan.new_state.clone();
     store.update_chat_session(&session).await?;
     let runtime_panel = (runtime_plan.full_body.clone(), runtime_plan.revision);
     let tool_catalog = tool_catalog::ToolCatalog::new();
-    let discovery_state = ChatDiscoveryState::with_bootstrap(
+    let mut discovery_state = ChatDiscoveryState::with_bootstrap(
         user_task,
         skill_registry,
         &prompt_bundle.skills,
     );
+    discovery_state.rehydrate_from_tool_history(&history);
     let discovery = Arc::new(Mutex::new(discovery_state));
     if lazy_skills {
         let flow = format_skill_bootstrap_flow(&prompt_bundle.skills);
@@ -865,28 +870,7 @@ pub async fn run_chat_turn(
     let token_budget = TokenBudget::from_config(config.llm.context_limit);
     let history_token_cap = history_token_budget(&token_budget, config.chat.history_tokens);
 
-    let mut system_content = compose_static_system_prompt(&prompt_bundle);
-    match tool_mode {
-        ChatToolMode::Auto | ChatToolMode::Lazy => {
-            system_content.push_str(
-                "\n\nYou are a coding assistant in the local workspace. \
-Cold start exposes **read_file**, **grep**, **glob**, **bash_run**, **python_run**, **edit_file**, **write_file**, **web_browser**, plus **skill_search** / **skill_load** and **tool_search** / **tool_call**. \
-Before GitHub or workflow-specific work: run **skill_search** then **skill_load** (or **tool_search** then **tool_call**) to pull in the right technique and extra tool schemas. \
-Do not assume tools or skills are loaded until you search and load them. \
-If the current tool/skill set seems insufficient, search again before saying the task cannot be done. \
-**Approval-required tools** (at most one per turn): GitHub mutating tools (ci_rerun_workflow, pr_post_comment, …). \
-bash_run, python_run, edit_file, and write_file run **LLM safety review** first; REJECT → human approval queue. \
-Never simulate tools in prose (<tool_code>, import os, subprocess) — only native tool_calls. \
-Only report tool output. Reply in natural language when complete.",
-            );
-        }
-        ChatToolMode::Native => {
-            system_content.push_str(
-                "\n\nUse the native tool schemas attached to this request when you need data. \
-Reply in natural language when the answer is complete.",
-            );
-        }
-    }
+    let mut system_content = compose_chat_system_prompt(&prompt_bundle, tool_mode);
     trim_system_content(&mut system_content, token_budget.system_budget());
 
     let mut llm_messages = vec![LlmTurnMessage::new("system", system_content)];
@@ -1319,6 +1303,19 @@ from tool results already in context.";
                         user_task,
                         discovery: discovery.clone(),
                     };
+                    let auto_fulfill = block == DuplicateToolBlock::AlreadySucceeded
+                        && (call.name == "skill_load" || prepared.len() == 1);
+                    if auto_fulfill
+                        && fulfill_duplicate_readonly_tool(
+                            &mut round,
+                            &step,
+                            &call,
+                            &prepared,
+                        )
+                        .await?
+                    {
+                        continue;
+                    }
                     if maybe_block_duplicate_tool_call(&mut round, &call, block).await? {
                         break;
                     }
@@ -2485,6 +2482,7 @@ async fn persist_reasoning_summary(
         progress,
         ChatProgress::ReasoningSummary {
             preview: crate::agent::context::truncate_chars(preview, 120),
+            body: body.to_string(),
         },
     );
     Ok(())
@@ -2592,6 +2590,117 @@ fn validate_prepared_tool_calls(
         }
     }
     None
+}
+
+/// Idempotent readonly tools: replay cached output instead of harness-nudging the model.
+async fn fulfill_duplicate_readonly_tool(
+    round: &mut ToolRoundState<'_>,
+    step: &ChatAgentStep,
+    call: &PreparedToolCall,
+    all_calls: &[PreparedToolCall],
+) -> Result<bool> {
+    if is_mutating_tool(&call.name) {
+        return Ok(false);
+    }
+    let cached = match cached_duplicate_readonly_body(round, call).await {
+        Some(cached) => cached,
+        None => return Ok(false),
+    };
+    push_native_assistant_tool_calls(round.llm_messages, step);
+    for prep in all_calls {
+        if prep.id != call.id {
+            continue;
+        }
+        let ctx = match &cached {
+            CachedToolOutput::Transcript(t) => t.clone(),
+            CachedToolOutput::Body(body) => {
+                format_tool_context_message(&prep.name, &prep.args, true, body)
+            }
+        };
+        round.tool_calls.push(ToolCallSummary {
+            tool_name: prep.name.clone(),
+            output: ctx.clone(),
+        });
+        append_message(
+            round.store,
+            round.session_id,
+            ChatRole::Tool,
+            &ctx,
+            Some(&prep.name),
+            Some(prep.args.to_string()),
+        )
+        .await?;
+        round.llm_messages.push(LlmTurnMessage::tool_result_with_id(
+            Some(prep.id.clone()),
+            prep.name.clone(),
+            ctx,
+        ));
+    }
+    tracing::info!(
+        "duplicate {}({}) — replayed cached output (no harness nudge)",
+        call.name,
+        format_tool_args_short(&call.args)
+    );
+    Ok(true)
+}
+
+#[derive(Debug, Clone)]
+enum CachedToolOutput {
+    /// Already formatted `tool_result(...)` transcript from session context.
+    Transcript(String),
+    /// Raw tool body to wrap in a new transcript.
+    Body(String),
+}
+
+async fn cached_duplicate_readonly_body(
+    round: &ToolRoundState<'_>,
+    call: &PreparedToolCall,
+) -> Option<CachedToolOutput> {
+    if let Some(prior) = find_prior_tool_result_body(round.llm_messages, &call.name, &call.args) {
+        return Some(CachedToolOutput::Transcript(prior));
+    }
+    if call.name == "skill_load" {
+        let name = call.args.get("name").and_then(|v| v.as_str())?;
+        let state = round.discovery.lock().await;
+        let skill = state.skill_registry.get(name)?.clone();
+        return Some(CachedToolOutput::Body(format!(
+            "(already loaded — proceed with the skill workflow)\n\n{}",
+            SkillRegistry::format_skill_load(&skill)
+        )));
+    }
+    None
+}
+
+fn find_prior_tool_result_body(
+    messages: &[LlmTurnMessage],
+    tool_name: &str,
+    args: &Value,
+) -> Option<String> {
+    let want = canonical_tool_args(args);
+    for msg in messages.iter().rev() {
+        if msg.role != "tool" || msg.tool_name.as_deref() != Some(tool_name) {
+            continue;
+        }
+        if tool_transcript_matches_args(&msg.content, args, &want) {
+            return Some(msg.content.clone());
+        }
+    }
+    None
+}
+
+fn tool_transcript_matches_args(content: &str, args: &Value, want_fp: &str) -> bool {
+    if let Some(args_line) = content
+        .lines()
+        .find(|line| line.trim_start().starts_with("args:"))
+    {
+        let json_part = args_line.trim_start().strip_prefix("args:").unwrap_or("").trim();
+        if let Ok(parsed) = serde_json::from_str::<Value>(json_part) {
+            if canonical_tool_args(&parsed) == want_fp {
+                return true;
+            }
+        }
+    }
+    content.contains(&args.to_string()) || canonical_tool_args(args) == want_fp
 }
 
 async fn maybe_block_duplicate_tool_call(
@@ -3475,19 +3584,6 @@ async fn execute_readonly_tool(
                 })?;
             read_resource(github.as_ref(), uri).await?
         }
-        "skill_search" => {
-            let query = tool_args
-                .get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let limit = tool_args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(5) as usize;
-            let state = discovery.lock().await;
-            let matches = state.skill_registry.search(query, limit);
-            SkillRegistry::format_search_results(&matches)
-        }
         "skill_load" => {
             let name = tool_args
                 .get("name")
@@ -3497,7 +3593,7 @@ async fn execute_readonly_tool(
                         "skill_load",
                         "TOOL_MISSING_ARG",
                         "skill_load needs name",
-                        "Pass skill name from skill_search",
+                        "Pass skill name from **Available skills** in the system prompt",
                     )
                 })?;
             let mut state = discovery.lock().await;
@@ -3510,7 +3606,7 @@ async fn execute_readonly_tool(
                         "skill_load",
                         "TOOL_NOT_FOUND",
                         format!("unknown skill {name:?}"),
-                        "Run skill_search to list available skills",
+                        "Pick a name from **Available skills** in the system prompt",
                     )
                 })?;
             state.warm_skill_tools(&skill);
@@ -3891,6 +3987,36 @@ mod tests {
     }
 
     #[test]
+    fn tool_transcript_matches_prior_args() {
+        let args = json!({"name": "pr-review"});
+        let content = format_tool_context_message(
+            "skill_load",
+            &args,
+            true,
+            "### pr-review\nbody",
+        );
+        assert!(tool_transcript_matches_args(
+            &content,
+            &args,
+            &canonical_tool_args(&args),
+        ));
+    }
+
+    #[test]
+    fn find_prior_tool_result_body_from_messages() {
+        let args = json!({"repo": "acme/widget", "pr_number": 42});
+        let body = format_tool_context_message("pr_get_overview", &args, true, "PR ok");
+        let msgs = vec![LlmTurnMessage::tool_result_with_id(
+            Some("call_1".into()),
+            "pr_get_overview",
+            body,
+        )];
+        let found = find_prior_tool_result_body(&msgs, "pr_get_overview", &args);
+        assert!(found.is_some());
+        assert!(found.unwrap().contains("PR ok"));
+    }
+
+    #[test]
     fn sanitize_repo_strips_display_prefix() {
         assert_eq!(sanitize_repo_string("repo=acme/widget"), "acme/widget");
         assert_eq!(sanitize_repo_string("  acme/widget  "), "acme/widget");
@@ -4253,6 +4379,7 @@ mod tests {
         );
         let reasoning = ChatProgress::ReasoningSummary {
             preview: "Checked CI on PR #42".into(),
+            body: "Checked CI on PR #42".into(),
         };
         assert_eq!(
             reasoning.display_line(),

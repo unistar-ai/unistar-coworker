@@ -27,7 +27,7 @@ pub mod workflows;
 pub use workflow_registry::{require as require_workflow, WORKFLOWS};
 
 pub use prompt::{
-    compose_static_system_prompt, format_session_context_message,
+    compose_chat_system_prompt, format_session_context_message,
     load_chat_prompt_bundle_for_session, load_classify_skills_for_triage, load_workflow_spec,
     WorkflowSpec, SESSION_CONTEXT_PREFIX,
 };

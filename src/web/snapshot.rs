@@ -19,6 +19,7 @@ pub struct WebSnapshot {
     pub engine_workflow_id: Option<String>,
     pub chat_enabled: bool,
     pub chat_busy: bool,
+    pub chat_session_id: Option<String>,
     pub chat_lines: Vec<String>,
     /// Tool output bodies keyed by line index in `chat_lines` (expand in UI).
     pub chat_tool_outputs: std::collections::HashMap<String, String>,
@@ -82,6 +83,7 @@ pub struct WebChatPatch {
     pub patch_type: &'static str,
     pub status: String,
     pub chat_busy: bool,
+    pub chat_session_id: Option<String>,
     pub chat_lines: Vec<String>,
     pub chat_tool_outputs: std::collections::HashMap<String, String>,
     pub chat_history_revision: u64,
@@ -221,6 +223,7 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
         engine_workflow_id: s.engine_workflow_id.clone(),
         chat_enabled: s.config.chat.enabled,
         chat_busy: s.chat_busy,
+        chat_session_id: s.chat_session_id.map(|id| id.to_string()),
         chat_lines: s.chat_lines.clone(),
         chat_tool_outputs: s
             .chat_tool_outputs
@@ -372,6 +375,7 @@ pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
         patch_type: "chat",
         status: s.status.clone(),
         chat_busy: s.chat_busy,
+        chat_session_id: s.chat_session_id.map(|id| id.to_string()),
         chat_lines: s.chat_lines.clone(),
         chat_tool_outputs: s
             .chat_tool_outputs

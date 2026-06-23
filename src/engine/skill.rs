@@ -18,7 +18,8 @@ pub struct MarkdownSpec {
     /// When `always: true` in SKILL.md frontmatter (used by intent routing tests).
     #[allow(dead_code)]
     pub always_load: bool,
-    /// Lazy routing: substring triggers in the user message (skills only).
+    /// Lazy routing: substring triggers in the user message (skills only; used in tests).
+    #[allow(dead_code)]
     pub intent_keywords: Vec<String>,
     /// Lazy routing: multi-word phrase triggers (skills only).
     #[allow(dead_code)]

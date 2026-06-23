@@ -22,7 +22,28 @@ pub struct RuntimeContextInput<'a> {
     pub recent_edits: &'a [String],
     pub loaded_skills: Vec<String>,
     pub focus_lines: Vec<String>,
+    /// Workspace `AGENTS.md` body (injected once per workspace in session context).
+    pub project_instructions: Option<&'a str>,
     pub prev_state: Option<&'a crate::store::ChatRuntimeState>,
+}
+
+const AGENTS_MD_MAX_CHARS: usize = 8_000;
+
+/// Load `AGENTS.md` from the chat workspace (project conventions for the model).
+pub fn load_workspace_agents_md(workspace: &Path) -> Option<String> {
+    let path = workspace.join("AGENTS.md");
+    if !path.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(crate::agent::context::truncate_chars(
+        trimmed,
+        AGENTS_MD_MAX_CHARS,
+    ))
 }
 
 pub fn build_workspace_git_summary(workspace: &Path) -> String {
@@ -82,6 +103,7 @@ pub fn plan_runtime_context(input: RuntimeContextInput<'_>) -> RuntimeContextPla
         input.recent_edits,
         &input.loaded_skills,
         &input.focus_lines,
+        input.project_instructions,
     );
 
     let Some(prev) = input
@@ -225,6 +247,7 @@ fn format_full_runtime_body(
     recent_edits: &[String],
     loaded_skills: &[String],
     focus_lines: &[String],
+    project_instructions: Option<&str>,
 ) -> String {
     let git_part = if git_summary.trim().is_empty() {
         String::new()
@@ -232,6 +255,9 @@ fn format_full_runtime_body(
         format!(" {git_summary}")
     };
     let mut parts = vec![format!("## Workspace\n{workspace_path}{git_part}")];
+    if let Some(body) = project_instructions.filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("## Project instructions (AGENTS.md)\n{body}"));
+    }
     if recent_edits.is_empty() {
         parts.push("## Recent edits (this session)\n(none yet)".into());
     } else {
@@ -268,11 +294,11 @@ pub async fn build_message_focus_lines(
     let mut lines = Vec::new();
     if let Some((repo, pr)) = extract_github_pr_link(user_message) {
         lines.push(format!(
-            "GitHub PR linked: {repo}#{pr} — prefer pr_get_overview(repo=\"{repo}\", pr_number={pr}) or bash_run `gh pr view {pr} --repo {repo}`"
+            "GitHub PR linked: {repo}#{pr} — if `pr-review` is not loaded yet, skill_load it; then pr_get_overview(repo=\"{repo}\", pr_number={pr})"
         ));
     } else if message_looks_like_pr_task(user_message) {
         lines.push(
-            "PR analysis — prefer pr_get_overview / pr_list_changed_files or `gh pr view` over web_browser".into(),
+            "PR task — skill_load `pr-review` if not already loaded, then harness pr_get_* tools (not web_browser)".into(),
         );
     }
     if lower.contains("test") || lower.contains("cargo") || lower.contains("npm") {
@@ -296,6 +322,7 @@ mod tests {
             recent_edits: &["src/a.rs (+3 -1)".into()],
             loaded_skills: vec!["code-edit".into()],
             focus_lines: vec!["hint: grep".into()],
+            project_instructions: None,
             prev_state: None,
         });
         assert!(!plan.skip_llm_injection);
@@ -320,10 +347,26 @@ mod tests {
             recent_edits: &prev.recent_edits,
             loaded_skills: prev.loaded_skills.clone(),
             focus_lines: vec![],
+            project_instructions: None,
             prev_state: Some(&prev),
         });
         assert!(plan.skip_llm_injection);
         assert_eq!(plan.revision, 2);
+    }
+
+    #[test]
+    fn project_instructions_in_full_body() {
+        let plan = plan_runtime_context(RuntimeContextInput {
+            workspace_path: "/proj",
+            git_summary: "",
+            recent_edits: &[],
+            loaded_skills: vec![],
+            focus_lines: vec![],
+            project_instructions: Some("Run `cargo test` before finishing."),
+            prev_state: None,
+        });
+        assert!(plan.full_body.contains("Project instructions"));
+        assert!(plan.full_body.contains("cargo test"));
     }
 
     #[test]
@@ -341,6 +384,7 @@ mod tests {
             recent_edits: &["src/a.rs (+1)".into(), "src/b.rs (+2)".into()],
             loaded_skills: vec![],
             focus_lines: vec![],
+            project_instructions: None,
             prev_state: Some(&prev),
         });
         assert!(!plan.skip_llm_injection);

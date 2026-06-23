@@ -179,12 +179,24 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                     s.close_approval_dialog();
                     s.resolve_chat_approval(*approval_id, *approved, detail);
                 }
-                ChatProgress::ReasoningSummary { .. } => {
+                ChatProgress::ReasoningSummary { body, .. } => {
                     s.set_chat_streaming(None);
                     s.set_chat_tool_pending(None);
-                    s.set_chat_reasoning(None);
                     s.set_chat_reasoning_compressing(false);
                     s.set_chat_tool_running(None);
+                    // Only append while the turn is active. A lagging summary event after
+                    // `load_chat_session_ui` would duplicate the persisted reasoning row.
+                    if s.chat_busy {
+                        let line = p.display_line();
+                        if !s.chat_lines.iter().any(|existing| existing == &line) {
+                            let idx = s.chat_lines.len();
+                            s.push_chat_line(line);
+                            if !body.is_empty() {
+                                s.record_chat_tool_output(idx, body.clone());
+                            }
+                        }
+                    }
+                    s.set_chat_reasoning(None);
                 }
                 _ if p.show_in_log() => {
                     s.push_chat_line(p.display_line());

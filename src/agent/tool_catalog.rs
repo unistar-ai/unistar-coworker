@@ -29,13 +29,11 @@ const META_TOOLS: &[&str] = &[
     "tool_describe",
     "tool_call",
     "resource_read",
-    "skill_search",
     "skill_load",
 ];
 
 /// Minimal native schemas at chat cold start (lazy/auto). Everything else warms on demand.
 const PRELOAD_NATIVE_TOOLS: &[&str] = &[
-    "skill_search",
     "skill_load",
     "tool_search",
     "tool_call",
@@ -453,12 +451,6 @@ const TOOLS: &[ToolSpec] = &[
         blurb: "Read MCP resource URI (github://pull/.../ci-snapshot etc.)",
         required: &["uri"],
         optional: &[],
-    },
-    ToolSpec {
-        name: "skill_search",
-        blurb: "Search technique skills by keyword (loads via skill_load)",
-        required: &["query"],
-        optional: &["limit"],
     },
     ToolSpec {
         name: "skill_load",

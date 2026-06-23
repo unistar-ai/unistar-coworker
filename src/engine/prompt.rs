@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::config::ChatToolMode;
 use crate::error::Result;
 
 use super::skill::{load_skills, load_skills_from_refs, skill_body_for_prompt, AgentSpec, SkillSpec};
@@ -25,6 +26,8 @@ pub const SESSION_CONTEXT_PREFIX: &str = "[session context]";
 pub struct PromptBundle {
     pub agent: AgentSpec,
     pub skills: Vec<SkillSpec>,
+    /// Lazy chat: all skill names + descriptions (model picks `skill_load` from this list).
+    pub skill_catalog: String,
     pub tools_doc: String,
     pub runtime_context: String,
 }
@@ -56,29 +59,33 @@ fn join_skills(skills: &[SkillSpec]) -> String {
 }
 
 pub fn compose_static_system_prompt(bundle: &PromptBundle) -> String {
-    let techniques = join_skills(&bundle.skills);
-    let tools_section = if bundle.tools_doc.trim().is_empty() {
-        String::new()
-    } else {
-        format!("\n\n## Tools\n{}", bundle.tools_doc.trim())
-    };
-    if techniques.is_empty() {
-        if tools_section.is_empty() {
-            bundle.agent.body.clone()
-        } else {
-            format!("{}{}", bundle.agent.body, tools_section)
-        }
-    } else if tools_section.is_empty() {
-        format!("{}\n\n## Techniques\n{}", bundle.agent.body, techniques)
-    } else {
-        format!(
-            "{}\n\n## Techniques\n{}{}",
-            bundle.agent.body, techniques, tools_section
-        )
+    let mut parts = vec![bundle.agent.body.clone()];
+    if !bundle.skill_catalog.trim().is_empty() {
+        parts.push(format!(
+            "## Available skills\n\n{}",
+            bundle.skill_catalog.trim()
+        ));
     }
+    let techniques = join_skills(&bundle.skills);
+    if !techniques.is_empty() {
+        parts.push(format!("## Techniques\n{techniques}"));
+    }
+    if !bundle.tools_doc.trim().is_empty() {
+        parts.push(format!("## Tools\n{}", bundle.tools_doc.trim()));
+    }
+    parts.join("\n\n")
 }
 
-/// Full system prompt including runtime (legacy). Prefer [`compose_static_system_prompt`]
+/// Chat system prompt — agent body, skill catalog, techniques; native mode adds a one-line hint.
+pub fn compose_chat_system_prompt(bundle: &PromptBundle, tool_mode: ChatToolMode) -> String {
+    let mut out = compose_static_system_prompt(bundle);
+    if matches!(tool_mode, ChatToolMode::Native) {
+        out.push_str("\n\nUse the native tool schemas attached to this request.");
+    }
+    out
+}
+
+/// Full system prompt including runtime (legacy). Prefer [`compose_chat_system_prompt`]
 /// plus [`format_session_context_message`] for chat sessions.
 #[allow(dead_code)]
 pub fn compose_system_prompt(bundle: &PromptBundle) -> String {
@@ -134,6 +141,11 @@ pub fn load_chat_prompt_bundle_for_session(
 ) -> Result<(PromptBundle, SkillRegistry)> {
     let registry = SkillRegistry::load_for_chat(agent_path, skill_paths)?;
     let skills = registry.select_for_message(user_message, lazy_skills);
+    let skill_catalog = if lazy_skills {
+        registry.format_catalog()
+    } else {
+        String::new()
+    };
     let agent_path = if agent_path.is_empty() {
         default_chat_agent_path()
     } else {
@@ -144,6 +156,7 @@ pub fn load_chat_prompt_bundle_for_session(
         PromptBundle {
             agent,
             skills,
+            skill_catalog,
             tools_doc,
             runtime_context,
         },
@@ -209,6 +222,7 @@ mod tests {
                 intent_penalty: 0,
             },
             skills: vec![],
+            skill_catalog: String::new(),
             tools_doc: String::new(),
             runtime_context: "repos: changed-store".into(),
         };
@@ -260,6 +274,7 @@ mod tests {
                 intent_penalty_phrases: vec![],
                 intent_penalty: 0,
             }],
+            skill_catalog: String::new(),
             tools_doc: "tool_a".into(),
             runtime_context: "repos: x".into(),
         };
@@ -292,6 +307,7 @@ mod tests {
                 intent_penalty: 0,
             },
             skills: vec![],
+            skill_catalog: String::new(),
             tools_doc: String::new(),
             runtime_context: "repos: x".into(),
         };
@@ -318,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn lazy_session_loads_no_skills_by_default() {
+    fn lazy_session_loads_always_load_skills_only() {
         let (bundle, _) = load_chat_prompt_bundle_for_session(
             "",
             &[],
@@ -328,7 +344,27 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(bundle.skills.is_empty());
+        assert_eq!(bundle.skills.len(), 1);
+        assert_eq!(bundle.skills[0].name, "github-ops-tone");
+    }
+
+    #[test]
+    fn lazy_session_loads_skill_catalog() {
+        let (bundle, _) = load_chat_prompt_bundle_for_session(
+            "",
+            &[],
+            String::new(),
+            String::new(),
+            "fix this bug and run cargo test",
+            true,
+        )
+        .unwrap();
+        assert!(bundle.skill_catalog.contains("**code-edit**"));
+        assert!(bundle.skill_catalog.contains("**github-ops-tone**"));
+        let static_prompt = compose_static_system_prompt(&bundle);
+        assert!(static_prompt.contains("## Available skills"));
+        assert!(static_prompt.contains("## Techniques"));
+        assert!(static_prompt.contains("github-ops-tone"));
     }
 
     #[test]

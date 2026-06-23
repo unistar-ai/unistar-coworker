@@ -72,6 +72,9 @@ pub struct LlmConfig {
     /// Max tokens for think=false session history rolling summary.
     #[serde(default = "default_history_summary_tokens")]
     pub history_summary_tokens: u32,
+    /// Bearer token for OpenAI-compatible servers (oMLX, vLLM, etc.). Optional for Ollama.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 fn default_history_summary_tokens() -> u32 {

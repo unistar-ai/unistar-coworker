@@ -870,11 +870,29 @@ fn chat_message_to_llm(msg: &ChatMessage) -> LlmTurnMessage {
     }
 }
 
-/// Truncate an oversized system prompt (skill + store snapshot).
+/// Truncate an oversized system prompt — drop bulky sections before blind tail cut.
 pub fn trim_system_content(content: &mut String, max_tokens: u32) {
     let max_chars = (max_tokens as usize).saturating_mul(4);
     if content.chars().count() <= max_chars {
         return;
+    }
+    const TECH: &str = "\n## Techniques\n";
+    const TOOLS: &str = "\n## Tools\n";
+    if let Some(tech_start) = content.find(TECH) {
+        let before = content[..tech_start].to_string();
+        if before.chars().count() <= max_chars {
+            *content = before;
+            content.push_str("\n\n[Techniques omitted for context budget — use skill_load]");
+            return;
+        }
+    }
+    if let Some(tools_start) = content.find(TOOLS) {
+        let before = content[..tools_start].to_string();
+        if before.chars().count() <= max_chars {
+            *content = before;
+            content.push_str("\n\n[Tools section omitted for context budget]");
+            return;
+        }
     }
     *content = truncate_chars(content, max_chars);
     content.push_str("\n\n[system prompt truncated for context budget]");
@@ -1303,6 +1321,19 @@ mod tests {
         assert!(out.contains("repos: x"));
         assert!(!out.contains("Techniques"));
         assert!(!out.contains("### ci"));
+    }
+
+    #[test]
+    fn trim_system_content_drops_techniques_before_blind_cut() {
+        let mut content = format!(
+            "{}\n\n## Available skills\n- **a** — x\n\n## Techniques\n{}",
+            "Agent body ".repeat(200),
+            "skill ".repeat(5000),
+        );
+        trim_system_content(&mut content, 800);
+        assert!(!content.contains("## Techniques"));
+        assert!(content.contains("Available skills"));
+        assert!(content.contains("skill_load"));
     }
 
     #[test]

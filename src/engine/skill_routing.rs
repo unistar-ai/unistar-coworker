@@ -1,4 +1,4 @@
-//! Skill registry: lazy loading, intent routing, and skill_search for chat.
+//! Skill registry: lazy loading, skill catalog in system prompt, and skill_load for chat.
 
 use std::path::PathBuf;
 
@@ -47,15 +47,44 @@ impl SkillRegistry {
         self.skills.iter().find(|s| skill_key(s) == want)
     }
 
-    /// Skills to inject into the system prompt. Lazy/auto chat defers to `skill_search` + `skill_load`.
+    /// Skills to inject into the system prompt (`always_load` only when lazy; full set in native mode).
     pub fn select_for_message(&self, _message: &str, lazy: bool) -> Vec<SkillSpec> {
         if lazy {
-            return Vec::new();
+            return self.always_load_skills();
         }
         self.skills.clone()
     }
 
-    /// Intent-based skill pick for unit tests (lazy chat uses `skill_search` + `skill_load`).
+    /// Skills with `always: true` in frontmatter — injected under ## Techniques in lazy chat.
+    pub fn always_load_skills(&self) -> Vec<SkillSpec> {
+        self.skills
+            .iter()
+            .filter(|s| s.always_load)
+            .cloned()
+            .collect()
+    }
+
+    /// Name + description catalog for lazy chat (## Available skills in system prompt).
+    pub fn format_catalog(&self) -> String {
+        if self.skills.is_empty() {
+            return String::new();
+        }
+        let mut lines = vec![
+            "Use **skill_load** with the skill `name` when a task matches.".into(),
+            String::new(),
+        ];
+        for s in &self.skills {
+            let desc = trim_desc(&s.description);
+            if desc.is_empty() {
+                lines.push(format!("- **{}**", s.name));
+            } else {
+                lines.push(format!("- **{}** — {}", s.name, desc));
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// Intent-based skill pick for unit tests.
     #[cfg(test)]
     pub fn select_for_message_by_intent(&self, message: &str) -> Vec<SkillSpec> {
         let lower = message.to_ascii_lowercase();
@@ -78,28 +107,6 @@ impl SkillRegistry {
         selected
     }
 
-    /// Search skills by keyword (name, description, tools).
-    pub fn search(&self, query: &str, limit: usize) -> Vec<&SkillSpec> {
-        let terms: Vec<String> = query
-            .to_ascii_lowercase()
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|t| t.len() >= 2)
-            .map(str::to_string)
-            .collect();
-        if terms.is_empty() {
-            return Vec::new();
-        }
-        let limit = limit.clamp(1, 15);
-        let mut scored: Vec<(&SkillSpec, i32)> = self
-            .skills
-            .iter()
-            .map(|s| (s, score_skill_query(s, &terms)))
-            .filter(|(_, score)| *score > 0)
-            .collect();
-        scored.sort_by_key(|b| std::cmp::Reverse(b.1));
-        scored.into_iter().take(limit).map(|(s, _)| s).collect()
-    }
-
     /// Union of `tools[]` from the given skills (deduped, catalog order preserved).
     pub fn collect_tool_refs(skills: &[SkillSpec]) -> Vec<String> {
         let mut out = Vec::new();
@@ -117,22 +124,6 @@ impl SkillRegistry {
         out
     }
 
-    pub fn format_search_results(matches: &[&SkillSpec]) -> String {
-        if matches.is_empty() {
-            return "No skills matched. Try keywords like ci, merge, digest, review.".into();
-        }
-        let mut lines = vec![format!("{} skill(s):", matches.len())];
-        for s in matches {
-            lines.push(format!(
-                "[{}] {} — {}",
-                s.name,
-                s.name,
-                trim_desc(&s.description),
-            ));
-        }
-        lines.join("\n")
-    }
-
     pub fn format_skill_load(skill: &SkillSpec) -> String {
         format!("### {}\n{}", skill.name, crate::engine::skill::skill_body_for_prompt(&skill.body))
     }
@@ -148,35 +139,6 @@ fn skill_key(skill: &SkillSpec) -> String {
 
 fn trim_desc(desc: &str) -> &str {
     desc.trim()
-}
-
-fn score_skill_query(skill: &SkillSpec, terms: &[String]) -> i32 {
-    let name = skill.name.to_ascii_lowercase();
-    let desc = skill.description.to_ascii_lowercase();
-    let body = skill.body.to_ascii_lowercase();
-    let mut score = 0;
-    for term in terms {
-        if name.contains(term) {
-            score += 12;
-        }
-        if desc.contains(term) {
-            score += 8;
-        }
-        if body.contains(term) {
-            score += 3;
-        }
-        for tool in &skill.tool_refs {
-            if tool.to_ascii_lowercase().contains(term) {
-                score += 5;
-            }
-        }
-        for kw in &skill.intent_keywords {
-            if kw.to_ascii_lowercase().contains(term) {
-                score += 4;
-            }
-        }
-    }
-    score
 }
 
 #[cfg(test)]
@@ -309,10 +271,20 @@ mod tests {
     }
 
     #[test]
-    fn lazy_select_returns_empty() {
+    fn lazy_select_returns_always_load_only() {
         let reg = sample_registry();
         let picked = reg.select_for_message("Why is CI failing on PR #42?", true);
-        assert!(picked.is_empty());
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].name, "github-ops-tone");
+    }
+
+    #[test]
+    fn format_catalog_lists_name_and_description() {
+        let reg = sample_registry();
+        let cat = reg.format_catalog();
+        assert!(cat.contains("**ci-triage**"));
+        assert!(cat.contains("**pr-merge**"));
+        assert!(cat.contains("skill_load"));
     }
 
     #[test]
@@ -337,13 +309,6 @@ mod tests {
     fn native_mode_loads_all() {
         let reg = sample_registry();
         assert_eq!(reg.select_for_message("hello", false).len(), 3);
-    }
-
-    #[test]
-    fn search_finds_ci_triage() {
-        let reg = sample_registry();
-        let hits = reg.search("ci failure", 5);
-        assert!(hits.iter().any(|s| s.name == "ci-triage"));
     }
 
     #[test]
@@ -384,26 +349,6 @@ mod tests {
         }]);
         let picked = reg.select_for_message_by_intent("show dependabot vulnerabilities");
         assert!(picked.iter().any(|s| s.name == "security-alerts"));
-    }
-
-    #[test]
-    fn search_finds_release_skill() {
-        let reg = SkillRegistry::from_skills(vec![SkillSpec {
-            name: "release-backport".into(),
-            description: "backport merged PRs".into(),
-            body: String::new(),
-            skill_refs: vec![],
-            tool_refs: vec!["pr_list_backport_candidates".into()],
-            always_load: false,
-            intent_keywords: vec!["backport".into()],
-            intent_phrases: vec![],
-            intent_bonus_keywords: vec![],
-            intent_penalty_keywords: vec![],
-            intent_penalty_phrases: vec![],
-            intent_penalty: 0,
-        }]);
-        let hits = reg.search("backport release", 3);
-        assert!(hits.iter().any(|s| s.name == "release-backport"));
     }
 
     #[test]

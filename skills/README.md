@@ -20,7 +20,7 @@
 | `oncall-store/` | Local digest, approvals, handoff |
 | `_base/TOOLS.md` | Full tool reference (workflows / native mode) |
 
-Each `SKILL.md` follows a consistent shape: **Scope**, **Workflow**, **Output template**, plus YAML `description` / `argument-hint` / `tools:` / intent metadata for `skill_search`.
+Each `SKILL.md` follows a consistent shape: **Scope**, **Workflow**, **Output template**, plus YAML `description` / `argument-hint` / `tools:` / intent metadata. Lazy chat lists every skill's `name` and `description` under **Available skills** in the system prompt; the model calls `skill_load` to pull in the full body.
 
 Chat loads skills from **`agents/chat/AGENT.md`** `skills:` list unless `chat.skills` overrides in yaml.
 

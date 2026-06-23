@@ -1074,6 +1074,11 @@ pub async fn load_chat_session_ui(
     state.chat_session_id = Some(session_id);
     for msg in messages {
         if msg.role == ChatRole::Reasoning {
+            let body =
+                crate::agent::context::strip_reasoning_summary_marker(&msg.content).to_string();
+            let idx = state.chat_lines.len();
+            state.push_chat_line(chat_message_display_line(&msg));
+            state.record_chat_tool_output(idx, body);
             continue;
         }
         if msg.role == ChatRole::Tool {

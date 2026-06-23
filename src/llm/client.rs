@@ -124,6 +124,10 @@ impl LlmClient {
         self.online
     }
 
+    pub(crate) fn uses_ollama_native_chat(&self) -> bool {
+        crate::llm::ollama::ollama_native_base(&self.cfg.base_url).is_some()
+    }
+
     /// Classify one page of CI logs. Each LLM call only sees this page plus `prior_summary`.
     #[allow(clippy::too_many_arguments)]
     pub async fn classify_log_page(
@@ -224,7 +228,7 @@ Failed logs (this page only):\n{logs}"
                 None
             };
 
-            let content = if let Some(ollama_base) = ollama_api_base(&self.cfg.base_url) {
+            let content = if let Some(ollama_base) = crate::llm::ollama::ollama_native_base(&self.cfg.base_url) {
                 match self
                     .chat_ollama_native(&ollama_base, &msgs, think_override)
                     .await
@@ -384,9 +388,7 @@ Failed logs (this page only):\n{logs}"
     }
 
     async fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
-        let resp = self
-            .http
-            .post(url)
+        let resp = crate::llm::ollama::apply_llm_auth(self.http.post(url), &self.cfg)
             .json(body)
             .send()
             .await
@@ -481,7 +483,7 @@ Failed logs (this page only):\n{logs}"
         let think_override = Some(false);
         let tokens = max_tokens.clamp(256, 2048);
 
-        if let Some(ollama_base) = ollama_api_base(&self.cfg.base_url) {
+        if let Some(ollama_base) = crate::llm::ollama::ollama_native_base(&self.cfg.base_url) {
             self.chat_ollama_structured(&ollama_base, &messages, think_override, schema, tokens)
                 .await
         } else {
@@ -502,7 +504,8 @@ Failed logs (this page only):\n{logs}"
     {
         if !self.online {
             return Err(CoworkerError::Other(anyhow::anyhow!(
-                "LLM offline — start Ollama and check llm.base_url"
+                "LLM offline — check llm.base_url and that the server is running \
+                 (set llm.api_key for LLM Provider)"
             )));
         }
         if tools.is_empty() {
@@ -542,7 +545,7 @@ Call one or more tools or reply to the user in plain text."
                     "content": nudge,
                 }));
             }
-            let turn = if let Some(ollama_base) = ollama_api_base(&self.cfg.base_url) {
+            let turn = if let Some(ollama_base) = crate::llm::ollama::ollama_native_base(&self.cfg.base_url) {
                 match self
                     .chat_ollama_with_tools_stream(
                         &ollama_base,
@@ -564,11 +567,24 @@ Call one or more tools or reply to the user in plain text."
                     Err(e) => return Err(e),
                 }
             } else {
-                let turn = self
-                    .chat_openai_with_tools(&msgs, tools, num_predict)
-                    .await?;
-                on_buffer(&turn.content, "", &turn.tool_calls);
-                turn
+                match self
+                    .chat_openai_with_tools_stream(
+                        &msgs,
+                        tools,
+                        num_predict,
+                        cancel.clone(),
+                        &mut on_buffer,
+                    )
+                    .await
+                {
+                    Ok(turn) => turn,
+                    Err(e) if i + 1 < attempt_count => {
+                        tracing::warn!("chat openai tools stream failed ({e}); retrying");
+                        last = super::chat::ChatToolsTurn::default();
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
             };
             last = turn.clone();
             let needs_retry = last.content.trim().is_empty() && last.tool_calls.is_empty();
@@ -620,9 +636,7 @@ Call one or more tools or reply to the user in plain text."
             },
         });
 
-        let resp = self
-            .http_stream
-            .post(&url)
+        let resp = crate::llm::ollama::apply_llm_auth(self.http_stream.post(&url), &self.cfg)
             .json(&body)
             .send()
             .await
@@ -646,6 +660,7 @@ Call one or more tools or reply to the user in plain text."
         let stream_wall_limit = std::time::Duration::from_secs(90);
         let stream_started = std::time::Instant::now();
         let mut stop_stream = false;
+        let mut thinking_soft_capped = false;
 
         while !stop_stream {
             if super::chat::chat_cancel_requested(&cancel) {
@@ -689,7 +704,7 @@ Call one or more tools or reply to the user in plain text."
                 })?;
                 let mut changed = false;
                 if let Some(part) = v.pointer("/message/thinking").and_then(|t| t.as_str()) {
-                    if !part.is_empty() {
+                    if !part.is_empty() && !thinking_soft_capped {
                         append_stream_text(&mut thinking_full, part);
                         changed = true;
                     }
@@ -708,18 +723,29 @@ Call one or more tools or reply to the user in plain text."
                 if changed {
                     on_buffer(&full, &thinking_full, &tool_calls);
                 }
-                if stream_should_abort_thinking(
-                    think,
-                    &thinking_full,
-                    full.trim().len(),
-                    self.cfg.max_thinking_tokens,
-                ) {
-                    tracing::warn!(
-                        "chat tools stream aborted during thinking (~{} chars)",
-                        thinking_full.len()
-                    );
-                    stop_stream = true;
-                    break;
+                if think && full.trim().is_empty() && !thinking_full.trim().is_empty() {
+                    if stream_text_appears_stuck(&thinking_full) {
+                        tracing::warn!(
+                            "chat tools stream aborted: thinking loop (~{} chars)",
+                            thinking_full.len()
+                        );
+                        stop_stream = true;
+                        break;
+                    }
+                    if !thinking_soft_capped
+                        && should_stop_chat_thinking_stream(
+                            true,
+                            thinking_full.len(),
+                            0,
+                            self.cfg.max_thinking_tokens,
+                        )
+                    {
+                        thinking_soft_capped = true;
+                        tracing::debug!(
+                            "chat tools thinking soft cap (~{} chars); waiting for content/tool_calls",
+                            thinking_full.len()
+                        );
+                    }
                 }
                 if v.get("done") == Some(&serde_json::Value::Bool(true)) {
                     done_reason = v
@@ -734,16 +760,25 @@ Call one or more tools or reply to the user in plain text."
         let _ = done_reason;
         Ok(super::chat::ChatToolsTurn {
             content: full,
+            reasoning: thinking_full,
             tool_calls,
         })
     }
 
-    async fn chat_openai_with_tools(
+    #[allow(clippy::too_many_arguments)]
+    async fn chat_openai_with_tools_stream<F>(
         &self,
         messages: &serde_json::Value,
         tools: &[serde_json::Value],
         num_predict: u32,
-    ) -> Result<super::chat::ChatToolsTurn> {
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        on_buffer: &mut F,
+    ) -> Result<super::chat::ChatToolsTurn>
+    where
+        F: FnMut(&str, &str, &[super::chat::LlmToolCall]) + Send,
+    {
+        use futures_util::StreamExt;
+
         let url = format!(
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
@@ -751,22 +786,112 @@ Call one or more tools or reply to the user in plain text."
         let body = serde_json::json!({
             "model": self.cfg.model,
             "messages": messages,
-            "stream": false,
+            "stream": true,
             "temperature": 0,
             "max_tokens": num_predict,
             "tools": tools,
             "tool_choice": "auto",
         });
 
-        let v = self.post_json(&url, &body).await?;
-        let content = extract_openai_chat_content(&v)?;
-        let tool_calls = v
-            .pointer("/choices/0/message/tool_calls")
-            .and_then(|a| a.as_array())
-            .map(|arr| parse_native_tool_calls_from_array(arr))
-            .unwrap_or_default();
+        let resp = crate::llm::ollama::apply_llm_auth(self.http_stream.post(&url), &self.cfg)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm request: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(CoworkerError::Other(anyhow::anyhow!(
+                "llm HTTP {status}: {text}"
+            )));
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut tool_call_acc: Vec<serde_json::Value> = Vec::new();
+        let mut line_buf = String::new();
+        let idle_timeout = std::time::Duration::from_secs(30);
+        let stream_wall_limit = std::time::Duration::from_secs(90);
+        let stream_started = std::time::Instant::now();
+
+        while let Ok(chunk_result) =
+            tokio::time::timeout(idle_timeout, stream.next()).await
+        {
+            if super::chat::chat_cancel_requested(&cancel) {
+                return Err(super::chat::chat_cancelled_error());
+            }
+            if stream_started.elapsed() >= stream_wall_limit {
+                tracing::warn!(
+                    "openai chat tools stream wall limit {}s (reasoning {} chars, content {} chars)",
+                    stream_wall_limit.as_secs(),
+                    reasoning.len(),
+                    content.len()
+                );
+                break;
+            }
+            let chunk = match chunk_result {
+                Some(Ok(chunk)) => chunk,
+                Some(Err(e)) => {
+                    return Err(CoworkerError::Other(anyhow::anyhow!("llm stream: {e}")));
+                }
+                None => break,
+            };
+            line_buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(pos) = line_buf.find('\n') {
+                let line = line_buf[..pos].trim().to_string();
+                line_buf = line_buf[pos + 1..].to_string();
+                if line.is_empty() || line.starts_with(':') {
+                    continue;
+                }
+                let data = line.strip_prefix("data:").unwrap_or(&line).trim();
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
+                }
+                let v: serde_json::Value = serde_json::from_str(data).map_err(|e| {
+                    CoworkerError::Other(anyhow::anyhow!("openai stream json: {e}; line={line}"))
+                })?;
+                let Some(delta) = v.pointer("/choices/0/delta") else {
+                    continue;
+                };
+                let mut changed = false;
+                if let Some(part) = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(|t| t.as_str())
+                {
+                    if !part.is_empty() {
+                        append_stream_text(&mut reasoning, part);
+                        changed = true;
+                    }
+                }
+                if let Some(part) = delta.get("content").and_then(|c| c.as_str()) {
+                    if !part.is_empty() {
+                        append_stream_text(&mut content, part);
+                        changed = true;
+                    }
+                }
+                if let Some(calls) = delta.get("tool_calls").and_then(|a| a.as_array()) {
+                    merge_openai_tool_call_deltas(&mut tool_call_acc, calls);
+                    changed = true;
+                }
+                if changed {
+                    let tool_calls = parse_accumulated_openai_tool_calls(&tool_call_acc);
+                    on_buffer(&content, &reasoning, &tool_calls);
+                }
+            }
+        }
+
+        let tool_calls = parse_accumulated_openai_tool_calls(&tool_call_acc);
+        if content.trim().is_empty() && tool_calls.is_empty() && reasoning.trim().is_empty() {
+            return Err(CoworkerError::Other(anyhow::anyhow!(
+                "llm empty message content"
+            )));
+        }
         Ok(super::chat::ChatToolsTurn {
             content,
+            reasoning,
             tool_calls,
         })
     }
@@ -897,7 +1022,7 @@ COMPRESS: raw log excerpts and duplicate tool dumps. No preamble.",
         num_predict: u32,
         think: Option<bool>,
     ) -> Result<String> {
-        if let Some(ollama_base) = ollama_api_base(&self.cfg.base_url) {
+        if let Some(ollama_base) = crate::llm::ollama::ollama_native_base(&self.cfg.base_url) {
             let url = format!("{ollama_base}/api/chat");
             let mut body = serde_json::json!({
                 "model": self.cfg.model,
@@ -966,17 +1091,6 @@ fn log_ollama_thinking_budget(v: &serde_json::Value, max_thinking_tokens: u32, t
     }
 }
 
-fn ollama_api_base(base_url: &str) -> Option<String> {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/v1") {
-        return Some(trimmed.strip_suffix("/v1")?.to_string());
-    }
-    if trimmed.contains("11434") {
-        return Some(trimmed.to_string());
-    }
-    None
-}
-
 fn extract_ollama_chat_content(v: &serde_json::Value) -> Result<String> {
     if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_str()) {
         let trimmed = content.trim();
@@ -1026,29 +1140,92 @@ fn extract_ollama_plain_content(v: &serde_json::Value) -> Result<String> {
     )))
 }
 
+#[allow(dead_code)] // unit tests; non-stream OpenAI fallback helper
+fn parse_openai_tools_turn(v: &serde_json::Value) -> Result<super::chat::ChatToolsTurn> {
+    let choice = v.pointer("/choices/0").ok_or_else(|| {
+        CoworkerError::Other(anyhow::anyhow!("llm missing choices[0]"))
+    })?;
+    let msg = choice
+        .get("message")
+        .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm missing choices[0].message")))?;
+    let tool_calls = msg
+        .get("tool_calls")
+        .and_then(|a| a.as_array())
+        .map(|arr| parse_native_tool_calls_from_array(arr))
+        .unwrap_or_default();
+    let reasoning = extract_openai_message_reasoning(msg);
+    let content = extract_openai_visible_content(msg);
+    if content.trim().is_empty() && tool_calls.is_empty() && reasoning.trim().is_empty() {
+        let finish = choice
+            .get("finish_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        tracing::warn!(
+            "openai chat tools empty response (finish_reason={finish}): {}",
+            serde_json::to_string(msg).unwrap_or_default()
+        );
+        return Err(CoworkerError::Other(anyhow::anyhow!(
+            "llm empty message content"
+        )));
+    }
+    Ok(super::chat::ChatToolsTurn {
+        content,
+        reasoning,
+        tool_calls,
+    })
+}
+
+fn extract_openai_message_reasoning(msg: &serde_json::Value) -> String {
+    for key in ["reasoning_content", "reasoning", "thinking"] {
+        if let Some(reasoning) = msg.get(key).and_then(|c| c.as_str()) {
+            let trimmed = reasoning.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// User-visible assistant text only (not internal reasoning).
+fn extract_openai_visible_content(msg: &serde_json::Value) -> String {
+    if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return content.to_string();
+        }
+    }
+    String::new()
+}
+
+fn extract_openai_message_content(msg: &serde_json::Value) -> String {
+    let visible = extract_openai_visible_content(msg);
+    if !visible.trim().is_empty() {
+        return visible;
+    }
+
+    let reasoning = extract_openai_message_reasoning(msg);
+    for key in ["reasoning_content", "reasoning", "thinking"] {
+        if let Some(text) = non_empty_chat_fallback(&reasoning, key) {
+            return text;
+        }
+    }
+
+    String::new()
+}
+
 fn extract_openai_chat_content(v: &serde_json::Value) -> Result<String> {
     let msg = v
         .pointer("/choices/0/message")
         .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm missing choices[0].message")))?;
 
-    if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return Ok(content.to_string());
-        }
+    let content = extract_openai_message_content(msg);
+    if content.trim().is_empty() {
+        return Err(CoworkerError::Other(anyhow::anyhow!(
+            "llm empty message content"
+        )));
     }
-
-    for key in ["reasoning", "reasoning_content"] {
-        if let Some(reasoning) = msg.get(key).and_then(|c| c.as_str()) {
-            if let Some(text) = non_empty_chat_fallback(reasoning, key) {
-                return Ok(text);
-            }
-        }
-    }
-
-    Err(CoworkerError::Other(anyhow::anyhow!(
-        "llm empty message content"
-    )))
+    Ok(content)
 }
 
 /// When thinking models exhaust `num_predict`, JSON may only appear in thinking/reasoning.
@@ -1069,9 +1246,7 @@ fn non_empty_chat_fallback(text: &str, field: &str) -> Option<String> {
 }
 
 fn chat_thinking_char_cap(max_thinking_tokens: u32) -> usize {
-    (max_thinking_tokens as usize)
-        .saturating_mul(4)
-        .clamp(1024, 4096)
+    (max_thinking_tokens as usize).saturating_mul(4).max(1024)
 }
 
 /// Merge Ollama stream chunks that may be delta or cumulative (full prefix) updates.
@@ -1109,22 +1284,6 @@ fn stream_text_appears_stuck(text: &str) -> bool {
     false
 }
 
-fn stream_should_abort_thinking(
-    think: bool,
-    thinking: &str,
-    content_len: usize,
-    max_thinking_tokens: u32,
-) -> bool {
-    if !think || content_len > 0 {
-        return false;
-    }
-    if thinking.trim().is_empty() {
-        return false;
-    }
-    stream_text_appears_stuck(thinking)
-        || should_stop_chat_thinking_stream(true, thinking.len(), 0, max_thinking_tokens)
-}
-
 /// Stop reading the Ollama stream when thinking grows without emitting JSON content.
 pub fn should_stop_chat_thinking_stream(
     think: bool,
@@ -1140,6 +1299,47 @@ fn parse_native_tool_calls(v: &serde_json::Value) -> Vec<super::chat::LlmToolCal
         .and_then(|a| a.as_array())
         .map(|arr| parse_native_tool_calls_from_array(arr))
         .unwrap_or_default()
+}
+
+fn merge_openai_tool_call_deltas(acc: &mut Vec<serde_json::Value>, deltas: &[serde_json::Value]) {
+    for delta in deltas {
+        let idx = delta.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        while acc.len() <= idx {
+            acc.push(serde_json::json!({
+                "id": "",
+                "type": "function",
+                "function": { "name": "", "arguments": "" }
+            }));
+        }
+        let slot = &mut acc[idx];
+        if let Some(id) = delta.get("id").and_then(|v| v.as_str()) {
+            if !id.is_empty() {
+                slot["id"] = serde_json::Value::String(id.to_string());
+            }
+        }
+        if let Some(func) = delta.get("function") {
+            if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                if !name.is_empty() {
+                    slot["function"]["name"] = serde_json::Value::String(name.to_string());
+                }
+            }
+            if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+                let existing = slot["function"]["arguments"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                slot["function"]["arguments"] =
+                    serde_json::Value::String(format!("{existing}{args}"));
+            }
+        }
+    }
+}
+
+fn parse_accumulated_openai_tool_calls(chunks: &[serde_json::Value]) -> Vec<super::chat::LlmToolCall> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+    parse_native_tool_calls_from_array(chunks)
 }
 
 fn parse_native_tool_calls_from_array(arr: &[serde_json::Value]) -> Vec<super::chat::LlmToolCall> {
@@ -1846,10 +2046,13 @@ mod tests {
     }
 
     #[test]
-    fn ollama_api_base_from_v1_url() {
+    fn ollama_native_base_from_v1_url() {
         assert_eq!(
-            ollama_api_base("http://localhost:11434/v1").as_deref(),
+            crate::llm::ollama::ollama_native_base("http://localhost:11434/v1").as_deref(),
             Some("http://localhost:11434")
+        );
+        assert!(
+            crate::llm::ollama::ollama_native_base("http://localhost:12345/v1").is_none()
         );
     }
 
@@ -1868,6 +2071,7 @@ mod tests {
             max_thinking_tokens: 512,
             reasoning_summary_tokens: 320,
             history_summary_tokens: 256,
+            api_key: None,
         };
         let s = thinking_prompt_suffix(&cfg);
         assert!(s.contains("512"));
@@ -1888,10 +2092,17 @@ mod tests {
     }
 
     #[test]
+    fn chat_thinking_char_cap_scales_with_config() {
+        assert_eq!(chat_thinking_char_cap(512), 2048);
+        assert_eq!(chat_thinking_char_cap(4096), 16384);
+    }
+
+    #[test]
     fn should_stop_chat_thinking_stream_when_over_cap() {
         assert!(should_stop_chat_thinking_stream(true, 2500, 0, 512));
         assert!(!should_stop_chat_thinking_stream(true, 100, 0, 512));
         assert!(!should_stop_chat_thinking_stream(false, 4000, 0, 512));
+        assert!(!should_stop_chat_thinking_stream(true, 4104, 0, 4096));
     }
 
     #[test]
@@ -1936,6 +2147,75 @@ mod tests {
         });
         let text = extract_openai_chat_content(&v).unwrap();
         assert!(text.contains("compile error"));
+    }
+
+    #[test]
+    fn openai_tool_calls_without_content_is_valid() {
+        let v = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_42d4de21",
+                        "type": "function",
+                        "function": {
+                            "name": "skill_load",
+                            "arguments": "{\"name\": \"pr-review\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let turn = parse_openai_tools_turn(&v).unwrap();
+        assert!(turn.content.trim().is_empty());
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].name, "skill_load");
+    }
+
+    #[test]
+    fn openai_reasoning_content_parsed_separately_from_content() {
+        let v = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hi there",
+                    "reasoning_content": "Step 1: greet the user.",
+                    "tool_calls": []
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let msg = v.pointer("/choices/0/message").unwrap();
+        assert_eq!(extract_openai_message_reasoning(msg), "Step 1: greet the user.");
+        assert_eq!(extract_openai_visible_content(msg), "Hi there");
+        let turn = parse_openai_tools_turn(&v).unwrap();
+        assert_eq!(turn.reasoning, "Step 1: greet the user.");
+        assert_eq!(turn.content, "Hi there");
+    }
+
+    #[test]
+    fn merge_openai_tool_call_stream_deltas() {
+        let mut acc = Vec::new();
+        merge_openai_tool_call_deltas(
+            &mut acc,
+            &[serde_json::json!({
+                "index": 0,
+                "id": "call_1",
+                "function": { "name": "skill_load", "arguments": "{\"na" }
+            })],
+        );
+        merge_openai_tool_call_deltas(
+            &mut acc,
+            &[serde_json::json!({
+                "index": 0,
+                "function": { "arguments": "me\": \"pr-review\"}" }
+            })],
+        );
+        let calls = parse_accumulated_openai_tool_calls(&acc);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "skill_load");
+        assert_eq!(calls[0].arguments["name"], "pr-review");
     }
 
     #[test]

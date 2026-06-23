@@ -11,13 +11,15 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::app::{
-    apply_event, hydrate_from_store, spawn_approval_decision, AppEvent, SharedState, Tab,
+    apply_event, hydrate_from_store, load_chat_session_ui, spawn_approval_decision, AppEvent,
+    SharedState, Tab,
 };
 use crate::agent::chat_loop::ChatProgress;
 use crate::engine::Engine;
@@ -61,6 +63,9 @@ pub async fn run(
         .route("/api/chat", post(api_chat))
         .route("/api/chat/cancel", post(api_chat_cancel))
         .route("/api/chat/clear", post(api_chat_clear))
+        .route("/api/chat/sessions", get(api_list_chat_sessions))
+        .route("/api/chat/sessions/new", post(api_new_chat_session))
+        .route("/api/chat/sessions/{id}", post(api_load_chat_session))
         .route("/api/chat/context", post(api_toggle_context))
         .route("/api/approvals/{id}", post(api_approval))
         .route("/api/workflows/{id}", post(api_run_workflow))
@@ -271,19 +276,11 @@ async fn api_chat(State(rt): State<Arc<WebRuntime>>, Json(body): Json<ChatBody>)
         return StatusCode::BAD_REQUEST;
     }
     if msg == "/clear" {
-        let mut s = rt.state.write().await;
-        s.reset_chat_session();
-        s.status = "chat cleared".into();
-        drop(s);
-        publish_snapshot(&rt.state, &rt.snap_tx).await;
+        reset_web_chat_session(&rt).await;
         return StatusCode::NO_CONTENT;
     }
     if msg == "/new" {
-        let mut s = rt.state.write().await;
-        s.reset_chat_session();
-        s.status = "new chat session".into();
-        drop(s);
-        publish_snapshot(&rt.state, &rt.snap_tx).await;
+        reset_web_chat_session(&rt).await;
         return StatusCode::NO_CONTENT;
     }
     if msg == "/help" {
@@ -328,12 +325,75 @@ async fn api_chat_cancel(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
 }
 
 async fn api_chat_clear(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
-    let mut s = rt.state.write().await;
-    s.reset_chat_session();
-    s.status = "chat cleared".into();
-    drop(s);
+    {
+        let mut s = rt.state.write().await;
+        s.reset_chat_session();
+        s.status = "chat cleared".into();
+        drop(s);
+        publish_snapshot(&rt.state, &rt.snap_tx).await;
+    }
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Serialize)]
+struct ChatSessionItem {
+    id: String,
+    title: String,
+    created_at: String,
+}
+
+async fn api_list_chat_sessions(
+    State(rt): State<Arc<WebRuntime>>,
+) -> std::result::Result<Json<Vec<ChatSessionItem>>, StatusCode> {
+    let sessions = rt
+        .store
+        .list_chat_sessions(30)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        sessions
+            .into_iter()
+            .map(|s| ChatSessionItem {
+                id: s.id.to_string(),
+                title: s.title,
+                created_at: s.created_at.format("%m-%d %H:%M").to_string(),
+            })
+            .collect(),
+    ))
+}
+
+async fn api_new_chat_session(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
+    reset_web_chat_session(&rt).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn api_load_chat_session(
+    State(rt): State<Arc<WebRuntime>>,
+    Path(id): Path<Uuid>,
+) -> StatusCode {
+    if rt.state.read().await.chat_busy {
+        return StatusCode::CONFLICT;
+    }
+    {
+        let mut s = rt.state.write().await;
+        if load_chat_session_ui(&mut s, rt.store.as_ref(), id)
+            .await
+            .is_err()
+        {
+            return StatusCode::NOT_FOUND;
+        }
+        s.status = format!("loaded session {id}");
+    }
     publish_snapshot(&rt.state, &rt.snap_tx).await;
     StatusCode::NO_CONTENT
+}
+
+async fn reset_web_chat_session(rt: &Arc<WebRuntime>) {
+    let mut s = rt.state.write().await;
+    s.reset_chat_session();
+    s.status = "new chat session".into();
+    drop(s);
+    publish_snapshot(&rt.state, &rt.snap_tx).await;
 }
 
 #[derive(Deserialize)]

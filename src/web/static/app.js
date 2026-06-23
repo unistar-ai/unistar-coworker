@@ -24,9 +24,14 @@ let ui = {
   expandedToolBatches: new Set(),
   liveReasoningExpanded: false,
   lastStreamingPaint: 0,
+  lastReasoningPaint: 0,
   lastHistoryRevision: null,
   lastContextRevision: null,
   lastHistoryLineCount: -1,
+  sessionMenuOpen: false,
+  sessionList: null,
+  sessionListLoading: false,
+  sessionMenuBound: false,
 };
 
 async function apiFetch(url, options = {}) {
@@ -323,6 +328,141 @@ function parseTableBlock(lines, start) {
   return { html: html + "</tbody></table></div>", next: i };
 }
 
+function isOrderedListLine(line) {
+  return /^\d+\.\s?/.test(line);
+}
+
+function isBulletListLine(line) {
+  return /^\s*[-*] /.test(line);
+}
+
+function bulletListItemText(line) {
+  const m = line.match(/^\s*[-*]\s+(.*)$/);
+  return m ? m[1] : line;
+}
+
+/** Headings / tables end an ordered-list region; fences and paragraphs may appear between items. */
+function endsOrderedListRegion(lines, i, isBlank) {
+  if (i >= lines.length) return true;
+  let j = i;
+  while (j < lines.length && isBlank(lines[j])) j += 1;
+  if (j >= lines.length) return true;
+  const line = lines[j];
+  if (/^#{1,6}\s/.test(line)) return true;
+  if (/^-{3,}$/.test(line.trim())) return true;
+  if (line.startsWith("&gt;")) return true;
+  if (
+    line.includes("|") &&
+    j + 1 < lines.length &&
+    lines[j + 1].includes("|")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Ordered list with sub-bullets, code fences, and lazy `1.` numbering (PR findings). */
+function parseOrderedListBlock(lines, start, isBlank, isFence) {
+  if (!isOrderedListLine(lines[start])) return null;
+
+  const items = [];
+  let i = start;
+
+  const nextSignificant = (from) => {
+    let j = from;
+    while (j < lines.length && isBlank(lines[j])) j += 1;
+    return j;
+  };
+
+  while (i < lines.length) {
+    if (endsOrderedListRegion(lines, i, isBlank)) break;
+
+    while (i < lines.length) {
+      if (endsOrderedListRegion(lines, i, isBlank)) break;
+      if (isBlank(lines[i])) {
+        i += 1;
+        continue;
+      }
+      if (isFence(lines[i])) {
+        if (items.length) items[items.length - 1] += lines[i].trim();
+        i += 1;
+        continue;
+      }
+      if (isOrderedListLine(lines[i])) break;
+      if (items.length) {
+        items[items.length - 1] += `<br>${inlineMarkdown(lines[i])}`;
+      }
+      i += 1;
+    }
+
+    if (i >= lines.length || !isOrderedListLine(lines[i])) break;
+
+    let itemHtml = inlineMarkdown(lines[i].replace(/^\d+\.\s?/, ""));
+    i += 1;
+    const subBullets = [];
+
+    while (i < lines.length) {
+      if (isBlank(lines[i])) {
+        const j = nextSignificant(i);
+        if (j >= lines.length) {
+          i = j;
+          break;
+        }
+        if (isOrderedListLine(lines[j])) {
+          i = j;
+          break;
+        }
+        if (endsOrderedListRegion(lines, i, isBlank)) break;
+        i += 1;
+        continue;
+      }
+      if (isOrderedListLine(lines[i])) break;
+      if (endsOrderedListRegion(lines, i, isBlank)) break;
+      if (isFence(lines[i])) {
+        itemHtml += lines[i].trim();
+        i += 1;
+        continue;
+      }
+      if (isBulletListLine(lines[i])) {
+        subBullets.push(bulletListItemText(lines[i]));
+        i += 1;
+        continue;
+      }
+      itemHtml += `<br>${inlineMarkdown(lines[i])}`;
+      i += 1;
+    }
+
+    if (subBullets.length) {
+      itemHtml +=
+        "<ul>" +
+        subBullets.map((b) => `<li>${inlineMarkdown(b)}</li>`).join("") +
+        "</ul>";
+    }
+    items.push(`<li>${itemHtml}</li>`);
+  }
+
+  if (!items.length) return null;
+  return { html: `<ol class="md-ol">${items.join("")}</ol>`, next: i };
+}
+
+/** Merge fragmented `<ol><li>…</li></ol>` runs (safety net after loose parsing). */
+function mergeAdjacentOrderedLists(html) {
+  const re = /<ol class="md-ol">(\s*<li>[\s\S]*?<\/li>\s*)<\/ol>/g;
+  let out = html;
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(
+      /(<ol class="md-ol">\s*<li>[\s\S]*?<\/li>\s*<\/ol>\s*){2,}/g,
+      (chunk) => {
+        const lis = chunk.match(/<li>[\s\S]*?<\/li>/g) || [];
+        return `<ol class="md-ol">${lis.join("")}</ol>`;
+      },
+    );
+  } while (out !== prev);
+  return out.replace(re, '<ol class="md-ol">$1</ol>');
+}
+
 /** Plain text for in-progress assistant stream (avoid full markdown each token). */
 function streamingPlainHtml(text) {
   if (!text) return "";
@@ -338,6 +478,128 @@ function paintStreamingBody(body, text) {
   ui.lastStreamingPaint = now;
   body.dataset.streamLen = String(text.length);
   body.innerHTML = streamingPlainHtml(text);
+}
+
+const REASONING_COLLAPSE_LINES = 6;
+const REASONING_COLLAPSE_CHARS = 420;
+
+function normalizeReasoningText(text) {
+  if (!text) return "";
+  let s = String(text).trim();
+  s = s.replace(/^\[agent reasoning summary\]\s*/i, "");
+  s = s.replace(/^reasoning:\s*/i, "");
+  return s.trim();
+}
+
+function reasoningLineCount(text) {
+  const n = normalizeReasoningText(text);
+  if (!n) return 0;
+  return n.split("\n").filter((line) => line.trim()).length;
+}
+
+function reasoningCharCount(text) {
+  return normalizeReasoningText(text).length;
+}
+
+function isReasoningLong(text) {
+  const n = normalizeReasoningText(text);
+  if (!n) return false;
+  const lines = n.split("\n");
+  return lines.length > REASONING_COLLAPSE_LINES || n.length > REASONING_COLLAPSE_CHARS;
+}
+
+function fillReasoningBody(bodyEl, text, { live = false } = {}) {
+  const normalized = normalizeReasoningText(text);
+  if (!normalized) {
+    bodyEl.innerHTML = live
+      ? '<span class="reasoning-empty">Thinking…</span>'
+      : '<span class="reasoning-empty">No reasoning captured.</span>';
+    bodyEl.classList.toggle("is-live", live);
+    return;
+  }
+  const html = `<div class="reasoning-md md">${renderMarkdown(normalized)}</div>${
+    live ? '<span class="reasoning-cursor" aria-hidden="true"></span>' : ""
+  }`;
+  bodyEl.innerHTML = html;
+  bodyEl.classList.toggle("is-live", live);
+  if (live) bodyEl.scrollTop = bodyEl.scrollHeight;
+}
+
+function paintReasoningBody(body, text) {
+  const now = performance.now();
+  if (now - ui.lastReasoningPaint < 120 && body.dataset.reasoningLen) {
+    const delta = text.length - Number(body.dataset.reasoningLen || 0);
+    if (delta < 40 && delta >= 0) return;
+  }
+  ui.lastReasoningPaint = now;
+  body.dataset.reasoningLen = String(text.length);
+  fillReasoningBody(body, text, { live: true });
+}
+
+function updateReasoningMeta(card, text, { live = false } = {}) {
+  const meta = card.querySelector(".activity-reasoning-meta");
+  if (!meta) return;
+  const normalized = normalizeReasoningText(text);
+  if (!normalized) {
+    meta.textContent = live ? "streaming…" : "";
+    return;
+  }
+  meta.textContent = `${reasoningLineCount(text)} lines · ${reasoningCharCount(text).toLocaleString()} chars`;
+}
+
+function buildReasoningCard(text, { live = false, expanded, onToggle } = {}) {
+  const long = isReasoningLong(text);
+  const isExpanded = expanded ?? (!long || live);
+  const card = el(
+    "div",
+    "activity-reasoning" +
+      (live ? " is-live" : " history-reasoning") +
+      (long && !isExpanded ? " collapsed" : ""),
+  );
+
+  const head = el("div", "activity-reasoning-head");
+  head.appendChild(el("span", "activity-icon", "💭"));
+  const titleWrap = el("div", "activity-reasoning-title-wrap");
+  titleWrap.appendChild(el("span", "activity-title", "Reasoning"));
+  const meta = el("span", "activity-reasoning-meta", live && !text ? "streaming…" : "");
+  if (text && normalizeReasoningText(text)) {
+    meta.textContent = `${reasoningLineCount(text)} lines · ${reasoningCharCount(text).toLocaleString()} chars`;
+  }
+  titleWrap.appendChild(meta);
+  head.appendChild(titleWrap);
+
+  if (long) {
+    const btn = el(
+      "button",
+      "activity-toggle",
+      isExpanded ? "Collapse" : live ? "Expand" : "Show all",
+    );
+    btn.type = "button";
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      onToggle?.();
+    };
+    head.appendChild(btn);
+  }
+  card.appendChild(head);
+
+  const body = el("div", "activity-reasoning-body");
+  fillReasoningBody(body, text, { live });
+  card.appendChild(body);
+  return card;
+}
+
+function resolveReasoningFullText(block) {
+  if (block.fullText) return block.fullText;
+  const indices = block.stepIndices || (block.index != null ? [block.index] : []);
+  const texts = block.texts || [];
+  const parts = indices.map((idx, i) => {
+    const stored = getToolOutput(idx);
+    if (stored) return normalizeReasoningText(stored);
+    return normalizeReasoningText(texts[i] || "");
+  });
+  return parts.filter(Boolean).join("\n\n");
 }
 
 /** Lightweight markdown → HTML (assistant / digest / overview). */
@@ -417,10 +679,10 @@ function renderMarkdown(text) {
       }
     }
 
-    if (/^[-*] /.test(lines[i])) {
+    if (isBulletListLine(lines[i])) {
       const items = [];
-      while (i < lines.length && /^[-*] /.test(lines[i])) {
-        let item = lines[i].slice(2);
+      while (i < lines.length && isBulletListLine(lines[i])) {
+        let item = bulletListItemText(lines[i]);
         const taskM = item.match(/^\[([ xX])\]\s*(.*)$/);
         if (taskM) {
           const checked = taskM[1] !== " ";
@@ -436,14 +698,13 @@ function renderMarkdown(text) {
       continue;
     }
 
-    if (/^\d+\.\s/.test(lines[i])) {
-      const items = [];
-      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
-        items.push(`<li>${inlineMarkdown(lines[i].replace(/^\d+\.\s/, ""))}</li>`);
-        i++;
+    if (/^\d+\.\s?/.test(lines[i])) {
+      const block = parseOrderedListBlock(lines, i, isBlank, isFence);
+      if (block) {
+        out.push(block.html);
+        i = block.next;
+        continue;
       }
-      out.push(`<ol>${items.join("")}</ol>`);
-      continue;
     }
 
     const para = [];
@@ -454,8 +715,8 @@ function renderMarkdown(text) {
       !/^#{1,6}\s/.test(lines[i]) &&
       !/^-{3,}$/.test(lines[i].trim()) &&
       !lines[i].startsWith("&gt;") &&
-      !/^[-*] /.test(lines[i]) &&
-      !/^\d+\.\s/.test(lines[i]) &&
+      !isBulletListLine(lines[i]) &&
+      !/^\d+\.\s?/.test(lines[i]) &&
       !(lines[i].includes("|") && i + 1 < lines.length && lines[i + 1].includes("|"))
     ) {
       para.push(lines[i]);
@@ -466,7 +727,8 @@ function renderMarkdown(text) {
     }
   }
 
-  return out.join("\n").replace(/\x00FENCE(\d+)\x00/g, (_, idx) => fences[Number(idx)]);
+  const html = out.join("\n").replace(/\x00FENCE(\d+)\x00/g, (_, idx) => fences[Number(idx)]);
+  return mergeAdjacentOrderedLists(html);
 }
 
 function parseMessage(line) {
@@ -525,7 +787,9 @@ function parseToolStep(line, index) {
     return { kind: "warn", text: line.slice(4), index };
   }
   if (line.startsWith("  … ")) {
-    return { kind: "reasoning", text: line.slice(4), index };
+    const raw = line.slice(4);
+    const stored = output ? normalizeReasoningText(output) : null;
+    return { kind: "reasoning", text: raw, fullText: stored, index };
   }
   if (line.startsWith("chat> ")) {
     return { kind: "meta", text: line.slice(6), badge: "chat", index };
@@ -582,6 +846,12 @@ function pushToolStepBlocks(blocks, steps) {
     blocks.push({
       type: "reasoning",
       texts: steps.map((s) => s.text),
+      stepIndices: steps.map((s) => s.index),
+      fullText: steps
+        .map((s) => s.fullText || getToolOutput(s.index))
+        .filter(Boolean)
+        .map(normalizeReasoningText)
+        .join("\n\n"),
       index: steps[0].index,
     });
     return;
@@ -595,6 +865,12 @@ function pushToolStepBlocks(blocks, steps) {
       blocks.push({
         type: "reasoning",
         texts: groupSteps.map((s) => s.text),
+        stepIndices: groupSteps.map((s) => s.index),
+        fullText: groupSteps
+          .map((s) => s.fullText || getToolOutput(s.index))
+          .filter(Boolean)
+          .map(normalizeReasoningText)
+          .join("\n\n"),
         index: groupSteps[0].index,
       });
     } else if (groupSteps.length === 1 && groupSteps[0].kind === "meta") {
@@ -898,19 +1174,36 @@ function renderToolOutput(wrap, output, lineIndex, domId) {
   }
 }
 
-function renderToolReasoningNote(parent, domId, texts) {
-  const full = texts.join("\n\n");
-  const long = full.length > 220 || texts.length > 1 || full.split("\n").length > 4;
+function renderToolReasoningNote(parent, domId, texts, stepIndices = []) {
+  const parts = texts.map((t, i) => {
+    const idx = stepIndices[i];
+    const stored = idx != null ? getToolOutput(idx) : null;
+    return stored ? normalizeReasoningText(stored) : normalizeReasoningText(t);
+  });
+  const full = parts.filter(Boolean).join("\n\n");
+  const long = isReasoningLong(full);
   const expanded = ui.expandedReasoningGroups.has(domId);
-  const note = el("div", "tool-reasoning-note" + (long && !expanded ? " is-collapsed" : " is-expanded"));
+  const note = el(
+    "div",
+    "tool-reasoning-note" + (long && !expanded ? " is-collapsed" : " is-expanded"),
+  );
 
   const head = el("div", "tool-reasoning-head");
   head.appendChild(el("span", "tool-reasoning-label", "Reasoning"));
+  if (full && normalizeReasoningText(full)) {
+    head.appendChild(
+      el(
+        "span",
+        "tool-reasoning-meta",
+        `${reasoningLineCount(full)} lines · ${reasoningCharCount(full).toLocaleString()} chars`,
+      ),
+    );
+  }
   if (long) {
     const btn = el(
       "button",
       "tool-reasoning-toggle",
-      expanded ? "Collapse" : "Show full reasoning",
+      expanded ? "Collapse" : "Show all",
     );
     btn.type = "button";
     btn.onclick = (e) => {
@@ -927,44 +1220,24 @@ function renderToolReasoningNote(parent, domId, texts) {
   note.appendChild(head);
 
   const body = el("div", "tool-reasoning-body");
-  body.textContent = full;
+  fillReasoningBody(body, full);
   note.appendChild(body);
   parent.appendChild(note);
 }
 
 function renderReasoningHistoryBlock(parent, block, domId) {
-  const full = block.texts.join("\n\n");
-  const lines = full.split("\n");
-  const long = lines.length > 4 || full.length > 280;
+  const full = resolveReasoningFullText(block);
   const expanded = ui.expandedReasoningGroups.has(domId);
-  const card = el("div", "activity-reasoning history-reasoning" + (long && !expanded ? " collapsed" : ""));
-
-  const head = el("div", "activity-reasoning-head");
-  head.appendChild(el("span", "activity-icon", "💭"));
-  head.appendChild(el("span", "activity-title", "Reasoning"));
-  if (long) {
-    const btn = el(
-      "button",
-      "activity-toggle",
-      expanded ? "Collapse" : `Expand (${lines.length} lines)`,
-    );
-    btn.type = "button";
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      e.preventDefault();
+  const card = buildReasoningCard(full, {
+    expanded,
+    onToggle: () => {
       if (ui.expandedReasoningGroups.has(domId)) ui.expandedReasoningGroups.delete(domId);
       else ui.expandedReasoningGroups.add(domId);
-      const node = parent.querySelector(`[data-block-id="${domId}"]`);
-      if (node) delete node.dataset.fp;
+      const node = parent.querySelector(`[data-block-id="${domId}"]`) || parent;
+      if (node.dataset) delete node.dataset.fp;
       scheduleRender(true);
-    };
-    head.appendChild(btn);
-  }
-  card.appendChild(head);
-
-  const body = el("div", "activity-reasoning-body");
-  body.textContent = full;
-  card.appendChild(body);
+    },
+  });
   parent.appendChild(card);
 }
 
@@ -1024,7 +1297,12 @@ function renderToolGroup(parent, block, blockId) {
   const showTimeline = actionSteps.length > 1;
 
   if (reasoning.length) {
-    renderToolReasoningNote(body, blockId, reasoning.map((s) => s.text));
+    renderToolReasoningNote(
+      body,
+      blockId,
+      reasoning.map((s) => s.text),
+      reasoning.map((s) => s.index),
+    );
   }
   if (showTimeline) {
     const timeline = el("div", "tool-timeline");
@@ -1131,7 +1409,7 @@ function blockFingerprint(block, domId) {
     return JSON.stringify({
       t: "rs",
       id: domId,
-      body: block.texts.join("\n"),
+      body: resolveReasoningFullText(block),
       expanded: ui.expandedReasoningGroups.has(domId),
     });
   }
@@ -1200,35 +1478,16 @@ function buildLiveToolCard(name, detail, pending) {
 }
 
 function buildLiveReasoningCard(text) {
-  const lines = (text || "").split("\n");
-  const long = lines.length > 4 || (text || "").length > 280;
+  const long = isReasoningLong(text);
   const expanded = !long || ui.liveReasoningExpanded;
-  const card = el("div", "activity-reasoning" + (long && !expanded ? " collapsed" : ""));
-
-  const head = el("div", "activity-reasoning-head");
-  head.appendChild(el("span", "activity-icon", "💭"));
-  head.appendChild(el("span", "activity-title", "Reasoning"));
-  if (long) {
-    const btn = el(
-      "button",
-      "activity-toggle",
-      expanded ? "Collapse" : `Expand (${lines.length} lines)`,
-    );
-    btn.type = "button";
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      e.preventDefault();
+  return buildReasoningCard(text, {
+    live: true,
+    expanded,
+    onToggle: () => {
       ui.liveReasoningExpanded = !ui.liveReasoningExpanded;
       scheduleRender(true);
-    };
-    head.appendChild(btn);
-  }
-  card.appendChild(head);
-
-  const body = el("div", "activity-reasoning-body");
-  body.textContent = text || "";
-  card.appendChild(body);
-  return card;
+    },
+  });
 }
 
 function buildLiveStreamingCard(text) {
@@ -1327,11 +1586,13 @@ function syncLiveZone(liveEl) {
     const card = liveEl.querySelector(".activity-reasoning");
     const body = card?.querySelector(".activity-reasoning-body");
     if (body) {
-      body.textContent = state.chat_reasoning;
-      const lines = state.chat_reasoning.split("\n");
-      const long = lines.length > 4 || state.chat_reasoning.length > 280;
+      paintReasoningBody(body, state.chat_reasoning);
+      updateReasoningMeta(card, state.chat_reasoning, { live: true });
+      const long = isReasoningLong(state.chat_reasoning);
       const expanded = !long || ui.liveReasoningExpanded;
       card.classList.toggle("collapsed", long && !expanded);
+      const toggle = card.querySelector(".activity-toggle");
+      if (toggle) toggle.textContent = expanded ? "Collapse" : "Expand";
       liveEl.dataset.fp = fp;
       return;
     }
@@ -1839,10 +2100,182 @@ function scheduleRender(immediate = false) {
   });
 }
 
+function resetChatUiState() {
+  ui.expandedToolLines.clear();
+  ui.expandedReasoningGroups.clear();
+  ui.expandedToolGroups.clear();
+  ui.expandedToolBatches.clear();
+  ui.liveReasoningExpanded = false;
+  ui.lastHistoryRevision = null;
+  ui.lastContextRevision = null;
+  ui.lastHistoryLineCount = -1;
+  const main = document.getElementById("main");
+  const history = main?.querySelector(".msg-history");
+  if (history) delete history.dataset.fp;
+}
+
+function shortSessionId(id) {
+  if (!id) return "";
+  return String(id).slice(0, 8);
+}
+
+function sessionDisplayLabel(sessionId, sessions) {
+  if (!sessionId) return "New session";
+  const match = (sessions || []).find((s) => s.id === sessionId);
+  const title = (match?.title || "").trim();
+  if (title) return truncateMiddle(title, 36);
+  return `Session ${shortSessionId(sessionId)}`;
+}
+
+function bindSessionMenuDismiss() {
+  if (ui.sessionMenuBound) return;
+  ui.sessionMenuBound = true;
+  document.addEventListener("click", (e) => {
+    if (!ui.sessionMenuOpen) return;
+    if (e.target.closest(".session-picker")) return;
+    ui.sessionMenuOpen = false;
+    scheduleRender(true);
+  });
+}
+
+async function fetchSessions() {
+  ui.sessionListLoading = true;
+  scheduleRender(true);
+  const res = await apiFetch("/api/chat/sessions");
+  if (res) {
+    try {
+      ui.sessionList = await res.json();
+    } catch {
+      ui.sessionList = [];
+    }
+  }
+  ui.sessionListLoading = false;
+  scheduleRender(true);
+}
+
+async function openSessionMenu() {
+  bindSessionMenuDismiss();
+  ui.sessionMenuOpen = !ui.sessionMenuOpen;
+  if (ui.sessionMenuOpen && !ui.sessionList && !ui.sessionListLoading) {
+    await fetchSessions();
+    return;
+  }
+  scheduleRender(true);
+}
+
+async function loadChatSession(id) {
+  if (!id || state?.chat_busy) return;
+  ui.sessionMenuOpen = false;
+  const res = await apiFetch(`/api/chat/sessions/${id}`, { method: "POST" });
+  if (res) {
+    resetChatUiState();
+    ui.chatStickBottom = true;
+  }
+}
+
+async function newChatSession() {
+  if (state?.chat_busy) return;
+  ui.sessionMenuOpen = false;
+  const res = await apiFetch("/api/chat/sessions/new", { method: "POST" });
+  if (res) {
+    resetChatUiState();
+    ui.chatStickBottom = true;
+  }
+}
+
+function renderSessionMenu(picker, menu) {
+  menu.replaceChildren();
+  const newBtn = el("button", "session-menu-item session-menu-new", "+ New session");
+  newBtn.type = "button";
+  newBtn.disabled = Boolean(state.chat_busy);
+  newBtn.onclick = (e) => {
+    e.stopPropagation();
+    newChatSession();
+  };
+  menu.appendChild(newBtn);
+
+  if (ui.sessionListLoading) {
+    menu.appendChild(el("div", "session-menu-status", "Loading sessions…"));
+    return;
+  }
+
+  const sessions = ui.sessionList || [];
+  if (!sessions.length) {
+    menu.appendChild(el("div", "session-menu-status", "No saved sessions yet"));
+    return;
+  }
+
+  const currentId = state.chat_session_id || null;
+  for (const sess of sessions) {
+    const item = el(
+      "button",
+      "session-menu-item" + (sess.id === currentId ? " is-active" : ""),
+    );
+    item.type = "button";
+    item.disabled = Boolean(state.chat_busy);
+    const title = (sess.title || "").trim() || `Session ${shortSessionId(sess.id)}`;
+    item.innerHTML =
+      `<span class="session-menu-title">${escapeHtml(truncateMiddle(title, 48))}</span>` +
+      `<span class="session-menu-meta">${escapeHtml(sess.created_at)} · ${escapeHtml(shortSessionId(sess.id))}</span>`;
+    item.onclick = (e) => {
+      e.stopPropagation();
+      if (sess.id !== currentId) loadChatSession(sess.id);
+      else {
+        ui.sessionMenuOpen = false;
+        scheduleRender(true);
+      }
+    };
+    menu.appendChild(item);
+  }
+}
+
+function updateSessionPicker(header) {
+  let picker = header.querySelector(".session-picker");
+  if (!picker) {
+    picker = el("div", "session-picker");
+    const count = header.querySelector(".messages-count");
+    header.insertBefore(picker, count || header.querySelector(".messages-header-actions"));
+  }
+
+  const label = sessionDisplayLabel(state.chat_session_id, ui.sessionList);
+  let trigger = picker.querySelector(".session-picker-trigger");
+  if (!trigger) {
+    trigger = el("button", "session-picker-trigger");
+    trigger.type = "button";
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      openSessionMenu();
+    };
+    picker.appendChild(trigger);
+  }
+  trigger.disabled = Boolean(state.chat_busy);
+  trigger.innerHTML =
+    `<span class="session-picker-label">${escapeHtml(label)}</span>` +
+    `<span class="session-picker-chevron" aria-hidden="true">${ui.sessionMenuOpen ? "▴" : "▾"}</span>`;
+  if (state.chat_session_id) {
+    trigger.title = state.chat_session_id;
+  } else {
+    trigger.removeAttribute("title");
+  }
+
+  let menu = picker.querySelector(".session-menu");
+  if (ui.sessionMenuOpen) {
+    if (!menu) {
+      menu = el("div", "session-menu");
+      picker.appendChild(menu);
+    }
+    renderSessionMenu(picker, menu);
+    menu.classList.remove("hidden");
+  } else if (menu) {
+    menu.classList.add("hidden");
+  }
+}
+
 function updateMessagesHeader(shell) {
   const header = shell.querySelector(".messages-header");
   if (!header) return;
 
+  updateSessionPicker(header);
   let actions = header.querySelector(".messages-header-actions");
   if (!actions) {
     actions = el("div", "messages-header-actions");
@@ -2795,6 +3228,7 @@ function applyLivePatch(patch) {
 const CHAT_PATCH_KEYS = [
   "status",
   "chat_busy",
+  "chat_session_id",
   "chat_lines",
   "chat_tool_outputs",
   "chat_history_revision",
@@ -2815,10 +3249,18 @@ const CHAT_PATCH_KEYS = [
 
 function applyChatPatch(patch) {
   if (!state) state = {};
+  const prevSession = state.chat_session_id;
   for (const key of CHAT_PATCH_KEYS) {
     if (Object.prototype.hasOwnProperty.call(patch, key)) {
       state[key] = patch[key];
     }
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(patch, "chat_session_id") &&
+    patch.chat_session_id !== prevSession
+  ) {
+    resetChatUiState();
+    ui.sessionList = null;
   }
 }
 
