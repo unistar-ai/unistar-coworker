@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::llm::LlmClient;
 use crate::github::{spawn_github, GithubHarness};
+use crate::mcp::{spawn_mcp_pool, McpPool};
 use crate::store::{LogLine, Store};
 
 pub mod approvals;
@@ -37,6 +38,7 @@ pub struct Engine {
     config: Config,
     store: Arc<dyn Store>,
     github: Arc<GithubHarness>,
+    mcp: Arc<McpPool>,
     llm: Arc<LlmClient>,
     events: broadcast::Sender<AppEvent>,
     state: SharedState,
@@ -51,6 +53,7 @@ impl Engine {
         state: SharedState,
     ) -> Self {
         let github = spawn_github(&config).await;
+        let mcp = spawn_mcp_pool(&config).await;
         let llm_latency_ms = crate::llm::ollama::probe_latency_ms(&config.llm).await;
         let llm_online = llm_latency_ms.is_some();
         let github_latency_ms = if github.is_available() {
@@ -65,11 +68,13 @@ impl Engine {
             s.llm_ok = llm_online;
             s.github_latency_ms = github_latency_ms;
             s.llm_latency_ms = llm_latency_ms;
+            s.mcp_servers = mcp.status_snapshot().await;
         }
         let engine = Self {
             config,
             store,
             github,
+            mcp,
             llm,
             events,
             state,
@@ -81,7 +86,31 @@ impl Engine {
                 "GitHub harness unavailable — set github.gh_command and GH_TOKEN",
             );
         }
+        for server in engine.mcp.status_snapshot().await {
+            if server.connected {
+                engine.emit_log(
+                    "info",
+                    format!(
+                        "mcp[{}]: connected ({} tools)",
+                        server.id, server.tool_count
+                    ),
+                );
+            } else if server.last_error.is_some() {
+                engine.emit_log(
+                    "warn",
+                    format!(
+                        "mcp[{}]: {}",
+                        server.id,
+                        server.last_error.as_deref().unwrap_or("offline")
+                    ),
+                );
+            }
+        }
         engine
+    }
+
+    pub fn mcp(&self) -> Arc<McpPool> {
+        Arc::clone(&self.mcp)
     }
 
     /// Internal log line for TUI Logs tab (+ stderr when not in TUI mode).
@@ -140,6 +169,7 @@ impl Engine {
         let msg = approvals::process_decision(
             Arc::clone(&self.store),
             Arc::clone(&self.github),
+            Arc::clone(&self.mcp),
             id,
             approve,
         )
@@ -284,7 +314,7 @@ impl Engine {
         scheduler.spawn(self);
     }
 
-    /// Re-measure GitHub harness / LLM latency (Config tab `R`).
+    /// Re-measure GitHub harness / LLM latency and reload MCP servers from disk config.
     pub async fn refresh_connectivity_probes(&self) {
         let llm_latency_ms = crate::llm::ollama::probe_latency_ms(&self.config.llm).await;
         let llm_online = llm_latency_ms.is_some();
@@ -294,10 +324,19 @@ impl Engine {
             None
         };
         let github_ok = self.github.is_available();
+        let config_path = {
+            let s = self.state.read().await;
+            s.config_path.clone()
+        };
+        if let Ok(new_cfg) = Config::load(&config_path) {
+            self.mcp.reload_from_config(new_cfg.mcp.clone()).await;
+        }
+        let mcp_servers = self.mcp.status_snapshot().await;
         let mut s = self.state.write().await;
         s.github_ok = github_ok;
         s.llm_ok = llm_online;
         s.github_latency_ms = github_latency_ms;
         s.llm_latency_ms = llm_latency_ms;
+        s.mcp_servers = mcp_servers;
     }
 }

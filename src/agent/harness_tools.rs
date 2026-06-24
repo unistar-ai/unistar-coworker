@@ -143,6 +143,7 @@ fn approval_kind_tool(kind: &ApprovalKind) -> &'static str {
         ApprovalKind::EditFile => "edit_file",
         ApprovalKind::BashRun => "bash_run",
         ApprovalKind::PythonRun => "python_run",
+        ApprovalKind::McpTool => "mcp_tool",
     }
 }
 

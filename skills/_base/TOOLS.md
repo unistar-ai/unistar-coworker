@@ -443,7 +443,7 @@ Chat tools split into two execution paths:
 
 | Path | Tools | Behavior |
 |------|-------|----------|
-| **No approval** (read-only scheduling) | `read_file`, `grep`, `glob`, `web_browser`, **`bash_run`**, **`python_run`**, **`edit_file`**, **`write_file`**, most MCP reads | May run **in parallel**; review-gated tools pass **LLM safety review** first — on REJECT they fall back to **human approval** (not an immediate error) |
+| **No approval** (read-only scheduling) | `read_file`, `grep`, `glob`, `web_fetch`, **`bash_run`**, **`python_run`**, **`edit_file`**, **`write_file`**, most MCP reads | May run **in parallel**; review-gated tools pass **LLM safety review** first — on REJECT they fall back to **human approval** (not an immediate error) |
 | **Approval required** | `ci_rerun_workflow`, `pr_post_comment`, `pr_create_backport`, `issue_add_label` | **At most one per turn**; user confirms in Approvals UI |
 
 ### `read_file` / `grep` / `glob`
@@ -471,7 +471,7 @@ Config (`chat.python`): `timeout_secs`, `max_output_chars`, `command` (default `
 
 **Use for:** parsing/transforming data, quick probes, REPL-style checks. Prefer `bash_run` for shell pipelines.
 
-### `web_browser`
+### `web_fetch`
 Fetch readable text from a URL or local HTML file under `chat.workspace`. Returns structured metadata plus body.
 
 | Param | Required | Notes |
@@ -481,7 +481,7 @@ Fetch readable text from a URL or local HTML file under `chat.workspace`. Return
 | `max_chars` | no | Body cap — default **32000** (`full`) or **8000** (`metadata`/`links`) |
 | `browser` | no | `true` = headless Chromium (JS render / anti-bot); pass on the tool call when needed |
 
-Config (`chat.web_browser`): `timeout_secs`, `max_content_chars`, `allow_localhost`, `cache_ttl_secs`, `user_agent`, `browser_timeout_secs`, `browser_wait_ms`, `chromium_path`.
+Config (`chat.web_fetch`): `timeout_secs`, `max_content_chars`, `allow_localhost`, `cache_ttl_secs`, `user_agent`, `browser_timeout_secs`, `browser_wait_ms`, `chromium_path`.
 
 **Browser mode:** Use for JS-heavy pages or sites with anti-bot challenges (e.g. zhihu question URLs). Slower (~seconds/page); requires Chrome/Chromium installed.
 

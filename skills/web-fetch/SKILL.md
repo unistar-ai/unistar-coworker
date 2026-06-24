@@ -4,7 +4,7 @@ description: "Fetch live web pages for reading — docs, APIs, SPAs, localhost p
 argument-hint: "URL and what to extract"
 intent_keywords: [web, url, http, page, site, preview, localhost, docs online, spa, javascript]
 tools:
-  - web_browser
+  - web_fetch
 ---
 
 # Web Fetch
@@ -15,9 +15,9 @@ Fetch pages the harness can render. Prefer the right tool for the job — GitHub
 
 | Goal | Tool |
 |------|------|
-| Public URL or API JSON | `web_browser` |
-| Local `dist/` or dev server | `web_browser` (`allow_localhost` for `localhost:PORT`) |
-| JS-heavy SPA / anti-bot sites | `web_browser` with **`browser: true`** |
+| Public URL or API JSON | `web_fetch` |
+| Local `dist/` or dev server | `web_fetch` (`allow_localhost` for `localhost:PORT`) |
+| JS-heavy SPA / anti-bot sites | `web_fetch` with **`browser: true`** |
 | `.tsx` / `.html` **in repo** | `read_file` |
 | GitHub PR / CI | `pr_get_*`, `ci_get_*`, or `gh` — not HTML scrape |
 | POST / custom headers | `bash_run curl` |
@@ -33,7 +33,7 @@ Fetch pages the harness can render. Prefer the right tool for the job — GitHub
 ## Rules
 
 - Do not scrape `github.com/.../pull/...` when PR tools exist.
-- Ensure `chat.web_browser.allow_localhost: true` for local dev servers.
+- Ensure `chat.web_fetch.allow_localhost: true` for local dev servers.
 
 ## Output template
 

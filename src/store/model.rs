@@ -21,6 +21,8 @@ pub enum ApprovalKind {
     EditFile,
     BashRun,
     PythonRun,
+    /// Federated MCP mutating tool (`comment_body` holds JSON `{tool_name, args}`).
+    McpTool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

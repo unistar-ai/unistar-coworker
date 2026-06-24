@@ -103,7 +103,8 @@ function setStatusError(msg) {
 const TOOL_META = {
   bash_run: { icon: "⌘", label: "Bash" },
   python_run: { icon: "🐍", label: "Python" },
-  web_browser: { icon: "🌐", label: "Browser" },
+  web_fetch: { icon: "🌐", label: "Fetch" },
+  web_browser: { icon: "🌐", label: "Fetch" },
   read_file: { icon: "📄", label: "Read" },
   write_file: { icon: "✎", label: "Write" },
   edit_file: { icon: "✎", label: "Edit" },
@@ -124,7 +125,45 @@ const TOOL_META = {
 
 function toolMeta(name) {
   const key = (name || "").toLowerCase();
-  return TOOL_META[key] || { icon: "⚙", label: name || "tool" };
+  const base = TOOL_META[key] || { icon: "⚙", label: name || "tool" };
+  const source = toolSourceLabel(name);
+  if (source) {
+    return { ...base, source: source.source, sourceDetail: source.detail };
+  }
+  return base;
+}
+
+function toolSourceLabel(toolName) {
+  if (!toolName) return null;
+  const servers = state.mcp_servers || [];
+  for (const s of servers) {
+    const prefix = s.prefix || `${s.id}_`;
+    if (toolName.startsWith(prefix)) {
+      return {
+        source: `mcp:${s.id}`,
+        detail: toolName.slice(prefix.length) || toolName,
+      };
+    }
+  }
+  if (/^(pr_|ci_|issue_|repo_|release_|notify_)/.test(toolName)) {
+    return { source: "github", detail: toolName };
+  }
+  if (
+    ["bash_run", "python_run", "read_file", "write_file", "edit_file", "grep", "glob", "web_fetch", "web_browser", "skill_load", "skill_search"].includes(
+      toolName,
+    )
+  ) {
+    return { source: "local", detail: toolName };
+  }
+  return null;
+}
+
+function appendToolSourceChip(parent, meta) {
+  if (!meta?.source) return;
+  const chip = el("span", "tool-source-chip");
+  chip.textContent = meta.sourceDetail ? `${meta.source} · ${meta.sourceDetail}` : meta.source;
+  chip.title = `Tool backend: ${meta.source}`;
+  parent.appendChild(chip);
 }
 
 function parseToolArgsString(args) {
@@ -179,6 +218,7 @@ function buildToolCardHeader(meta, toolName, args, status, { pending = false, ms
   if (toolName && displayTitle !== toolName) {
     titleWrap.appendChild(el("span", "tool-card-fn", toolName));
   }
+  appendToolSourceChip(titleWrap, meta);
   if (args) {
     appendToolArgChips(titleWrap, args);
   } else if (status === "running" || status === "pending") {
@@ -1355,6 +1395,7 @@ function renderCompactTool(parent, block, meta, blockId) {
   chip.appendChild(el("span", "tool-chip-icon tool-glyph", meta.icon));
   const main = el("span", "tool-chip-main");
   main.appendChild(el("span", "tool-chip-name", meta.label));
+  appendToolSourceChip(main, meta);
   if (block.args) {
     appendToolArgChips(main, block.args);
   }
@@ -2968,6 +3009,21 @@ function renderConfig(main) {
     <dt>Probe</dt><dd class="${state.github_ok ? "status-ok" : "status-err"}">${state.github_ok ? "ok" : "fail"}${state.github_latency_ms != null ? ` (${state.github_latency_ms}ms)` : ""}</dd>
   </dl>`;
   grid.appendChild(gh);
+
+  const mcpCard = el("div", "card");
+  const mcpRows = (state.mcp_servers || [])
+    .map((s) => {
+      const status = s.connected
+        ? `ok (${s.tool_count || 0} tools${s.last_rpc_ms != null ? `, ${s.last_rpc_ms}ms` : ""})`
+        : s.last_error
+          ? `err (${escapeHtml(s.last_error)})`
+          : "offline";
+      const cls = s.connected ? "status-ok" : s.last_error ? "status-err" : "";
+      return `<dt>mcp[${escapeHtml(s.id)}]</dt><dd class="${cls}">${escapeHtml(status)}</dd>`;
+    })
+    .join("");
+  mcpCard.innerHTML = `<h3>MCP</h3><dl>${mcpRows || "<dt>—</dt><dd>no servers configured</dd>"}</dl>`;
+  grid.appendChild(mcpCard);
 
   const actions = el("div", "card");
   actions.innerHTML = "<h3>Actions</h3>";

@@ -1,4 +1,4 @@
-//! Headless Chromium fetch for `web_browser` when `browser: true`.
+//! Headless Chromium fetch for `web_fetch` when `browser: true`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -8,12 +8,12 @@ use chromiumoxide::detection::{default_executable, DetectionOptions};
 use futures_util::StreamExt;
 
 use crate::agent::harness_errors::{self, workflow_error, ErrorEnvelope};
-use crate::agent::web_browser_tool::{FetchedContent, WEB_BROWSER_TOOL};
-use crate::config::WebBrowserToolConfig;
+use crate::agent::web_fetch_tool::{FetchedContent, WEB_FETCH_TOOL};
+use crate::config::WebFetchToolConfig;
 use crate::error::Result;
 
 pub async fn fetch_page_with_chromium(
-    config: &WebBrowserToolConfig,
+    config: &WebFetchToolConfig,
     url: &str,
     source_label: &str,
 ) -> Result<FetchedContent> {
@@ -22,7 +22,7 @@ pub async fn fetch_page_with_chromium(
 }
 
 async fn fetch_page_inner(
-    config: &WebBrowserToolConfig,
+    config: &WebFetchToolConfig,
     url: &str,
     source_label: &str,
     timeout: Duration,
@@ -113,7 +113,7 @@ async fn shutdown_browser(browser: &mut Browser, pump: &mut tokio::task::JoinHan
     }
 }
 
-fn resolve_chromium_path(config: &WebBrowserToolConfig) -> Option<std::path::PathBuf> {
+fn resolve_chromium_path(config: &WebFetchToolConfig) -> Option<std::path::PathBuf> {
     if let Some(path) = config
         .chromium_path
         .as_deref()
@@ -127,7 +127,7 @@ fn resolve_chromium_path(config: &WebBrowserToolConfig) -> Option<std::path::Pat
 
 async fn wait_for_readable_body(
     page: &chromiumoxide::Page,
-    config: &WebBrowserToolConfig,
+    config: &WebFetchToolConfig,
 ) -> Result<()> {
     let max_polls = 10u32;
     let poll_ms = config.browser_wait_ms.clamp(500, 2_000);
@@ -158,7 +158,7 @@ async fn wait_for_readable_body(
 pub fn file_url_for_path(path: &Path) -> Result<String> {
     let canonical = path
         .canonicalize()
-        .map_err(|e| harness_errors::web_browser_validation_error(
+        .map_err(|e| harness_errors::web_fetch_validation_error(
             "WEB_LOCAL_PATH",
             format!("cannot resolve path for browser: {e}"),
             "Use a workspace-relative HTML path without `..`",
@@ -166,7 +166,7 @@ pub fn file_url_for_path(path: &Path) -> Result<String> {
     Ok(format!("file://{}", canonical.display()))
 }
 
-fn effective_user_agent(config: &WebBrowserToolConfig) -> String {
+fn effective_user_agent(config: &WebFetchToolConfig) -> String {
     let ua = config.user_agent.trim();
     // Plain HTTP uses the agent UA; headless Chrome should look like a real browser.
     if ua.is_empty() || ua.starts_with("unistar-coworker/") {
@@ -178,16 +178,16 @@ fn effective_user_agent(config: &WebBrowserToolConfig) -> String {
 
 fn browser_launch_err(e: impl std::fmt::Display) -> crate::error::CoworkerError {
     workflow_error(ErrorEnvelope {
-        code: "WEB_BROWSER_LAUNCH_FAILED".into(),
-        tool_name: WEB_BROWSER_TOOL.into(),
+        code: "WEB_FETCH_LAUNCH_FAILED".into(),
+        tool_name: WEB_FETCH_TOOL.into(),
         what: "Failed to launch headless Chromium".into(),
         why: e.to_string(),
         try_steps: vec![
             "Install Google Chrome or Chromium".into(),
-            "Set chat.web_browser.chromium_path to the chrome/chromium binary".into(),
+            "Set chat.web_fetch.chromium_path to the chrome/chromium binary".into(),
             "On macOS: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
         ],
-        example: Some(harness_errors::web_browser_tool_example(
+        example: Some(harness_errors::web_fetch_tool_example(
             "https://www.zhihu.com/question/1",
             "full",
             true,
@@ -198,30 +198,30 @@ fn browser_launch_err(e: impl std::fmt::Display) -> crate::error::CoworkerError 
 
 fn browser_nav_err(url: &str, err: &str) -> crate::error::CoworkerError {
     workflow_error(ErrorEnvelope {
-        code: "WEB_BROWSER_NAV_FAILED".into(),
-        tool_name: WEB_BROWSER_TOOL.into(),
+        code: "WEB_FETCH_NAV_FAILED".into(),
+        tool_name: WEB_FETCH_TOOL.into(),
         what: "Headless browser failed to load the page".into(),
         why: err.to_string(),
         try_steps: vec![
-            "Increase chat.web_browser.browser_timeout_secs or browser_wait_ms".into(),
+            "Increase chat.web_fetch.browser_timeout_secs or browser_wait_ms".into(),
             "Retry with mode=metadata first".into(),
         ],
-        example: Some(harness_errors::web_browser_tool_example(url, "full", true)),
+        example: Some(harness_errors::web_fetch_tool_example(url, "full", true)),
         detail: Some(format!("url: {url}")),
     })
 }
 
 fn browser_timeout_envelope(url: &str, secs: u64) -> ErrorEnvelope {
     ErrorEnvelope {
-        code: "WEB_BROWSER_TIMEOUT".into(),
-        tool_name: WEB_BROWSER_TOOL.into(),
+        code: "WEB_FETCH_TIMEOUT".into(),
+        tool_name: WEB_FETCH_TOOL.into(),
         what: "Headless browser timed out".into(),
         why: format!("Exceeded {secs}s while loading or rendering"),
         try_steps: vec![
-            "Increase chat.web_browser.browser_timeout_secs".into(),
-            "Increase chat.web_browser.browser_wait_ms for slow JS challenges".into(),
+            "Increase chat.web_fetch.browser_timeout_secs".into(),
+            "Increase chat.web_fetch.browser_wait_ms for slow JS challenges".into(),
         ],
-        example: Some(harness_errors::web_browser_tool_example(url, "metadata", true)),
+        example: Some(harness_errors::web_fetch_tool_example(url, "metadata", true)),
         detail: Some(format!("url: {url}")),
     }
 }

@@ -44,7 +44,7 @@ const PRELOAD_NATIVE_TOOLS: &[&str] = &[
     "python_run",
     "edit_file",
     "write_file",
-    "web_browser",
+    "web_fetch",
 ];
 const MUTATING_TOOLS: &[&str] = &[
     "ci_rerun_workflow",
@@ -381,7 +381,7 @@ const TOOLS: &[ToolSpec] = &[
         optional: &["cwd"],
     },
     ToolSpec {
-        name: "web_browser",
+        name: "web_fetch",
         blurb: "Fetch URL or local HTML — HTTP by default; pass browser:true for headless Chromium (JS/anti-bot)",
         required: &["url"],
         optional: &["mode", "max_chars", "browser"],
@@ -1664,7 +1664,7 @@ mod tests {
         assert!(is_lazy_native_tool("python_run"));
         assert!(is_lazy_native_tool("edit_file"));
         assert!(is_lazy_native_tool("write_file"));
-        assert!(is_lazy_native_tool("web_browser"));
+        assert!(is_lazy_native_tool("web_fetch"));
         assert!(!is_lazy_native_tool("tool_describe"));
         assert!(!is_lazy_native_tool("pr_post_comment"));
         assert!(!is_lazy_native_tool("pr_get_overview"));

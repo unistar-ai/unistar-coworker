@@ -7,7 +7,7 @@ use crate::agent::chat_discovery;
 use crate::error::Result;
 
 use super::skill::{
-    load_agent, load_skills, load_skills_from_refs, SkillSpec,
+    load_prompt, load_skills, load_skills_from_refs, SkillSpec,
 };
 
 /// All technique skills available to a chat session.
@@ -24,18 +24,18 @@ impl SkillRegistry {
 }
 
 impl SkillRegistry {
-    /// Load every skill referenced by the chat agent (or explicit config paths).
-    pub fn load_for_chat(agent_path: &str, skill_paths: &[PathBuf]) -> Result<Self> {
-        let agent_path = if agent_path.is_empty() {
-            super::prompt::default_chat_agent_path()
+    /// Load every skill referenced by the chat system prompt (or explicit config paths).
+    pub fn load_for_chat(prompt_path: &str, skill_paths: &[PathBuf]) -> Result<Self> {
+        let prompt_path = if prompt_path.is_empty() {
+            super::prompt::default_chat_prompt_path()
         } else {
-            PathBuf::from(agent_path)
+            PathBuf::from(prompt_path)
         };
-        let agent = load_agent(&agent_path)?;
+        let chat_prompt = load_prompt(&prompt_path)?;
         let skills = if !skill_paths.is_empty() {
             load_skills(skill_paths)?
-        } else if !agent.skill_refs.is_empty() {
-            load_skills_from_refs(&agent.skill_refs)?
+        } else if !chat_prompt.skill_refs.is_empty() {
+            load_skills_from_refs(&chat_prompt.skill_refs)?
         } else {
             load_skills(&super::prompt::default_chat_skill_paths())?
         };

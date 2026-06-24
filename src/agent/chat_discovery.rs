@@ -142,6 +142,14 @@ impl ChatDiscoveryState {
         }
     }
 
+    /// Warm federated MCP tool names when present in the registry.
+    pub async fn warm_tool_from_registry(&mut self, name: &str, mcp: &crate::mcp::McpPool) {
+        self.warm_tool(name);
+        if !self.warmed_tools.contains(name) && mcp.is_mcp_tool_async(name).await {
+            self.warmed_tools.insert(name.to_string());
+        }
+    }
+
     pub fn warm_from_tool_call_args(&mut self, tool_name: &str, args: &serde_json::Value) {
         if tool_name == "tool_call" {
             if let Some(inner) = args.get("name").and_then(|v| v.as_str()) {

@@ -6,6 +6,7 @@ mod error;
 mod llm;
 mod logging;
 mod github;
+mod mcp;
 mod output;
 mod store;
 mod terminal;
@@ -78,11 +79,6 @@ enum Commands {
     Store {
         #[command(subcommand)]
         cmd: StoreCommands,
-    },
-    /// List chat agent spec (agents/chat/AGENT.md)
-    Agents {
-        #[command(subcommand)]
-        cmd: CatalogCmd,
     },
     /// List built-in batch workflows (Rust registry)
     Workflows {
@@ -166,9 +162,6 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Store { cmd }) => {
             run_store_cmd(config, cmd).await?;
-        }
-        Some(Commands::Agents { cmd }) => {
-            run_catalog_list("agents", "AGENT.md", cmd).await?;
         }
         Some(Commands::Workflows { cmd }) => {
             run_workflows_list(cmd).await?;

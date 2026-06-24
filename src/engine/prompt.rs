@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::config::ChatToolMode;
 use crate::error::Result;
 
-use super::skill::{load_skills, load_skills_from_refs, skill_body_for_prompt, AgentSpec, SkillSpec};
+use super::skill::{load_skills, load_skills_from_refs, skill_body_for_prompt, PromptSpec, SkillSpec};
 use super::skill_routing::SkillRegistry;
 
 /// Classify output contract — harness field limits (not domain technique).
@@ -24,7 +24,7 @@ pub const SESSION_CONTEXT_PREFIX: &str = "[session context]";
 
 #[derive(Debug, Clone)]
 pub struct PromptBundle {
-    pub agent: AgentSpec,
+    pub chat_prompt: PromptSpec,
     pub skills: Vec<SkillSpec>,
     /// Lazy chat: all skill names + descriptions (model picks `skill_load` from this list).
     pub skill_catalog: String,
@@ -59,7 +59,7 @@ fn join_skills(skills: &[SkillSpec]) -> String {
 }
 
 pub fn compose_static_system_prompt(bundle: &PromptBundle) -> String {
-    let mut parts = vec![bundle.agent.body.clone()];
+    let mut parts = vec![bundle.chat_prompt.body.clone()];
     if !bundle.skill_catalog.trim().is_empty() {
         parts.push(format!(
             "## Available skills\n\n{}",
@@ -76,7 +76,7 @@ pub fn compose_static_system_prompt(bundle: &PromptBundle) -> String {
     parts.join("\n\n")
 }
 
-/// Chat system prompt — agent body, skill catalog, techniques; native mode adds a one-line hint.
+/// Chat system prompt — static body from `prompts/`, skill catalog, techniques; native mode adds a one-line hint.
 pub fn compose_chat_system_prompt(bundle: &PromptBundle, tool_mode: ChatToolMode) -> String {
     let mut out = compose_static_system_prompt(bundle);
     if matches!(tool_mode, ChatToolMode::Native) {
@@ -120,8 +120,8 @@ pub fn compose_classify_prompt(playbook_prefix: &str, skills: &[SkillSpec]) -> S
     parts.join("\n\n")
 }
 
-pub fn default_chat_agent_path() -> PathBuf {
-    PathBuf::from("agents/chat/AGENT.md")
+pub fn default_chat_prompt_path() -> PathBuf {
+    PathBuf::from("prompts/chat.md")
 }
 
 pub fn default_chat_skill_paths() -> Vec<PathBuf> {
@@ -132,29 +132,29 @@ pub fn default_chat_skill_paths() -> Vec<PathBuf> {
 }
 
 pub fn load_chat_prompt_bundle_for_session(
-    agent_path: &str,
+    prompt_path: &str,
     skill_paths: &[PathBuf],
     tools_doc: String,
     runtime_context: String,
     user_message: &str,
     lazy_skills: bool,
 ) -> Result<(PromptBundle, SkillRegistry)> {
-    let registry = SkillRegistry::load_for_chat(agent_path, skill_paths)?;
+    let registry = SkillRegistry::load_for_chat(prompt_path, skill_paths)?;
     let skills = registry.select_for_message(user_message, lazy_skills);
     let skill_catalog = if lazy_skills {
         registry.format_catalog()
     } else {
         String::new()
     };
-    let agent_path = if agent_path.is_empty() {
-        default_chat_agent_path()
+    let prompt_path = if prompt_path.is_empty() {
+        default_chat_prompt_path()
     } else {
-        PathBuf::from(agent_path)
+        PathBuf::from(prompt_path)
     };
-    let agent = super::skill::load_agent(&agent_path)?;
+    let chat_prompt = super::skill::load_prompt(&prompt_path)?;
     Ok((
         PromptBundle {
-            agent,
+            chat_prompt,
             skills,
             skill_catalog,
             tools_doc,
@@ -202,15 +202,15 @@ pub fn load_classify_skills_from_refs(refs: &[String]) -> Result<Vec<SkillSpec>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::skill::{AgentSpec, SkillSpec};
+    use crate::engine::skill::{PromptSpec, SkillSpec};
 
     #[test]
     fn compose_static_system_prompt_omits_runtime_context() {
         let bundle = PromptBundle {
-            agent: AgentSpec {
+            chat_prompt: PromptSpec {
                 name: "chat".into(),
                 description: String::new(),
-                body: "Agent body".into(),
+                body: "Prompt body".into(),
                 skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
@@ -227,7 +227,7 @@ mod tests {
             runtime_context: "repos: changed-store".into(),
         };
         let static_out = compose_static_system_prompt(&bundle);
-        assert!(static_out.contains("Agent body"));
+        assert!(static_out.contains("Prompt body"));
         assert!(!static_out.contains("changed-store"));
         assert!(!static_out.contains("## Context"));
 
@@ -246,10 +246,10 @@ mod tests {
     #[test]
     fn compose_system_prompt_includes_sections() {
         let bundle = PromptBundle {
-            agent: AgentSpec {
+            chat_prompt: PromptSpec {
                 name: "chat".into(),
                 description: String::new(),
-                body: "Agent body".into(),
+                body: "Prompt body".into(),
                 skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
@@ -279,7 +279,7 @@ mod tests {
             runtime_context: "repos: x".into(),
         };
         let out = compose_system_prompt(&bundle);
-        assert!(out.contains("Agent body"));
+        assert!(out.contains("Prompt body"));
         assert!(out.contains("## Techniques"));
         assert!(out.contains("Be concise"));
         assert!(out.contains("## Tools"));
@@ -292,10 +292,10 @@ mod tests {
     #[test]
     fn compose_system_prompt_omits_empty_tools_section() {
         let bundle = PromptBundle {
-            agent: AgentSpec {
+            chat_prompt: PromptSpec {
                 name: "chat".into(),
                 description: String::new(),
-                body: "Agent body".into(),
+                body: "Prompt body".into(),
                 skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,

@@ -15,7 +15,7 @@ use crate::agent::file_edit_tool;
 use crate::agent::python_tool;
 use crate::agent::review_gate::{format_review_rejection_description, ReviewGateOutcome};
 use crate::agent::harness_errors::agent_validation_error;
-use crate::agent::web_browser_tool;
+use crate::agent::web_fetch_tool;
 use crate::agent::budget::TokenBudget;
 use crate::agent::chat_discovery::ChatDiscoveryState;
 use crate::agent::context::{
@@ -52,6 +52,7 @@ use crate::llm::chat::{
 use crate::llm::{ChatAgentAction, ChatStepOptions, LlmClient, LlmTurnMessage};
 use crate::github::helpers::{gh_tool, gh_tool_with_retry, read_resource};
 use crate::github::{effective_chat_tool_mode, GithubHarness};
+use crate::mcp::McpPool;
 use tokio::sync::Mutex;
 use crate::store::{Approval, ApprovalKind, ApprovalStatus, ChatMessage, ChatRole, Store};
 
@@ -711,6 +712,7 @@ pub async fn resume_chat_after_approval(
     config: &Config,
     store: Arc<dyn Store>,
     github: Arc<GithubHarness>,
+    mcp: Arc<McpPool>,
     llm: Arc<LlmClient>,
     session_id: Uuid,
     resume: ResumeChatAfterApproval,
@@ -721,6 +723,7 @@ pub async fn resume_chat_after_approval(
         config,
         store,
         github,
+        mcp,
         llm,
         ChatTurnInput {
             session_id: Some(session_id),
@@ -737,6 +740,7 @@ pub async fn run_chat_turn(
     config: &Config,
     store: Arc<dyn Store>,
     github: Arc<GithubHarness>,
+    mcp: Arc<McpPool>,
     llm: Arc<LlmClient>,
     input: ChatTurnInput,
 ) -> Result<ChatTurnResult> {
@@ -816,7 +820,7 @@ pub async fn run_chat_turn(
     let lazy_skills = matches!(tool_mode, ChatToolMode::Auto | ChatToolMode::Lazy);
     let tools_doc = String::new();
     let (prompt_bundle, skill_registry) = load_chat_prompt_bundle_for_session(
-        &config.chat.agent,
+        &config.chat.prompt,
         &skill_paths,
         tools_doc,
         String::new(),
@@ -858,6 +862,11 @@ pub async fn run_chat_turn(
         &prompt_bundle.skills,
     );
     discovery_state.rehydrate_from_tool_history(&history);
+    for tool in crate::engine::SkillRegistry::collect_tool_refs(&prompt_bundle.skills) {
+        discovery_state
+            .warm_tool_from_registry(&tool, mcp.as_ref())
+            .await;
+    }
     let discovery = Arc::new(Mutex::new(discovery_state));
     if lazy_skills {
         let flow = format_skill_bootstrap_flow(&prompt_bundle.skills);
@@ -1328,15 +1337,21 @@ from tool results already in context.";
 
                 push_native_assistant_tool_calls(&mut llm_messages, &step);
 
-                let (readonly, mutating): (Vec<_>, Vec<_>) = prepared
-                    .into_iter()
-                    .partition(|call| !is_mutating_tool(&call.name));
+                let (mut readonly, mut mutating): (Vec<_>, Vec<_>) = (Vec::new(), Vec::new());
+                for call in prepared {
+                    if is_mutating_tool(&call.name) || mcp.is_mcp_mutating(&call.name).await {
+                        mutating.push(call);
+                    } else {
+                        readonly.push(call);
+                    }
+                }
 
                 if !readonly.is_empty() {
                     tools_used += readonly.len() as u32;
                     let outcomes = execute_readonly_tools_parallel(
                         store.clone(),
                         github.clone(),
+                        mcp.clone(),
                         discovery.clone(),
                         cancel.clone(),
                         progress.clone(),
@@ -1349,6 +1364,7 @@ from tool results already in context.";
                             llm: Arc::clone(&llm),
                             config: Arc::clone(&config_arc),
                             progress: progress.clone(),
+                            cancel: cancel.clone(),
                         },
                         readonly,
                     )
@@ -1369,6 +1385,7 @@ from tool results already in context.";
                                 config,
                                 &store,
                                 &github,
+                                &mcp,
                                 &progress,
                                 &mut llm_messages,
                                 &mut tool_calls,
@@ -1468,7 +1485,7 @@ from tool results already in context.";
                     if !turn_ctx.pending_warm_tools.is_empty() {
                         let mut state = discovery.lock().await;
                         for name in turn_ctx.pending_warm_tools.drain(..) {
-                            state.warm_tool(&name);
+                            state.warm_tool_from_registry(&name, mcp.as_ref()).await;
                         }
                     }
                     emit_context_snapshot(
@@ -1501,6 +1518,7 @@ from tool results already in context.";
                             config,
                             store_arc: &store,
                             github: &github,
+                            mcp: &mcp,
                             progress: &progress,
                             llm_messages: &mut llm_messages,
                             tool_calls: &mut tool_calls,
@@ -2818,11 +2836,13 @@ struct ReadonlyToolContext<'a> {
     llm: Arc<LlmClient>,
     config: Arc<Config>,
     progress: Option<broadcast::Sender<AppEvent>>,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 async fn execute_readonly_tools_parallel(
     store: Arc<dyn Store>,
     github: Arc<GithubHarness>,
+    mcp: Arc<McpPool>,
     discovery: Arc<Mutex<ChatDiscoveryState>>,
     cancel: Option<Arc<AtomicBool>>,
     progress: Option<broadcast::Sender<AppEvent>>,
@@ -2832,6 +2852,7 @@ async fn execute_readonly_tools_parallel(
     let futures = calls.into_iter().map(|call| {
         let store = Arc::clone(&store);
         let github = Arc::clone(&github);
+        let mcp = Arc::clone(&mcp);
         let discovery = Arc::clone(&discovery);
         let cancel = cancel.clone();
         let progress = progress.clone();
@@ -2868,6 +2889,7 @@ async fn execute_readonly_tools_parallel(
                 execute_readonly_tool_with_heartbeat(
                     store,
                     github,
+                    mcp,
                     &discovery,
                     &progress,
                     ReadonlyToolContext {
@@ -2879,6 +2901,7 @@ async fn execute_readonly_tools_parallel(
                         llm,
                         config,
                         progress: progress_ctx,
+                        cancel: cancel.clone(),
                     },
                     &call.name,
                     call.args.clone(),
@@ -3021,6 +3044,7 @@ struct MutatingToolContext<'a> {
     config: &'a Config,
     store_arc: &'a Arc<dyn Store>,
     github: &'a Arc<GithubHarness>,
+    mcp: &'a Arc<McpPool>,
     progress: &'a Option<broadcast::Sender<AppEvent>>,
     llm_messages: &'a mut Vec<LlmTurnMessage>,
     tool_calls: &'a mut Vec<ToolCallSummary>,
@@ -3038,9 +3062,16 @@ async fn handle_mutating_tool_call(
     let tool_name = call.name.as_str();
     let tool_args = &call.args;
     let queued =
-        queue_mutating_approval(ctx.store, ctx.workspace, tool_name, tool_args).await?;
-    if let Some(detail) =
-        maybe_auto_approve_mutations(ctx.config, ctx.store_arc, ctx.github, &queued).await?
+        queue_mutating_approval(ctx.store, ctx.workspace, ctx.mcp, tool_name, tool_args).await?;
+    if let Some(detail) = maybe_auto_approve_mutations(
+        ctx.config,
+        ctx.store_arc,
+        ctx.github,
+        ctx.mcp,
+        tool_name,
+        &queued,
+    )
+    .await?
     {
         if file_tools::is_mutating_file_tool(tool_name) {
             record_session_file_edit(ctx.session, tool_name, tool_args, &detail);
@@ -3217,6 +3248,7 @@ async fn handle_llm_review_rejection(
     config: &Config,
     store_arc: &Arc<dyn Store>,
     github: &Arc<GithubHarness>,
+    mcp: &Arc<McpPool>,
     progress: &Option<broadcast::Sender<AppEvent>>,
     llm_messages: &mut Vec<LlmTurnMessage>,
     tool_calls: &mut Vec<ToolCallSummary>,
@@ -3232,8 +3264,15 @@ async fn handle_llm_review_rejection(
     }
     let queued =
         queue_review_fallback_approval(store, workspace, tool_name, tool_args, review).await?;
-    if let Some(detail) =
-        maybe_auto_approve_mutations(config, store_arc, github, &queued).await?
+    if let Some(detail) = maybe_auto_approve_mutations(
+        config,
+        store_arc,
+        github,
+        mcp,
+        tool_name,
+        &queued,
+    )
+    .await?
     {
         emit_progress(
             progress,
@@ -3369,6 +3408,7 @@ enum LlmReviewRejectionOutcome {
 async fn execute_readonly_tool_with_heartbeat(
     store: Arc<dyn Store>,
     github: Arc<GithubHarness>,
+    mcp: Arc<McpPool>,
     discovery: &Arc<Mutex<ChatDiscoveryState>>,
     progress: &Option<broadcast::Sender<AppEvent>>,
     ctx: ReadonlyToolContext<'_>,
@@ -3382,6 +3422,7 @@ async fn execute_readonly_tool_with_heartbeat(
     let mut tool_fut = Box::pin(execute_readonly_tool(
         store,
         github,
+        mcp,
         &discovery,
         ctx,
         tool_name,
@@ -3456,7 +3497,7 @@ pub(crate) fn format_tool_progress_detail(
                 .unwrap_or("?");
             format!("{lines}, {secs}s")
         }
-        "web_browser" => {
+        "web_fetch" | "web_browser" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("?");
             format!("{url}, {secs}s")
         }
@@ -3467,6 +3508,7 @@ pub(crate) fn format_tool_progress_detail(
 async fn execute_readonly_tool(
     store: Arc<dyn Store>,
     github: Arc<GithubHarness>,
+    mcp: Arc<McpPool>,
     discovery: &Arc<Mutex<ChatDiscoveryState>>,
     ctx: ReadonlyToolContext<'_>,
     tool_name: &str,
@@ -3521,10 +3563,10 @@ async fn execute_readonly_tool(
             .await?,
         ));
     }
-    if web_browser_tool::is_web_browser_tool(tool_name) {
+    if web_fetch_tool::is_web_fetch_tool(tool_name) {
         return Ok(ReadonlyToolExecuteResult::Output(
-            web_browser_tool::execute_web_browser_tool(
-                &ctx.config.chat.web_browser,
+            web_fetch_tool::execute_web_fetch_tool(
+                &ctx.config.chat.web_fetch,
                 ctx.workspace,
                 &tool_args,
             )
@@ -3538,17 +3580,73 @@ async fn execute_readonly_tool(
             &tool_args,
         )?));
     }
-    Ok(ReadonlyToolExecuteResult::Output(match tool_name {
-        "tool_list" => {
-            if let Some(cached) = crate::agent::hooks::tool_list_cached_response(
-                &*discovery.lock().await,
-            ) {
-                return Ok(ReadonlyToolExecuteResult::Output(cached));
-            }
-            let text = gh_tool(github.as_ref(), "tool_list", json!({})).await?;
-            discovery.lock().await.store_tool_list(text.clone());
-            text
+    if tool_name == "tool_list" {
+        if let Some(cached) =
+            crate::agent::hooks::tool_list_cached_response(&*discovery.lock().await)
+        {
+            return Ok(ReadonlyToolExecuteResult::Output(cached));
         }
+        let text = if mcp.has_servers() {
+            crate::mcp::federated_tool_list(mcp.as_ref()).await
+        } else {
+            gh_tool(github.as_ref(), "tool_list", json!({})).await?
+        };
+        discovery.lock().await.store_tool_list(text.clone());
+        return Ok(ReadonlyToolExecuteResult::Output(text));
+    }
+    if tool_name == "tool_search" {
+        let query = tool_args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                agent_validation_error(
+                    "tool_search",
+                    "TOOL_MISSING_ARG",
+                    "tool_search needs query",
+                    "Pass a short tool name keyword",
+                )
+            })?;
+        let limit = tool_args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5) as usize;
+        let text = if mcp.has_servers() {
+            crate::mcp::federated_tool_search(mcp.as_ref(), query, limit).await?
+        } else {
+            let mut args = json!({ "query": query });
+            if let Some(limit) = tool_args.get("limit") {
+                args["limit"] = limit.clone();
+            }
+            gh_tool(github.as_ref(), "tool_search", args).await?
+        };
+        return Ok(ReadonlyToolExecuteResult::Output(text));
+    }
+    if tool_name == "tool_describe" {
+        let name = tool_args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                agent_validation_error(
+                    "tool_describe",
+                    "TOOL_MISSING_ARG",
+                    "tool_describe needs name",
+                    "Pass exact tool name from tool_search",
+                )
+            })?;
+        let text = if mcp.has_servers() {
+            crate::mcp::federated_tool_describe(mcp.as_ref(), name).await?
+        } else {
+            gh_tool(github.as_ref(), "tool_describe", json!({ "name": name })).await?
+        };
+        return Ok(ReadonlyToolExecuteResult::Output(text));
+    }
+    if mcp.is_mcp_tool_async(tool_name).await {
+        return Ok(ReadonlyToolExecuteResult::Output(
+            mcp.call_global_tool(tool_name, tool_args, ctx.cancel.clone())
+                .await?,
+        ));
+    }
+    Ok(ReadonlyToolExecuteResult::Output(match tool_name {
         "tool_list_category" => {
             let category = tool_args
                 .get("category")
@@ -3563,38 +3661,6 @@ async fn execute_readonly_tool(
                 })?;
             gh_tool(github.as_ref(), "tool_list_category", json!({ "category": category })).await?
         }
-        "tool_search" => {
-            let query = tool_args
-                .get("query")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    agent_validation_error(
-                        "tool_search",
-                        "TOOL_MISSING_ARG",
-                        "tool_search needs query",
-                        "Pass a short tool name keyword",
-                    )
-                })?;
-            let mut args = json!({ "query": query });
-            if let Some(limit) = tool_args.get("limit") {
-                args["limit"] = limit.clone();
-            }
-            gh_tool(github.as_ref(), "tool_search", args).await?
-        }
-        "tool_describe" => {
-            let name = tool_args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    agent_validation_error(
-                        "tool_describe",
-                        "TOOL_MISSING_ARG",
-                        "tool_describe needs name",
-                        "Pass exact tool name from tool_search",
-                    )
-                })?;
-            gh_tool(github.as_ref(), "tool_describe", json!({ "name": name })).await?
-        }
         "resource_read" => {
             let uri = tool_args
                 .get("uri")
@@ -3604,10 +3670,15 @@ async fn execute_readonly_tool(
                         "resource_read",
                         "TOOL_MISSING_ARG",
                         "resource_read needs uri",
-                        "Use pr:// or ci:// URI from tool_describe",
+                        "Use github://, pr://, or mcp+{server}:// URI from tool_describe",
                     )
                 })?;
-            read_resource(github.as_ref(), uri).await?
+            if uri.starts_with("mcp+") {
+                mcp.read_federated_resource(uri, ctx.cancel.clone())
+                    .await?
+            } else {
+                read_resource(github.as_ref(), uri).await?
+            }
         }
         "skill_load" => {
             let name = tool_args
@@ -3635,6 +3706,11 @@ async fn execute_readonly_tool(
                     )
                 })?;
             state.warm_skill_tools(&skill);
+            for tool in &skill.tool_refs {
+                state
+                    .warm_tool_from_registry(tool, mcp.as_ref())
+                    .await;
+            }
             SkillRegistry::format_skill_load(&skill)
         }
         "tool_call" => {
@@ -3655,7 +3731,12 @@ async fn execute_readonly_tool(
                     "{name} is mutating — use approval action"
                 )));
             }
-            gh_tool(github.as_ref(), "tool_call", json!({ "name": name, "args": args })).await?
+            if mcp.is_mcp_tool_async(name).await {
+                mcp.call_global_tool(name, args, ctx.cancel.clone())
+                    .await?
+            } else {
+                gh_tool(github.as_ref(), "tool_call", json!({ "name": name, "args": args })).await?
+            }
         }
         other if is_mutating_tool(other) => {
             return Err(CoworkerError::Workflow(format!(
@@ -3668,10 +3749,61 @@ async fn execute_readonly_tool(
 
 async fn queue_mutating_approval(
     store: &dyn Store,
-    _workspace: &std::path::Path,
+    workspace: &std::path::Path,
+    mcp: &Arc<McpPool>,
     tool_name: &str,
     args: &Value,
 ) -> Result<QueuedApproval> {
+    if mcp.is_mcp_mutating(tool_name).await {
+        let entry = mcp
+            .resolve_entry(tool_name)
+            .await
+            .ok_or_else(|| CoworkerError::Workflow(format!("unknown MCP tool {tool_name:?}")))?;
+        let payload = serde_json::to_string(&json!({
+            "tool_name": tool_name,
+            "args": args,
+        }))
+        .map_err(|e| CoworkerError::Workflow(format!("mcp approval payload: {e}")))?;
+        let workspace_repo = workspace.to_string_lossy().into_owned();
+        let description = format!(
+            "Chat: MCP {} on mcp[{}]",
+            entry.remote_name, entry.server_id
+        );
+        let approval = Approval {
+            id: Uuid::new_v4(),
+            kind: ApprovalKind::McpTool,
+            repo: workspace_repo,
+            pr_number: None,
+            run_id: None,
+            target_branch: None,
+            incident_id: None,
+            description,
+            status: ApprovalStatus::Pending,
+            created_at: Utc::now(),
+            decided_at: None,
+            comment_body: Some(payload),
+            issue_number: None,
+            label: None,
+        };
+        store.push_approval(&approval).await?;
+        append_audit(
+            store,
+            "info",
+            "chat",
+            &format!("queued approval {} ({:?})", approval.id, approval.kind),
+        )
+        .await;
+        return Ok(QueuedApproval {
+            id: approval.id,
+            tool_name: tool_name.to_string(),
+            description: approval.description.clone(),
+            summary: format!(
+                "Approval {} queued for `{tool_name}` — confirm in the approval popup.",
+                approval.id
+            ),
+        });
+    }
+
     let comment_body = args
         .get("body")
         .and_then(|v| v.as_str())
@@ -3838,12 +3970,32 @@ async fn maybe_auto_approve_mutations(
     config: &Config,
     store: &Arc<dyn Store>,
     github: &Arc<GithubHarness>,
+    mcp: &Arc<McpPool>,
+    tool_name: &str,
     queued: &QueuedApproval,
 ) -> Result<Option<String>> {
-    if !config.chat.auto_approve_mutations {
+    let auto = if config.chat.auto_approve_mutations {
+        true
+    } else if mcp.is_mcp_mutating(tool_name).await {
+        matches!(
+            mcp.server_mutating_policy(tool_name).await,
+            Some(crate::config::McpMutatingPolicy::Auto)
+        )
+    } else {
+        false
+    };
+    if !auto {
         return Ok(None);
     }
-    match approvals::process_decision(Arc::clone(store), Arc::clone(github), &queued.id, true).await {
+    match approvals::process_decision(
+        Arc::clone(store),
+        Arc::clone(github),
+        Arc::clone(mcp),
+        &queued.id,
+        true,
+    )
+    .await
+    {
         Ok(detail) => Ok(Some(detail)),
         Err(e) => Err(e),
     }

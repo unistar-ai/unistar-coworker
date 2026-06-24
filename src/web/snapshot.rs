@@ -56,6 +56,7 @@ pub struct WebSnapshot {
     pub llm_ok: bool,
     pub github_latency_ms: Option<u128>,
     pub llm_latency_ms: Option<u128>,
+    pub mcp_servers: Vec<Value>,
     pub attach_mode: bool,
     /// Default Web UI theme from config (`dark` | `light`); user override in localStorage.
     pub ui_theme: String,
@@ -265,6 +266,20 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
         llm_ok: s.llm_ok,
         github_latency_ms: s.github_latency_ms,
         llm_latency_ms: s.llm_latency_ms,
+        mcp_servers: s
+            .mcp_servers
+            .iter()
+            .map(|server| {
+                json!({
+                    "id": server.id,
+                    "connected": server.connected,
+                    "tool_count": server.tool_count,
+                    "last_error": server.last_error,
+                    "last_rpc_ms": server.last_rpc_ms,
+                    "prefix": server.prefix,
+                })
+            })
+            .collect(),
         attach_mode: s.attach_mode,
         ui_theme: s.config.web_theme_id().to_string(),
     }

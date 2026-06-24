@@ -1,4 +1,4 @@
-//! Read-only web preview (`web_browser`) — fetch page text for the agent.
+//! Read-only web fetch (`web_fetch`) — fetch page text for the agent.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -14,10 +14,10 @@ use serde_json::Value;
 use crate::agent::context::truncate_chars;
 use crate::agent::file_tools;
 use crate::agent::harness_errors::{self, workflow_error, ErrorEnvelope};
-use crate::config::WebBrowserToolConfig;
+use crate::config::WebFetchToolConfig;
 use crate::error::{CoworkerError, Result};
 
-pub const WEB_BROWSER_TOOL: &str = "web_browser";
+pub const WEB_FETCH_TOOL: &str = "web_fetch";
 
 const DEFAULT_MAX_CHARS: usize = 32_000;
 const METADATA_DEFAULT_MAX_CHARS: usize = 8_000;
@@ -28,7 +28,7 @@ static RESPONSE_CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::
 static HREF_RE: OnceLock<Regex> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WebBrowserMode {
+enum WebFetchMode {
     Full,
     Metadata,
     Links,
@@ -55,12 +55,12 @@ struct PageMeta {
     body_text: String,
 }
 
-pub fn is_web_browser_tool(name: &str) -> bool {
-    name == WEB_BROWSER_TOOL
+pub fn is_web_fetch_tool(name: &str) -> bool {
+    name == WEB_FETCH_TOOL || name == "web_browser"
 }
 
-pub async fn execute_web_browser_tool(
-    config: &WebBrowserToolConfig,
+pub async fn execute_web_fetch_tool(
+    config: &WebFetchToolConfig,
     workspace: &Path,
     args: &Value,
 ) -> Result<String> {
@@ -70,9 +70,9 @@ pub async fn execute_web_browser_tool(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            harness_errors::web_browser_validation_error(
+            harness_errors::web_fetch_validation_error(
                 "WEB_MISSING_URL",
-                "web_browser needs non-empty url",
+                "web_fetch needs non-empty url",
                 "Pass url as http(s)://… or a workspace-relative HTML path",
             )
         })?;
@@ -100,7 +100,7 @@ pub async fn execute_web_browser_tool(
         page.body_text = body;
     }
 
-    let mut out = format!("web_browser: {}\n", fetched.source_label);
+    let mut out = format!("web_fetch: {}\n", fetched.source_label);
     if fetched.status_line.contains("chromium") {
         out.push_str("engine: headless-chromium\n");
     }
@@ -128,9 +128,9 @@ pub async fn execute_web_browser_tool(
     }
 
     match mode {
-        WebBrowserMode::Links => {}
-        WebBrowserMode::Metadata => {}
-        WebBrowserMode::Full => {
+        WebFetchMode::Links => {}
+        WebFetchMode::Metadata => {}
+        WebFetchMode::Full => {
             if page.body_text.chars().count() < config.spa_empty_chars {
                 out.push_str(&format!(
                     "warning: body very short ({} chars) — page may require JavaScript; \
@@ -146,14 +146,14 @@ pub async fn execute_web_browser_tool(
     Ok(out.trim_end().to_string())
 }
 
-fn parse_mode(args: &Value) -> Result<WebBrowserMode> {
+fn parse_mode(args: &Value) -> Result<WebFetchMode> {
     match args.get("mode").and_then(|v| v.as_str()).unwrap_or("full") {
-        "full" => Ok(WebBrowserMode::Full),
-        "metadata" => Ok(WebBrowserMode::Metadata),
-        "links" => Ok(WebBrowserMode::Links),
-        other => Err(harness_errors::web_browser_validation_error(
+        "full" => Ok(WebFetchMode::Full),
+        "metadata" => Ok(WebFetchMode::Metadata),
+        "links" => Ok(WebFetchMode::Links),
+        other => Err(harness_errors::web_fetch_validation_error(
             "WEB_INVALID_MODE",
-            format!("web_browser unknown mode `{other}`"),
+            format!("web_fetch unknown mode `{other}`"),
             "Use mode: full | metadata | links",
         )),
     }
@@ -174,27 +174,27 @@ fn parse_browser_arg(args: &Value) -> bool {
 }
 
 async fn fetch_with_browser(
-    config: &WebBrowserToolConfig,
+    config: &WebFetchToolConfig,
     workspace: &Path,
     url_or_path: &str,
 ) -> Result<FetchedContent> {
-    use crate::agent::web_browser_chromium::{fetch_page_with_chromium, file_url_for_path};
+    use crate::agent::web_fetch_chromium::{fetch_page_with_chromium, file_url_for_path};
 
     if is_remote_url(url_or_path) {
         validate_remote_url(url_or_path, config)?;
         return fetch_page_with_chromium(config, url_or_path, url_or_path).await;
     }
     let resolved = file_tools::resolve_workspace_path(workspace, url_or_path).map_err(|e| {
-        harness_errors::web_browser_validation_error(
+        harness_errors::web_fetch_validation_error(
             "WEB_LOCAL_PATH",
             e.to_string(),
             "Use a workspace-relative HTML path without `..`",
         )
     })?;
     if !resolved.is_file() {
-        return Err(harness_errors::web_browser_validation_error(
+        return Err(harness_errors::web_fetch_validation_error(
             "WEB_NOT_FILE",
-            format!("web_browser: {url_or_path:?} is not a file"),
+            format!("web_fetch: {url_or_path:?} is not a file"),
             "Point url at an HTML file under chat.workspace",
         ));
     }
@@ -203,10 +203,10 @@ async fn fetch_with_browser(
     fetch_page_with_chromium(config, &file_url, &label).await
 }
 
-fn effective_max_chars(config: &WebBrowserToolConfig, mode: WebBrowserMode, args: &Value) -> usize {
+fn effective_max_chars(config: &WebFetchToolConfig, mode: WebFetchMode, args: &Value) -> usize {
     let default = match mode {
-        WebBrowserMode::Full => config.max_content_chars.min(DEFAULT_MAX_CHARS),
-        WebBrowserMode::Metadata | WebBrowserMode::Links => METADATA_DEFAULT_MAX_CHARS,
+        WebFetchMode::Full => config.max_content_chars.min(DEFAULT_MAX_CHARS),
+        WebFetchMode::Metadata | WebFetchMode::Links => METADATA_DEFAULT_MAX_CHARS,
     };
     args.get("max_chars")
         .and_then(|v| v.as_u64())
@@ -232,27 +232,27 @@ fn is_remote_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
-fn validate_remote_url(url: &str, config: &WebBrowserToolConfig) -> Result<Url> {
+fn validate_remote_url(url: &str, config: &WebFetchToolConfig) -> Result<Url> {
     let parsed = Url::parse(url).map_err(|e| {
-        harness_errors::web_browser_validation_error(
+        harness_errors::web_fetch_validation_error(
             "WEB_INVALID_URL",
-            format!("web_browser invalid url: {e}"),
+            format!("web_fetch invalid url: {e}"),
             "Use http(s)://… or localhost:PORT (with allow_localhost) or a workspace HTML path",
         )
     })?;
     match parsed.scheme() {
         "http" | "https" => {}
         other => {
-            return Err(harness_errors::web_browser_validation_error(
+            return Err(harness_errors::web_fetch_validation_error(
                 "WEB_UNSUPPORTED_SCHEME",
-                format!("web_browser only supports http/https URLs (got {other}:)"),
+                format!("web_fetch only supports http/https URLs (got {other}:)"),
                 "Use http(s):// for remote URLs; local HTML via workspace-relative path",
             ));
         }
     }
     if let Some(host) = parsed.host_str() {
         if is_blocked_host(host, config.allow_localhost) {
-            return Err(workflow_error(web_browser_ssrf_envelope(host, config.allow_localhost)));
+            return Err(workflow_error(web_fetch_ssrf_envelope(host, config.allow_localhost)));
         }
     }
     Ok(parsed)
@@ -287,7 +287,7 @@ fn http_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
-            .expect("web_browser HTTP client")
+            .expect("web_fetch HTTP client")
     })
 }
 
@@ -304,7 +304,7 @@ pub(crate) struct FetchedContent {
     pub body_text_override: Option<String>,
 }
 
-async fn fetch_remote_page(config: &WebBrowserToolConfig, url: &str) -> Result<FetchedContent> {
+async fn fetch_remote_page(config: &WebFetchToolConfig, url: &str) -> Result<FetchedContent> {
     validate_remote_url(url, config)?;
 
     if config.cache_ttl_secs > 0 {
@@ -325,21 +325,21 @@ async fn fetch_remote_page(config: &WebBrowserToolConfig, url: &str) -> Result<F
         .header(
             USER_AGENT,
             HeaderValue::from_str(user_agent)
-                .map_err(|e| CoworkerError::Workflow(format!("web_browser bad user_agent: {e}")))?,
+                .map_err(|e| CoworkerError::Workflow(format!("web_fetch bad user_agent: {e}")))?,
         )
         .send()
         .await
-        .map_err(|e| workflow_error(web_browser_fetch_envelope(url, &e.to_string(), None)))?;
+        .map_err(|e| workflow_error(web_fetch_envelope(url, &e.to_string(), None)))?;
 
     let status = response.status();
     let headers: HeaderMap = response.headers().clone();
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| workflow_error(web_browser_fetch_envelope(url, &e.to_string(), Some(status.as_u16()))))?;
+        .map_err(|e| workflow_error(web_fetch_envelope(url, &e.to_string(), Some(status.as_u16()))))?;
 
     if bytes.len() > config.max_download_bytes {
-        return Err(workflow_error(web_browser_too_large_envelope(
+        return Err(workflow_error(web_fetch_too_large_envelope(
             bytes.len(),
             config.max_download_bytes,
         )));
@@ -348,7 +348,7 @@ async fn fetch_remote_page(config: &WebBrowserToolConfig, url: &str) -> Result<F
     if status.as_u16() == 403 || status.as_u16() == 401 {
         let snippet = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]);
         let challenge = snippet.contains("zh-zse-ck") || snippet.contains("zse-ck");
-        return Err(workflow_error(web_browser_forbidden_envelope(
+        return Err(workflow_error(web_fetch_forbidden_envelope(
             status.as_u16(),
             challenge,
         )));
@@ -361,7 +361,7 @@ async fn fetch_remote_page(config: &WebBrowserToolConfig, url: &str) -> Result<F
         .to_string();
 
     if looks_binary(&bytes) && !content_type.contains("json") && !content_type.contains("text") {
-        return Err(workflow_error(web_browser_binary_envelope(&content_type)));
+        return Err(workflow_error(web_fetch_binary_envelope(&content_type)));
     }
 
     let header_charset = parse_charset_from_content_type(&content_type);
@@ -427,23 +427,23 @@ fn cache_put(url: &str, payload: CachedFetch) {
 
 fn load_local_html(workspace: &Path, user_path: &str) -> Result<FetchedContent> {
     let resolved = file_tools::resolve_workspace_path(workspace, user_path).map_err(|e| {
-        harness_errors::web_browser_validation_error(
+        harness_errors::web_fetch_validation_error(
             "WEB_LOCAL_PATH",
             e.to_string(),
             "Use a workspace-relative HTML path without `..`",
         )
     })?;
     if !resolved.is_file() {
-        return Err(harness_errors::web_browser_validation_error(
+        return Err(harness_errors::web_fetch_validation_error(
             "WEB_NOT_FILE",
-            format!("web_browser: {user_path:?} is not a file"),
+            format!("web_fetch: {user_path:?} is not a file"),
             "Point url at an HTML file under chat.workspace",
         ));
     }
     let bytes = std::fs::read(&resolved).map_err(|e| {
-        harness_errors::web_browser_validation_error(
+        harness_errors::web_fetch_validation_error(
             "WEB_READ_FAILED",
-            format!("web_browser read failed: {e}"),
+            format!("web_fetch read failed: {e}"),
             "Confirm the file exists and is readable",
         )
     })?;
@@ -770,22 +770,22 @@ fn collapse_blank_lines(text: &str) -> String {
     out.trim().to_string()
 }
 
-fn web_browser_ssrf_envelope(host: &str, allow_localhost: bool) -> ErrorEnvelope {
+fn web_fetch_ssrf_envelope(host: &str, allow_localhost: bool) -> ErrorEnvelope {
     let hint = if allow_localhost {
         "Private host blocked — only loopback is allowed when allow_localhost is true"
     } else {
-        "Set chat.web_browser.allow_localhost: true in coworker.yaml for localhost dev servers"
+        "Set chat.web_fetch.allow_localhost: true in coworker.yaml for localhost dev servers"
     };
     ErrorEnvelope {
         code: "WEB_SSRF_BLOCKED".into(),
-        tool_name: WEB_BROWSER_TOOL.into(),
+        tool_name: WEB_FETCH_TOOL.into(),
         what: "URL host is not allowed".into(),
         why: format!("Host `{host}` resolves to a private or loopback address"),
         try_steps: vec![
             hint.into(),
             "Use a public https URL, or read local HTML via workspace-relative path".into(),
         ],
-        example: Some(harness_errors::web_browser_tool_example(
+        example: Some(harness_errors::web_fetch_tool_example(
             "https://example.com",
             "full",
             false,
@@ -794,11 +794,11 @@ fn web_browser_ssrf_envelope(host: &str, allow_localhost: bool) -> ErrorEnvelope
     }
 }
 
-fn web_browser_forbidden_envelope(status: u16, js_challenge: bool) -> ErrorEnvelope {
+fn web_fetch_forbidden_envelope(status: u16, js_challenge: bool) -> ErrorEnvelope {
     let mut try_steps = vec![
         "Do not repeat the same URL — login cookies are not available".into(),
         "Ask the user to open the page or paste the content".into(),
-        "For GitHub data use MCP tools (pr_get_*), not web_browser on github.com".into(),
+        "For GitHub data use MCP tools (pr_get_*), not web_fetch on github.com".into(),
     ];
     if js_challenge {
         try_steps.insert(
@@ -812,7 +812,7 @@ fn web_browser_forbidden_envelope(status: u16, js_challenge: bool) -> ErrorEnvel
         } else {
             "WEB_FORBIDDEN".into()
         },
-        tool_name: WEB_BROWSER_TOOL.into(),
+        tool_name: WEB_FETCH_TOOL.into(),
         what: format!("HTTP {status} — access denied"),
         why: if js_challenge {
             "The server returned a JavaScript anti-bot challenge (e.g. zhihu zse-ck)".into()
@@ -820,7 +820,7 @@ fn web_browser_forbidden_envelope(status: u16, js_challenge: bool) -> ErrorEnvel
             "The server rejected the request (auth or permission)".into()
         },
         try_steps,
-        example: Some(harness_errors::web_browser_tool_example(
+        example: Some(harness_errors::web_fetch_tool_example(
             "https://www.zhihu.com/question/1",
             "full",
             true,
@@ -829,17 +829,17 @@ fn web_browser_forbidden_envelope(status: u16, js_challenge: bool) -> ErrorEnvel
     }
 }
 
-fn web_browser_too_large_envelope(size: usize, max: usize) -> ErrorEnvelope {
+fn web_fetch_too_large_envelope(size: usize, max: usize) -> ErrorEnvelope {
     ErrorEnvelope {
         code: "WEB_BODY_TOO_LARGE".into(),
-        tool_name: WEB_BROWSER_TOOL.into(),
+        tool_name: WEB_FETCH_TOOL.into(),
         what: "Response body exceeds download limit".into(),
         why: format!("Got {size} bytes (max {max})"),
         try_steps: vec![
             "Retry with mode=metadata to fetch title/headings/links only".into(),
             "Use bash_run curl with a narrower endpoint".into(),
         ],
-        example: Some(harness_errors::web_browser_tool_example(
+        example: Some(harness_errors::web_fetch_tool_example(
             "https://example.com",
             "metadata",
             false,
@@ -848,17 +848,17 @@ fn web_browser_too_large_envelope(size: usize, max: usize) -> ErrorEnvelope {
     }
 }
 
-fn web_browser_binary_envelope(content_type: &str) -> ErrorEnvelope {
+fn web_fetch_binary_envelope(content_type: &str) -> ErrorEnvelope {
     ErrorEnvelope {
         code: "WEB_BINARY".into(),
-        tool_name: WEB_BROWSER_TOOL.into(),
+        tool_name: WEB_FETCH_TOOL.into(),
         what: "Response looks binary or unsupported".into(),
         why: format!("content-type: {content_type}"),
         try_steps: vec![
             "Use bash_run curl -I to inspect headers".into(),
             "Download with bash_run curl -o and read_file if it is text".into(),
         ],
-        example: Some(harness_errors::web_browser_tool_example(
+        example: Some(harness_errors::web_fetch_tool_example(
             "https://example.com/data.json",
             "full",
             false,
@@ -867,7 +867,7 @@ fn web_browser_binary_envelope(content_type: &str) -> ErrorEnvelope {
     }
 }
 
-fn web_browser_fetch_envelope(url: &str, err: &str, status: Option<u16>) -> ErrorEnvelope {
+fn web_fetch_envelope(url: &str, err: &str, status: Option<u16>) -> ErrorEnvelope {
     let low = err.to_ascii_lowercase();
     let (code, what, try_steps) = if low.contains("timed out") || low.contains("timeout") {
         (
@@ -875,7 +875,7 @@ fn web_browser_fetch_envelope(url: &str, err: &str, status: Option<u16>) -> Erro
             "HTTP request timed out",
             vec![
                 "Confirm dev server is running (bash_run curl -I …)".into(),
-                "Increase chat.web_browser.timeout_secs or retry with mode=metadata".into(),
+                "Increase chat.web_fetch.timeout_secs or retry with mode=metadata".into(),
             ],
         )
     } else if status == Some(404) || low.contains("404") {
@@ -890,17 +890,17 @@ fn web_browser_fetch_envelope(url: &str, err: &str, status: Option<u16>) -> Erro
             "HTTP fetch failed",
             vec![
                 "Verify the URL is reachable from this machine".into(),
-                "For localhost set chat.web_browser.allow_localhost: true".into(),
+                "For localhost set chat.web_fetch.allow_localhost: true".into(),
             ],
         )
     };
     ErrorEnvelope {
         code: code.into(),
-        tool_name: WEB_BROWSER_TOOL.into(),
+        tool_name: WEB_FETCH_TOOL.into(),
         what: what.into(),
         why: err.to_string(),
         try_steps,
-        example: Some(harness_errors::web_browser_tool_example(url, "full", false)),
+        example: Some(harness_errors::web_fetch_tool_example(url, "full", false)),
         detail: Some(format!("url: {url}")),
     }
 }
@@ -969,9 +969,9 @@ mod tests {
 
     #[test]
     fn ssrf_blocks_loopback_by_default() {
-        let config = WebBrowserToolConfig::default();
+        let config = WebFetchToolConfig::default();
         assert!(validate_remote_url("http://127.0.0.1:8080", &config).is_err());
-        let allowed = WebBrowserToolConfig {
+        let allowed = WebFetchToolConfig {
             allow_localhost: true,
             ..Default::default()
         };
@@ -992,14 +992,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual: needs Chrome + network"]
     async fn chromium_fetch_example_smoke() {
-        let config = WebBrowserToolConfig::default();
+        let config = WebFetchToolConfig::default();
         let args = json!({
             "url": "https://example.com",
             "browser": true,
             "mode": "metadata"
         });
         let dir = TempDir::new().unwrap();
-        let out = execute_web_browser_tool(&config, dir.path(), &args)
+        let out = execute_web_fetch_tool(&config, dir.path(), &args)
             .await
             .unwrap_or_else(|e| panic!("browser fetch failed: {e}"));
         assert!(out.contains("headless-chromium"));
@@ -1009,14 +1009,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual: needs Chrome + network"]
     async fn chromium_fetch_zhihu_smoke() {
-        let config = WebBrowserToolConfig::default();
+        let config = WebFetchToolConfig::default();
         let args = json!({
             "url": "https://www.zhihu.com/question/528932203",
             "browser": true,
             "mode": "metadata"
         });
         let dir = TempDir::new().unwrap();
-        let out = execute_web_browser_tool(&config, dir.path(), &args)
+        let out = execute_web_fetch_tool(&config, dir.path(), &args)
             .await
             .unwrap_or_else(|e| panic!("zhihu browser fetch failed: {e}"));
         assert!(out.contains("headless-chromium"));
@@ -1029,7 +1029,7 @@ mod tests {
 
     #[test]
     fn rejects_non_http_schemes() {
-        let config = WebBrowserToolConfig::default();
+        let config = WebFetchToolConfig::default();
         assert!(validate_remote_url("javascript:alert(1)", &config).is_err());
         assert!(validate_remote_url("https://example.com", &config).is_ok());
     }
@@ -1042,8 +1042,8 @@ mod tests {
             "<html><head><title>Local</title></head><body><p>Preview me</p></body></html>",
         )
         .unwrap();
-        let config = WebBrowserToolConfig::default();
-        let out = execute_web_browser_tool(&config, dir.path(), &json!({ "url": "page.html" }))
+        let config = WebFetchToolConfig::default();
+        let out = execute_web_fetch_tool(&config, dir.path(), &json!({ "url": "page.html" }))
             .await
             .unwrap();
         assert!(out.contains("title: Local"));
@@ -1059,8 +1059,8 @@ mod tests {
             "<html><head><title>T</title></head><body><p>Secret body</p></body></html>",
         )
         .unwrap();
-        let config = WebBrowserToolConfig::default();
-        let out = execute_web_browser_tool(
+        let config = WebFetchToolConfig::default();
+        let out = execute_web_fetch_tool(
             &config,
             dir.path(),
             &json!({ "url": "page.html", "mode": "metadata" }),

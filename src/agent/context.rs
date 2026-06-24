@@ -194,7 +194,7 @@ fn coding_tool_result_char_cap(tool_name: &str) -> usize {
         "glob" => 2_500,
         "bash_run" => 3_000,
         "python_run" => 3_000,
-        "web_browser" => 4_000,
+        "web_fetch" => 4_000,
         "edit_file" | "write_file" => 1_200,
         _ => ops_tool_result_char_cap(tool_name),
     }
@@ -232,7 +232,7 @@ fn summarize_coding_tool_content(tool_name: &str, content: &str) -> String {
     match tool_name {
         "bash_run" => summarize_bash_run_for_compaction(content),
         "python_run" => summarize_python_run_for_compaction(content),
-        "web_browser" => summarize_web_browser_for_compaction(content),
+        "web_fetch" => summarize_web_fetch_for_compaction(content),
         "read_file" | "grep" => {
             let preview: String = content.chars().take(800).collect();
             format!("[summarized tool_result {tool_name}]\n{preview}…")
@@ -277,7 +277,7 @@ fn summarize_python_run_for_compaction(content: &str) -> String {
     )
 }
 
-fn summarize_web_browser_for_compaction(content: &str) -> String {
+fn summarize_web_fetch_for_compaction(content: &str) -> String {
     let mut header = Vec::new();
     let mut in_body = false;
     let mut body_lines = Vec::new();
@@ -290,7 +290,8 @@ fn summarize_web_browser_for_compaction(content: &str) -> String {
             body_lines.push(line);
         } else {
             let t = line.trim();
-            if t.starts_with("web_browser:")
+            if t.starts_with("web_fetch:")
+                || t.starts_with("web_browser:")
                 || t.starts_with("status:")
                 || t.starts_with("content-type:")
                 || t.starts_with("title:")
@@ -314,7 +315,7 @@ fn summarize_web_browser_for_compaction(content: &str) -> String {
         .rev()
         .collect::<Vec<_>>()
         .join("\n");
-    let mut out = format!("[summarized tool_result web_browser]\n{}", header.join("\n"));
+    let mut out = format!("[summarized tool_result web_fetch]\n{}", header.join("\n"));
     if !tail.is_empty() {
         out.push_str("\n---\n");
         out.push_str(&tail);

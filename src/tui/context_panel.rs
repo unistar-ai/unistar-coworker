@@ -659,7 +659,6 @@ mod tests {
         let th = theme::ThemePalette::dark();
         let yaml = r#"
 llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
-mcp: { command: unistar-mcp }
 storage: { backend: json, path: ./data }
 repos: [acme/widget]
 "#;
@@ -920,7 +919,6 @@ repos: [acme/widget]
         let th = theme::ThemePalette::dark();
         let yaml = r#"
 llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
-mcp: { command: unistar-mcp }
 storage: { backend: json, path: ./data }
 repos: [acme/widget]
 "#;

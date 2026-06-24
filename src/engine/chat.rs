@@ -32,6 +32,7 @@ impl Engine {
             &self.config,
             Arc::clone(&self.store),
             Arc::clone(&self.github),
+            Arc::clone(&self.mcp),
             Arc::clone(&self.llm),
             ChatTurnInput {
                 session_id,
@@ -130,6 +131,7 @@ impl Engine {
             &self.config,
             Arc::clone(&self.store),
             Arc::clone(&self.github),
+            Arc::clone(&self.mcp),
             Arc::clone(&self.llm),
             session_id,
             resume,

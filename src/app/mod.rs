@@ -296,6 +296,8 @@ pub struct AppState {
     /// Last MCP `tool_list` round-trip (ms), measured at engine start.
     pub github_latency_ms: Option<u128>,
     pub llm_latency_ms: Option<u128>,
+    /// Federated MCP server status (from `mcp.servers[]`).
+    pub mcp_servers: Vec<crate::mcp::McpServerStatus>,
     pub chat_input: String,
     pub chat_input_history: Vec<String>,
     /// Index into `chat_input_history` while browsing; `None` = drafting new input.
@@ -389,6 +391,7 @@ impl AppState {
             llm_ok: false,
             github_latency_ms: None,
             llm_latency_ms: None,
+            mcp_servers: Vec::new(),
             chat_input: String::new(),
             chat_input_history: vec![],
             chat_history_pos: None,
@@ -596,7 +599,7 @@ impl AppState {
     }
 
     pub fn open_approval_dialog_from(&mut self, approval: &crate::store::Approval) {
-        let tool_name = approval_tool_name_for_kind(&approval.kind);
+        let tool_name = approval_tool_name(&approval);
         self.open_approval_dialog(approval.id, tool_name, approval.description.clone());
     }
 
@@ -1139,7 +1142,21 @@ fn approval_tool_name_for_kind(kind: &crate::store::ApprovalKind) -> String {
         crate::store::ApprovalKind::EditFile => "edit_file".into(),
         crate::store::ApprovalKind::BashRun => "bash_run".into(),
         crate::store::ApprovalKind::PythonRun => "python_run".into(),
+        crate::store::ApprovalKind::McpTool => "mcp_tool".into(),
     }
+}
+
+fn approval_tool_name(approval: &crate::store::Approval) -> String {
+    if approval.kind == crate::store::ApprovalKind::McpTool {
+        if let Some(body) = &approval.comment_body {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                if let Some(name) = v.get("tool_name").and_then(|x| x.as_str()) {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    approval_tool_name_for_kind(&approval.kind)
 }
 
 fn approval_tool_label(line: &str, approval: &crate::store::Approval) -> String {
@@ -1153,7 +1170,7 @@ fn approval_tool_label(line: &str, approval: &crate::store::Approval) -> String 
             return name.to_string();
         }
     }
-    approval_tool_name_for_kind(&approval.kind)
+    approval_tool_name(approval)
 }
 
 pub fn export_chat_transcript_markdown(state: &AppState) -> String {

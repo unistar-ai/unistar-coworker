@@ -11,7 +11,7 @@ pub struct MarkdownSpec {
     pub name: String,
     pub description: String,
     pub body: String,
-    /// Technique skill names from frontmatter `skills:` (agents only).
+    /// Technique skill names from frontmatter `skills:` (prompt files only).
     pub skill_refs: Vec<String>,
     /// Business/harness tool names from frontmatter `tools:` (skills only).
     pub tool_refs: Vec<String>,
@@ -38,7 +38,7 @@ pub struct MarkdownSpec {
     pub intent_penalty: i32,
 }
 
-pub type AgentSpec = MarkdownSpec;
+pub type PromptSpec = MarkdownSpec;
 pub type SkillSpec = MarkdownSpec;
 
 #[derive(Debug, Default, Deserialize)]
@@ -105,7 +105,7 @@ pub fn load_skill_with_base(path: impl AsRef<Path>) -> Result<SkillSpec> {
     Ok(spec)
 }
 
-pub fn load_agent(path: impl AsRef<Path>) -> Result<AgentSpec> {
+pub fn load_prompt(path: impl AsRef<Path>) -> Result<PromptSpec> {
     load_markdown_spec(path)
 }
 

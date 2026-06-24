@@ -1159,19 +1159,19 @@ fn risk_type_followup_steps_file_edit(risk_type: &str, path: &str, snippet: &str
     }
 }
 
-pub fn web_browser_tool_example(url: &str, mode: &str, browser: bool) -> Value {
+pub fn web_fetch_tool_example(url: &str, mode: &str, browser: bool) -> Value {
     json!({
-        "name": super::web_browser_tool::WEB_BROWSER_TOOL,
+        "name": super::web_fetch_tool::WEB_FETCH_TOOL,
         "arguments": { "url": url, "mode": mode, "browser": browser }
     })
 }
 
-pub fn web_browser_validation_error(
+pub fn web_fetch_validation_error(
     code: &str,
     message: impl std::fmt::Display,
     hint: &str,
 ) -> CoworkerError {
-    agent_validation_error(super::web_browser_tool::WEB_BROWSER_TOOL, code, message, hint)
+    agent_validation_error(super::web_fetch_tool::WEB_FETCH_TOOL, code, message, hint)
 }
 
 #[cfg(test)]

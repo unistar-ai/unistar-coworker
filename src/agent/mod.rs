@@ -22,7 +22,7 @@ pub mod review_radar;
 pub mod runtime_context;
 pub mod tool_catalog;
 pub mod triage;
-pub mod web_browser_chromium;
-pub mod web_browser_tool;
+pub mod web_fetch_chromium;
+pub mod web_fetch_tool;
 
 pub use r#loop::AgentLoop;

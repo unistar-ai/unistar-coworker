@@ -298,7 +298,7 @@ pub async fn build_message_focus_lines(
         ));
     } else if message_looks_like_pr_task(user_message) {
         lines.push(
-            "PR task — skill_load `pr-review` if not already loaded, then harness pr_get_* tools (not web_browser)".into(),
+            "PR task — skill_load `pr-review` if not already loaded, then harness pr_get_* tools (not web_fetch)".into(),
         );
     }
     if lower.contains("test") || lower.contains("cargo") || lower.contains("npm") {

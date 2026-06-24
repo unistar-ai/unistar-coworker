@@ -1627,21 +1627,39 @@ fn draw_list(
                     .collect()
             }
         }
-        Tab::Config => vec![
-            ListItem::new(format!("config: {}", state.config_path)),
-            ListItem::new(format!("repos: {}", state.config.repos.join(", "))),
-            ListItem::new(format!("storage: {:?}", state.config.storage.backend)),
-            ListItem::new(format!("llm: {}", state.config.llm.model)),
-            ListItem::new(format!(
-                "github: {}",
-                context_panel::format_probe_latency(state.github_ok, state.github_latency_ms)
-            )),
-            ListItem::new(format!(
-                "llm probe: {}",
-                context_panel::format_probe_latency(state.llm_ok, state.llm_latency_ms)
-            )),
-            ListItem::new(format!("theme: {:?}", state.config.theme())),
-        ],
+        Tab::Config => {
+            let mut items = vec![
+                ListItem::new(format!("config: {}", state.config_path)),
+                ListItem::new(format!("repos: {}", state.config.repos.join(", "))),
+                ListItem::new(format!("storage: {:?}", state.config.storage.backend)),
+                ListItem::new(format!("llm: {}", state.config.llm.model)),
+                ListItem::new(format!(
+                    "github: {}",
+                    context_panel::format_probe_latency(state.github_ok, state.github_latency_ms)
+                )),
+                ListItem::new(format!(
+                    "llm probe: {}",
+                    context_panel::format_probe_latency(state.llm_ok, state.llm_latency_ms)
+                )),
+                ListItem::new(format!("theme: {:?}", state.config.theme())),
+            ];
+            for server in &state.mcp_servers {
+                let label = if server.connected {
+                    format!(
+                        "mcp[{}]: ok ({} tools, {}ms)",
+                        server.id,
+                        server.tool_count,
+                        server.last_rpc_ms.unwrap_or(0)
+                    )
+                } else if let Some(err) = &server.last_error {
+                    format!("mcp[{}]: err ({err})", server.id)
+                } else {
+                    format!("mcp[{}]: offline", server.id)
+                };
+                items.push(ListItem::new(label));
+            }
+            items
+        }
     };
 
     let list = List::new(items)
@@ -1935,6 +1953,11 @@ fn approval_tool_payload(a: &crate::store::Approval) -> serde_json::Value {
         }),
         ApprovalKind::PythonRun => serde_json::json!({
             "action": "python_run",
+            "workspace": a.repo,
+            "args": a.comment_body,
+        }),
+        ApprovalKind::McpTool => serde_json::json!({
+            "action": "mcp_tool",
             "workspace": a.repo,
             "args": a.comment_body,
         }),

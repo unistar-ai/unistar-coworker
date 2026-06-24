@@ -1026,6 +1026,18 @@ body {
   color: var(--muted);
   opacity: 0.85;
 }
+.tool-source-chip {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--border) 55%, transparent);
+}
 .tool-card-status-hint {
   font-size: 10px;
   font-weight: 600;

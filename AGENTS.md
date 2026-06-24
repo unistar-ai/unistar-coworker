@@ -7,13 +7,13 @@ Guidance for AI agents working in the **unistar-coworker** repository.
 unistar-coworker is a **local GitHub ops secretary** (Rust, ratatui TUI). It:
 
 - Runs scheduled **workflows** (daily triage, release duty, review radar, …) and an interactive **chat** mode.
-- Calls **[unistar-mcp](../unistar-mcp)** over stdio MCP (`--lazy` by default) for GitHub/CI read/write tools.
+- Calls **GithubHarness** in-process (`gh` CLI) for GitHub/CI read/write tools; optional **third-party MCP** servers via `mcp.servers[]` ([`src/mcp/`](./src/mcp/)).
 - Uses a **local LLM** (Ollama-compatible OpenAI API) for classification, chat planning, and digests.
-- **Never** auto-executes mutating actions — `ci_rerun_workflow`, `pr_create_backport`, `pr_post_comment` go through the TUI approval queue unless `chat.auto_approve_mutations` is explicitly enabled.
+- **Never** auto-executes mutating actions — GitHub harness tools (`ci_rerun_workflow`, …) and **federated MCP mutating tools** go through the TUI/Web approval queue unless `chat.auto_approve_mutations` (or per-server `approval.mutating: auto` with global auto) is explicitly enabled.
 
 It is **not** a coding agent: no repo editing, no auto-merge, no replacement for GitHub Actions.
 
-Product boundaries and architecture: [README.md](./README.md), [design.md](./design.md), [skill-agent-harness.md](./skill-agent-harness.md).
+Product boundaries and architecture: [README.md](./README.md), [README_CN.md](./README_CN.md), [skill-agent-harness.md](./skill-agent-harness.md).
 
 ---
 
@@ -36,14 +36,14 @@ When adding tests or debug output, prefer **synthetic MCP payloads** over copyin
 
 ---
 
-## Skill → Agent → Harness
+## Skill → Prompt → Harness
 
 Three layers; do not blur responsibilities:
 
 | Layer | Location | Role |
 |-------|----------|------|
 | **Skill** | `skills/*/SKILL.md` | Reusable technique: triage rules, tone, digest style. No cron, no harness logic. |
-| **Agent** | `agents/*/AGENT.md` | Task spec: goals, output format, tool strategy; references `skills[]`. |
+| **Prompt** | `prompts/*.md` | Chat system prompt body; frontmatter `skills:` lists default techniques. |
 | **Harness** | `src/agent/*.rs`, `src/engine/*.rs` | Deterministic Rust: MCP, store, approvals, token budget, chat/workflow loops. |
 
 Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`src/agent/tool_catalog.rs`](./src/agent/tool_catalog.rs).
@@ -66,7 +66,7 @@ Entry: [`src/engine/chat.rs`](./src/engine/chat.rs) → [`src/agent/chat_loop.rs
 | Mutating tool gate | `is_mutating_tool` → approval queue in `chat_loop.rs` / [`src/engine/approvals.rs`](./src/engine/approvals.rs) |
 | Session persistence | [`src/store/json.rs`](./src/store/json.rs), [`src/store/sqlite.rs`](./src/store/sqlite.rs) (`data/chat/` when using JSON backend) |
 
-Chat agent spec: [`agents/chat/AGENT.md`](./agents/chat/AGENT.md).
+Chat system prompt: [`prompts/chat.md`](./prompts/chat.md) (`chat.prompt` in config; legacy alias `chat.agent`).
 
 Legacy JSON `action: reply | tool | approval` has been removed; chat uses native `tools` / `tool_calls` only.
 
@@ -74,11 +74,16 @@ Legacy JSON `action: reply | tool | approval` has been removed; chat uses native
 
 ## MCP integration
 
-- Config: `mcp.command`, `mcp.args` (typically `["--lazy"]`) in `coworker.yaml`.
-- Implementation: [`src/mcp/subprocess.rs`](./src/mcp/subprocess.rs) — stdio JSON-RPC to unistar-mcp; no shell.
-- Lazy mode (MCP): business tools via `tool_list` / `tool_describe` / `tool_call`. Chat default `tool_mode: lazy` exposes only meta + harness + mutating as native schemas.
+| Layer | Config / path | Role |
+|-------|---------------|------|
+| **GitHub** | `github:` in `coworker.yaml` | [`src/github/harness.rs`](./src/github/harness.rs) — in-process `gh`; meta-tools (`tool_list`, `tool_search`, `tool_describe`, `tool_call`) index GitHub + local harness only. |
+| **Third-party** | `mcp.servers[]` | [`src/mcp/`](./src/mcp/) — `McpPool`; `transport: stdio` (subprocess) or `http` (Streamable HTTP POST + JSON/SSE). |
 
-For MCP server behavior or new GitHub tools, change **unistar-mcp**, not duplicate `gh` calls in coworker.
+- Chat routes federated readonly MCP tools through `execute_readonly_tool` in [`chat_loop.rs`](./src/agent/chat_loop.rs); mutating MCP tools require approval (routing TBD for some paths).
+- Lazy mode: when `mcp.servers[]` is non-empty, `tool_list` / `tool_search` / `tool_describe` federate GitHub harness + MCP registry ([`src/mcp/lazy_adapter.rs`](./src/mcp/lazy_adapter.rs)).
+- TUI Config tab shows per-server `mcp[id]` status from `AppState.mcp_servers`.
+
+For new **GitHub** tools, extend **GithubHarness** / unistar-mcp catalog — do not duplicate `gh` calls in coworker. For **Slack/filesystem/etc.**, add an MCP server entry under `mcp.servers[]`.
 
 ---
 
@@ -99,7 +104,7 @@ Default store backend is JSON under `./data` (gitignored). SQLite backend and `s
 
 - Example: [`coworker.example.yaml`](./coworker.example.yaml).
 - Loaded from cwd or `~/.config/unistar-coworker/coworker.yaml` (see [`src/config.rs`](./src/config.rs)).
-- Key knobs: `repos`, `llm.context_limit` (64K), `chat.max_turns`, `chat.max_tool_calls`, `chat.tool_mode`, `policy.auto_rerun_flaky`.
+- Key knobs: `repos`, `llm.context_limit` (64K), `chat.max_turns`, `chat.max_tool_calls`, `chat.tool_mode`, `policy.auto_rerun_flaky`, `github:`, `mcp.servers[]`.
 
 ---
 
@@ -115,7 +120,7 @@ cargo run --release -- chat --once "Summarize open PRs in acme/widget"
 cargo run --release -- run-once --workflow daily-work
 ```
 
-List agents/skills: `cargo run --release -- agents list` / `skills list`.
+List skills/workflows: `cargo run --release -- skills list` / `workflows list`.
 
 ---
 

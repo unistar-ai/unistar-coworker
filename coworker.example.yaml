@@ -4,9 +4,13 @@ llm:
   context_limit: 64000
   # api_key: ollama
 
+# GitHub/CI tools run in-process via `gh` (GithubHarness) — no MCP subprocess required.
 github:
   gh_command: gh
   env: {}
+  timeout_secs: 120
+  # tool_timeouts:
+  #   ci_get_failed_logs: 180
 
 repos:
   - owner/repo
@@ -16,9 +20,11 @@ workflows:
 
 chat:
   workspace: .
+  # prompt: prompts/chat.md   # system prompt; skills: from frontmatter or chat.skills
+  # tool_mode: auto   # auto | lazy | native — see README
   # bash: { timeout_secs: 30, max_output_chars: 16000 }  # optional tuning
   # python: { timeout_secs: 30, max_output_chars: 16000, command: python3 }
-  # web_browser:
+  # web_fetch:
   #   timeout_secs: 30
   #   max_content_chars: 32000
   #   allow_localhost: true   # dev servers (localhost / 127.0.0.1)
@@ -26,6 +32,32 @@ chat:
   #   browser_timeout_secs: 60
   #   browser_wait_ms: 3000
   #   chromium_path: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+
+# Optional third-party MCP servers (see README.md § Third-party MCP)
+# mcp:
+#   defaults:
+#     timeout_secs: 120
+#     lazy: true
+#     startup: on_demand
+#   servers:
+#     - id: slack
+#       enabled: false
+#       transport: stdio
+#       command: npx
+#       args: ["-y", "@modelcontextprotocol/server-slack"]
+#       env:
+#         SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+#       expose:
+#         prefix: slack_
+#       approval:
+#         mutating: required
+#         tools: [post_message]
+#     - id: ops
+#       enabled: false
+#       transport: http
+#       url: http://127.0.0.1:9090/mcp
+#       headers:
+#         Authorization: Bearer ${OPS_MCP_TOKEN}
 
 # Web UI: unistar-coworker serve  (default http://127.0.0.1:8787)
 web:

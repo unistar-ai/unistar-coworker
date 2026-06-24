@@ -12,11 +12,13 @@ use crate::app::append_audit;
 use crate::error::{CoworkerError, Result};
 use crate::github::helpers::{gh_tool, mcp_text_indicates_failure};
 use crate::github::GithubHarness;
+use crate::mcp::McpPool;
 use crate::store::{ApprovalKind, BackportStatus, Store};
 
 pub async fn process_decision(
     store: Arc<dyn Store>,
     github: Arc<GithubHarness>,
+    mcp: Arc<McpPool>,
     id: &Uuid,
     approve: bool,
 ) -> Result<String> {
@@ -46,6 +48,7 @@ pub async fn process_decision(
         ApprovalKind::EditFile => execute_file_mutation(&item, file_tools::EDIT_FILE).await,
         ApprovalKind::BashRun => execute_bash_run_approval(&item).await,
         ApprovalKind::PythonRun => execute_python_run_approval(&item).await,
+        ApprovalKind::McpTool => execute_mcp_tool(mcp.as_ref(), &item).await,
     };
 
     match exec_result {
@@ -186,6 +189,25 @@ async fn execute_issue_add_label(
         "label `{label}` added to {}/issue/{issue_number}: {output}",
         item.repo
     ))
+}
+
+async fn execute_mcp_tool(mcp: &McpPool, item: &crate::store::Approval) -> Result<String> {
+    let payload = item.comment_body.as_deref().ok_or_else(|| {
+        CoworkerError::Workflow("mcp tool approval missing args payload".into())
+    })?;
+    let parsed: serde_json::Value = serde_json::from_str(payload).map_err(|e| {
+        CoworkerError::Workflow(format!("mcp tool approval args invalid JSON: {e}"))
+    })?;
+    let tool_name = parsed
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CoworkerError::Workflow("mcp tool approval missing tool_name".into()))?;
+    let args = parsed
+        .get("args")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let output = mcp.call_global_tool_approved(tool_name, args).await?;
+    Ok(format!("{tool_name} approved: {output}"))
 }
 
 async fn execute_file_mutation(item: &crate::store::Approval, tool_name: &str) -> Result<String> {

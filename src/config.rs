@@ -40,6 +40,8 @@ pub struct Config {
     pub rules: Vec<RuleConfig>,
     #[serde(default)]
     pub hygiene: HygieneConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -138,13 +140,118 @@ fn default_mcp_timeout_secs() -> u64 {
     120
 }
 
-/// Legacy `mcp:` block in coworker.yaml (ignored except `env` / `timeout_secs`).
-#[derive(Debug, Clone, Default, Deserialize)]
-struct LegacyMcpYaml {
-    command: Option<String>,
+/// Third-party MCP server federation (`mcp.servers[]`).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct McpConfig {
     #[serde(default)]
-    env: HashMap<String, String>,
-    timeout_secs: Option<u64>,
+    pub defaults: McpDefaults,
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpDefaults {
+    #[serde(default = "default_mcp_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_true")]
+    pub lazy: bool,
+    #[serde(default)]
+    pub startup: McpStartup,
+    #[serde(default = "default_mcp_max_output_chars")]
+    pub max_output_chars: usize,
+}
+
+fn default_mcp_max_output_chars() -> usize {
+    24_000
+}
+
+impl Default for McpDefaults {
+    fn default() -> Self {
+        Self {
+            timeout_secs: default_mcp_timeout_secs(),
+            lazy: true,
+            startup: McpStartup::OnDemand,
+            max_output_chars: default_mcp_max_output_chars(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpStartup {
+    #[default]
+    OnDemand,
+    Eager,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpServerConfig {
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub transport: McpTransport,
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub expose: McpExposeConfig,
+    #[serde(default)]
+    pub approval: McpApprovalConfig,
+    #[serde(default)]
+    pub startup: Option<McpStartup>,
+    /// Per-server RPC timeout; falls back to `mcp.defaults.timeout_secs`.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    #[default]
+    Stdio,
+    Http,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct McpExposeConfig {
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+    #[serde(default)]
+    pub denylist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpApprovalConfig {
+    #[serde(default)]
+    pub mutating: McpMutatingPolicy,
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+impl Default for McpApprovalConfig {
+    fn default() -> Self {
+        Self {
+            mutating: McpMutatingPolicy::Deny,
+            tools: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpMutatingPolicy {
+    #[default]
+    Deny,
+    Required,
+    Auto,
 }
 
 impl Default for GithubConfig {
@@ -330,12 +437,12 @@ impl Default for MainGuardConfig {
     }
 }
 
-fn default_chat_agent() -> String {
-    "agents/chat/AGENT.md".into()
+fn default_chat_prompt() -> String {
+    "prompts/chat.md".into()
 }
 
 fn default_chat_skills() -> Vec<String> {
-    // Empty — use `agents/chat/AGENT.md` frontmatter `skills:` as SSOT.
+    // Empty — use `prompts/chat.md` frontmatter `skills:` as SSOT.
     Vec::new()
 }
 
@@ -373,8 +480,8 @@ pub struct ChatConfig {
     /// Local coding workspace root (paths in file tools must resolve under this).
     #[serde(default = "default_chat_workspace")]
     pub workspace: PathBuf,
-    #[serde(default = "default_chat_agent")]
-    pub agent: String,
+    #[serde(default = "default_chat_prompt", alias = "agent")]
+    pub prompt: String,
     #[serde(default = "default_chat_skills")]
     pub skills: Vec<String>,
     #[serde(default = "default_chat_max_turns")]
@@ -415,9 +522,9 @@ pub struct ChatConfig {
     /// Run Python snippets (`python_run`).
     #[serde(default)]
     pub python: PythonToolConfig,
-    /// Read-only web preview (`web_browser`).
-    #[serde(default)]
-    pub web_browser: WebBrowserToolConfig,
+    /// Read-only web fetch (`web_fetch`).
+    #[serde(default, alias = "web_browser")]
+    pub web_fetch: WebFetchToolConfig,
     /// How older turns and tool output are compressed when context is tight.
     #[serde(default)]
     pub compaction: ChatCompaction,
@@ -483,9 +590,9 @@ fn default_python_command() -> String {
     "python3".into()
 }
 
-/// `web_browser` — fetch page text for the agent (`timeout_secs`, charset, SSRF, cache).
+/// `web_fetch` — fetch page text for the agent (`timeout_secs`, charset, SSRF, cache).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct WebBrowserToolConfig {
+pub struct WebFetchToolConfig {
     #[serde(default = "default_web_browser_timeout_secs")]
     pub timeout_secs: u64,
     #[serde(default = "default_web_browser_max_content_chars")]
@@ -512,7 +619,7 @@ pub struct WebBrowserToolConfig {
     pub chromium_path: Option<String>,
 }
 
-impl Default for WebBrowserToolConfig {
+impl Default for WebFetchToolConfig {
     fn default() -> Self {
         Self {
             timeout_secs: default_web_browser_timeout_secs(),
@@ -612,7 +719,7 @@ impl Default for ChatConfig {
         Self {
             enabled: true,
             workspace: default_chat_workspace(),
-            agent: default_chat_agent(),
+            prompt: default_chat_prompt(),
             skills: default_chat_skills(),
             max_turns: default_chat_max_turns(),
             max_tool_calls: default_chat_max_tool_calls(),
@@ -628,7 +735,7 @@ impl Default for ChatConfig {
             tool_mode: ChatToolMode::Auto,
             bash: BashToolConfig::default(),
             python: PythonToolConfig::default(),
-            web_browser: WebBrowserToolConfig::default(),
+            web_fetch: WebFetchToolConfig::default(),
             compaction: ChatCompaction::default(),
         }
     }
@@ -732,45 +839,18 @@ impl Default for HygieneConfig {
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let raw = std::fs::read_to_string(path.as_ref())?;
-        let value: serde_yaml::Value = serde_yaml::from_str(&raw)?;
-        let mut cfg: Config = serde_yaml::from_value(value.clone())?;
-        if let Some(mcp) = value.get("mcp") {
-            let legacy: LegacyMcpYaml = serde_yaml::from_value(mcp.clone()).unwrap_or_default();
-            if !legacy.env.is_empty() {
-                cfg.github.env.extend(legacy.env);
-            }
-            if let Some(secs) = legacy.timeout_secs {
-                cfg.github.timeout_secs = secs;
-            }
-            if let Some(cmd) = legacy.command.as_deref() {
-                if cmd == "gh" || cmd.ends_with("/gh") {
-                    cfg.github.gh_command = cmd.to_string();
-                } else if cmd.contains("unistar-mcp") {
-                    tracing::warn!(
-                        "config still has mcp.command=unistar-mcp — GitHub tools now run in harness via `gh`; use github: instead"
-                    );
-                }
-            }
-        }
+        let mut cfg: Config = serde_yaml::from_str(&raw)?;
         cfg.resolve_env_in_github();
+        cfg.resolve_env_in_mcp();
         cfg.finalize();
         Ok(cfg)
     }
 
     #[cfg(test)]
     pub(crate) fn load_from_str(raw: &str) -> Result<Self> {
-        let value: serde_yaml::Value = serde_yaml::from_str(raw)?;
-        let mut cfg: Config = serde_yaml::from_value(value.clone())?;
-        if let Some(mcp) = value.get("mcp") {
-            let legacy: LegacyMcpYaml = serde_yaml::from_value(mcp.clone()).unwrap_or_default();
-            if !legacy.env.is_empty() {
-                cfg.github.env.extend(legacy.env);
-            }
-            if let Some(secs) = legacy.timeout_secs {
-                cfg.github.timeout_secs = secs;
-            }
-        }
+        let mut cfg: Config = serde_yaml::from_str(raw)?;
         cfg.resolve_env_in_github();
+        cfg.resolve_env_in_mcp();
         Ok(cfg)
     }
 
@@ -820,12 +900,23 @@ impl Config {
     }
 
     fn resolve_env_in_github(&mut self) {
-        for value in self.github.env.values_mut() {
-            if let Some(rest) = value.strip_prefix("${") {
-                if let Some(var) = rest.strip_suffix('}') {
-                    if let Ok(v) = std::env::var(var) {
-                        *value = v;
-                    }
+        resolve_env_map(&mut self.github.env);
+    }
+
+    fn resolve_env_in_mcp(&mut self) {
+        for server in &mut self.mcp.servers {
+            resolve_env_map(&mut server.env);
+            resolve_env_map(&mut server.headers);
+        }
+    }
+}
+
+fn resolve_env_map(map: &mut HashMap<String, String>) {
+    for value in map.values_mut() {
+        if let Some(rest) = value.strip_prefix("${") {
+            if let Some(var) = rest.strip_suffix('}') {
+                if let Ok(v) = std::env::var(var) {
+                    *value = v;
                 }
             }
         }
@@ -882,7 +973,6 @@ theme: light
     fn tui_theme_none_deserializes() {
         let yaml = r#"
 llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
-mcp: { command: unistar-mcp }
 storage: { backend: json, path: ./data }
 repos: [acme/widget]
 tui:
@@ -896,7 +986,6 @@ tui:
     fn tui_accent_hex_deserializes() {
         let yaml = r#"
 llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
-mcp: { command: unistar-mcp }
 storage: { backend: json, path: ./data }
 repos: [acme/widget]
 tui:
@@ -910,7 +999,6 @@ tui:
     fn chat_tool_mode_deserializes() {
         let yaml = r#"
 llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
-mcp: { command: unistar-mcp }
 storage: { backend: json, path: ./data }
 repos: [acme/widget]
 chat:
@@ -924,7 +1012,6 @@ chat:
     fn chat_tool_mode_defaults_lazy() {
         let yaml = r#"
 llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
-mcp: { command: unistar-mcp }
 repos: [acme/widget]
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
@@ -932,14 +1019,12 @@ repos: [acme/widget]
     }
 
     #[test]
-    fn minimal_yaml_parses_with_legacy_mcp_block() {
+    fn minimal_yaml_parses() {
         let yaml = r#"
 llm:
   base_url: http://localhost:11434/v1
   model: m
   context_limit: 64000
-mcp:
-  command: unistar-mcp
 repos:
   - acme/widget
 workflows:
@@ -952,5 +1037,37 @@ workflows:
         assert_eq!(cfg.storage.backend, StorageBackend::Json);
         assert_eq!(cfg.storage.path, "./data");
         assert!(cfg.schedule.daily_digest.is_some());
+    }
+
+    #[test]
+    fn mcp_servers_parse() {
+        let yaml = r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+repos: [org/repo]
+mcp:
+  servers:
+    - id: slack
+      transport: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-slack"]
+      env:
+        SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+      expose:
+        prefix: slack_
+        allowlist: [post_message]
+    - id: ops
+      transport: http
+      url: http://127.0.0.1:9090/mcp
+      headers:
+        Authorization: Bearer ${OPS_MCP_TOKEN}
+"#;
+        let cfg = Config::load_from_str(yaml).expect("parse");
+        assert_eq!(cfg.mcp.servers.len(), 2);
+        assert_eq!(cfg.mcp.servers[1].id, "ops");
+        assert_eq!(cfg.mcp.servers[1].transport, McpTransport::Http);
+        assert_eq!(
+            cfg.mcp.servers[1].url.as_deref(),
+            Some("http://127.0.0.1:9090/mcp")
+        );
     }
 }
