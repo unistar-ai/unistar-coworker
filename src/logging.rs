@@ -2,9 +2,16 @@ use tracing_subscriber::EnvFilter;
 
 /// Headless / daemon: logs go to stderr. TUI: suppress stderr (ratatui owns the terminal).
 pub fn init_tracing(tui_mode: bool) {
-    let filter = EnvFilter::from_default_env()
-        .add_directive("unistar_coworker=info".parse().expect("valid directive"))
-        .add_directive("chromiumoxide=warn".parse().expect("valid directive"));
+    let filter = EnvFilter::from_default_env().add_directive("unistar_coworker=info".parse().expect("valid directive"));
+    #[cfg(feature = "web-browser")]
+    let filter = filter
+        .add_directive("chromiumoxide=warn".parse().expect("valid directive"))
+        // conn logs the same parse failure without payload; handler patch includes payload.
+        .add_directive(
+            "chromiumoxide::conn::raw_ws::parse_errors=error"
+                .parse()
+                .expect("valid directive"),
+        );
 
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)

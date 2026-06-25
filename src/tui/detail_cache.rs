@@ -37,8 +37,7 @@ pub fn cached_detail_markdown_lines(
     let mut cache = CACHE.lock().expect("detail render cache");
     if cache.key != cache_key || cache.width != w {
         let base = Style::default().fg(th.text);
-        cache.lines =
-            markdown::markdown_to_lines_in_width(th, body, base, Some(width.max(1)));
+        cache.lines = markdown::markdown_to_lines_in_width(th, body, base, Some(width.max(1)));
         cache.key = cache_key;
         cache.width = w;
     }

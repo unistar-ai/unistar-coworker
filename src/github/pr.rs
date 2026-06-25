@@ -6,15 +6,15 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::args::{optional_str, optional_u32, require_i64, require_str, require_u32};
-use super::error::format_tool_ok;
-use super::exec::GhExec;
-use super::pr_ci::{
-    analyze_run_failure, classify_failure, failing_runs_for_pr, format_draft_ci_comment,
-    clip_for_log,
-};
 use super::checks::{
     check_display_name, check_verdict, ci_state, format_external_check_summary, mergeable_state,
     review_state, short_sha, tally_checks, CheckRollup,
+};
+use super::error::format_tool_ok;
+use super::exec::GhExec;
+use super::pr_ci::{
+    analyze_run_failure, classify_failure, clip_for_log, failing_runs_for_pr,
+    format_draft_ci_comment,
 };
 use crate::error::{CoworkerError, Result};
 
@@ -373,7 +373,9 @@ pub async fn pr_post_comment(exec: &GhExec, args: &Value) -> Result<String> {
     let gh_args = ["pr", "comment", &pr_num_s, "-R", &repo, "--body", &body];
     let res = exec.run(&gh_args).await;
     GhExec::into_result(res, "failed to post PR comment")?;
-    Ok(format_tool_ok(&format!("Comment posted on {repo}#{pr_num}.")))
+    Ok(format_tool_ok(&format!(
+        "Comment posted on {repo}#{pr_num}."
+    )))
 }
 
 // --- pr_chat_tools.go ---
@@ -566,12 +568,7 @@ pub async fn pr_list_large(exec: &GhExec, args: &Value) -> Result<String> {
         for pr in large {
             out.push_str(&format!(
                 "#{}  {}  @{}  files:{}  +{}/-{}\n",
-                pr.number,
-                pr.title,
-                pr.author.login,
-                pr.changed_files,
-                pr.additions,
-                pr.deletions
+                pr.number, pr.title, pr.author.login, pr.changed_files, pr.additions, pr.deletions
             ));
         }
     }
@@ -599,7 +596,9 @@ pub async fn pr_is_docs_only(exec: &GhExec, args: &Value) -> Result<String> {
         return Err(e);
     }
     if count == 0 {
-        return Ok(format!("PR #{pr_num} in {repo}: no changed files detected."));
+        return Ok(format!(
+            "PR #{pr_num} in {repo}: no changed files detected."
+        ));
     }
     let mut out = format!("PR #{pr_num} in {repo}: docs-only={docs_only}\n");
     out.push_str(&format!("Files: {count}  +{total_add}/-{total_del}\n"));
@@ -784,17 +783,16 @@ async fn fetch_pr_file_patch(
     Ok(None)
 }
 
-fn format_changed_files_list(
-    repo: &str,
-    pr_num: u32,
-    files: &[PrFileChange],
-) -> Result<String> {
+fn format_changed_files_list(repo: &str, pr_num: u32, files: &[PrFileChange]) -> Result<String> {
     if files.is_empty() {
         return Ok(format!("No changed files for PR #{pr_num} in {repo}."));
     }
     let mut total_add = 0i32;
     let mut total_del = 0i32;
-    let mut lines = vec![format!("{} changed file(s) in {repo}#{pr_num}:", files.len())];
+    let mut lines = vec![format!(
+        "{} changed file(s) in {repo}#{pr_num}:",
+        files.len()
+    )];
     for f in files {
         total_add += f.additions;
         total_del += f.deletions;
@@ -804,9 +802,8 @@ fn format_changed_files_list(
         ));
     }
     lines.push(format!("totals: +{total_add}/-{total_del}"));
-    lines.push(
-        "Next: pr_get_diff with path=<filename> for one file at a time on large PRs.".into(),
-    );
+    lines
+        .push("Next: pr_get_diff with path=<filename> for one file at a time on large PRs.".into());
     Ok(lines.join("\n"))
 }
 
@@ -889,11 +886,7 @@ async fn build_proverview_text(
     Ok(out.trim().to_string())
 }
 
-async fn build_pr_merge_blockers_text(
-    exec: &GhExec,
-    repo: &str,
-    pr_num: u32,
-) -> Result<String> {
+async fn build_pr_merge_blockers_text(exec: &GhExec, repo: &str, pr_num: u32) -> Result<String> {
     let pr_num_s = pr_num.to_string();
     let gh_args = [
         "pr",
@@ -942,11 +935,7 @@ async fn build_pr_merge_blockers_text(
     Ok(out.trim().to_string())
 }
 
-async fn build_pr_review_state_text(
-    exec: &GhExec,
-    repo: &str,
-    pr_num: u32,
-) -> Result<String> {
+async fn build_pr_review_state_text(exec: &GhExec, repo: &str, pr_num: u32) -> Result<String> {
     let pr_num_s = pr_num.to_string();
     let gh_args = [
         "pr",
@@ -993,10 +982,7 @@ async fn build_pr_review_state_text(
             };
             let snippet = clip_for_log(lr.body.trim(), 80);
             if !snippet.is_empty() {
-                out.push_str(&format!(
-                    "- @{} {state}: {snippet:?}\n",
-                    lr.author.login
-                ));
+                out.push_str(&format!("- @{} {state}: {snippet:?}\n", lr.author.login));
             } else {
                 out.push_str(&format!("- @{} {state}\n", lr.author.login));
             }
@@ -1016,9 +1002,7 @@ async fn build_pr_review_state_text(
         let mut lines: Vec<&str> = c_res.stdout.lines().filter(|l| !l.is_empty()).collect();
         if lines.len() > MAX_REVIEW_COMMENTS {
             lines.truncate(MAX_REVIEW_COMMENTS);
-            out.push_str(&format!(
-                "Inline comments (first {MAX_REVIEW_COMMENTS}):\n"
-            ));
+            out.push_str(&format!("Inline comments (first {MAX_REVIEW_COMMENTS}):\n"));
         } else {
             out.push_str("Inline comments:\n");
         }
@@ -1091,17 +1075,12 @@ async fn format_merged_pr_list(
         return Ok(if label.trim().is_empty() {
             format!("No merged PRs in {repo} since {since_date}.")
         } else {
-            format!(
-                "No merged PRs in {repo} since {since_date} with label {label:?}."
-            )
+            format!("No merged PRs in {repo} since {since_date} with label {label:?}.")
         });
     }
 
     let mut out = if label.trim().is_empty() {
-        format!(
-            "{} merged PR(s) in {repo} since {since_date}:\n",
-            prs.len()
-        )
+        format!("{} merged PR(s) in {repo} since {since_date}:\n", prs.len())
     } else {
         format!(
             "{} merged PR(s) in {repo} since {since_date} (label {label:?}):\n",
@@ -1489,10 +1468,7 @@ fn base64_decode(input: &str) -> std::result::Result<String, String> {
         }
         t
     };
-    let bytes: Vec<u8> = input
-        .bytes()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
+    let bytes: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
     let mut buf = 0u32;
     let mut bits = 0u32;

@@ -214,11 +214,7 @@ pub async fn analyze_run_failure(
 pub fn classify_failure(analysis: &RunFailureAnalysis) -> (FailureVerdict, &'static str) {
     let corpus = format!(
         "{} {} {} {} {}",
-        analysis.error_sig,
-        analysis.test_name,
-        analysis.job,
-        analysis.step,
-        analysis.workflow
+        analysis.error_sig, analysis.test_name, analysis.job, analysis.step, analysis.workflow
     )
     .to_ascii_lowercase();
 
@@ -340,7 +336,9 @@ pub fn format_draft_ci_comment(
             out.push_str("Looks like a transient infra/timeout failure — consider rerunning CI if this fingerprint is new.");
         }
         FailureVerdict::Auth => {
-            out.push_str("Auth/permission failure — please check secrets or token scopes before rerunning.");
+            out.push_str(
+                "Auth/permission failure — please check secrets or token scopes before rerunning.",
+            );
         }
         FailureVerdict::Test => {
             out.push_str("Test failure — please investigate the failing test before merge.");
@@ -528,14 +526,7 @@ async fn fetch_failed_job_log_text(
         ],
         &["run", "view", "-R", repo, "--job", &job_id_s, "--log"],
         &[
-            "run",
-            "view",
-            &run_id_s,
-            "-R",
-            repo,
-            "--job",
-            &job_id_s,
-            "--log",
+            "run", "view", &run_id_s, "-R", repo, "--job", &job_id_s, "--log",
         ],
     ];
     for args in attempts {
@@ -569,7 +560,9 @@ fn gh_run_log_recoverable(res: &RunResult) -> bool {
     if gh_run_log_unavailable_yet(res) {
         return true;
     }
-    res.combined().to_ascii_lowercase().contains("log not found")
+    res.combined()
+        .to_ascii_lowercase()
+        .contains("log not found")
 }
 
 fn gh_run_log_unavailable_yet(res: &RunResult) -> bool {
@@ -616,9 +609,7 @@ fn extract_test_name_from_logs(logs: &str) -> String {
         if low.contains(" ... failed") && low.starts_with("test ") {
             return truncate_runes(t, 120);
         }
-        if t.contains(".test.")
-            && (low.contains(" fail") || t.starts_with("FAIL "))
-        {
+        if t.contains(".test.") && (low.contains(" fail") || t.starts_with("FAIL ")) {
             return truncate_runes(t, 120);
         }
         if low.contains("tests failed") || low.contains("test suite failed") {

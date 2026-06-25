@@ -10,10 +10,10 @@ use crate::agent::chat_loop::ActivityFlowKind;
 use crate::agent::chat_loop::ChatActivityFlow;
 use crate::app::AppState;
 use crate::tui::context_panel::draw_context_panel;
+use crate::tui::markdown::StreamingMarkdownRenderer;
 use crate::tui::scroll::paragraph_scrollbar_state;
 use crate::tui::spinner;
 use crate::tui::theme::{self, ThemePalette};
-use crate::tui::markdown::StreamingMarkdownRenderer;
 
 const CHAT_SCROLL_PAGE: u16 = 8;
 const INPUT_PREFIX: &str = "▸ ";
@@ -226,10 +226,7 @@ fn activity_flow_preview_lines(
     flow: &ChatActivityFlow,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
-    let mut out = vec![activity_status_line(
-        th,
-        activity_flow_label(flow.kind),
-    )];
+    let mut out = vec![activity_status_line(th, activity_flow_label(flow.kind))];
     out.extend(reasoning_body_lines(th, &flow.text, panel_width));
     out
 }
@@ -358,7 +355,9 @@ fn entry_visible_in_history(entries: &[CachedMessageEntry], index: usize) -> boo
 }
 
 fn prev_visible_entry_index(entries: &[CachedMessageEntry], index: usize) -> Option<usize> {
-    (0..index).rev().find(|&i| entry_visible_in_history(entries, i))
+    (0..index)
+        .rev()
+        .find(|&i| entry_visible_in_history(entries, i))
 }
 
 fn next_visible_entry_index(entries: &[CachedMessageEntry], index: usize) -> Option<usize> {
@@ -381,10 +380,7 @@ fn tool_group_pos(entries: &[CachedMessageEntry], index: usize) -> ToolGroupPos 
     }
 }
 
-fn apply_tool_group_connector(
-    lines: Vec<Line<'static>>,
-    pos: ToolGroupPos,
-) -> Vec<Line<'static>> {
+fn apply_tool_group_connector(lines: Vec<Line<'static>>, pos: ToolGroupPos) -> Vec<Line<'static>> {
     if !matches!(
         pos,
         ToolGroupPos::First | ToolGroupPos::Middle | ToolGroupPos::Last
@@ -505,10 +501,8 @@ fn compose_history_lines(
             continue;
         }
         let group_pos = tool_group_pos(entries, i);
-        let composed = apply_tool_group_connector(
-            entry_compose_lines(th, entry, i, state),
-            group_pos,
-        );
+        let composed =
+            apply_tool_group_connector(entry_compose_lines(th, entry, i, state), group_pos);
         if composed.is_empty() {
             continue;
         }
@@ -1098,7 +1092,11 @@ mod tests {
         let th = ThemePalette::dark();
         let width = 42u16;
         let body = "## 4. How We Work Together\n\n* **Enhancements** — iterative workflow.\n* **Productivity** — use read_file before edit_file.";
-        let rows = theme::format_assistant_message_lines(th, body, Some(theme::chat_content_max_width(width)));
+        let rows = theme::format_assistant_message_lines(
+            th,
+            body,
+            Some(theme::chat_content_max_width(width)),
+        );
         let fitted = crate::tui::markdown::pad_lines_to_panel_width(
             crate::tui::markdown::ensure_chat_lines_fit_panel(rows, width),
             width,
@@ -1107,7 +1105,10 @@ mod tests {
         assert!(fitted.len() > 2);
         for line in &fitted {
             let w = crate::tui::markdown::line_display_width_for_test(line);
-            assert_eq!(w, width as usize, "padded row must fill panel: {w} != {width}: {line:?}");
+            assert_eq!(
+                w, width as usize,
+                "padded row must fill panel: {w} != {width}: {line:?}"
+            );
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             assert!(
                 !text.starts_with('▌') || text.contains("AI") || text.trim() == "▌",
@@ -1153,11 +1154,9 @@ mod tests {
             width,
             Style::default(),
         );
-        assert!(
-            fitted.iter().all(|line| {
-                crate::tui::markdown::line_display_width_for_test(line) == width as usize
-            })
-        );
+        assert!(fitted.iter().all(|line| {
+            crate::tui::markdown::line_display_width_for_test(line) == width as usize
+        }));
     }
 
     #[test]
@@ -1221,7 +1220,12 @@ mod tests {
         let rows = compose_history_lines(th, &state, &entries, width);
         let joined: Vec<String> = rows
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
         let first_tool = joined
             .iter()

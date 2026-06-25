@@ -50,12 +50,14 @@ impl HttpMcpClient {
         };
 
         let init_timeout = Duration::from_secs(timeout_secs.max(1));
-        timeout(init_timeout, client.initialize(None)).await.map_err(|_| {
-            CoworkerError::Other(anyhow::anyhow!(
-                "mcp server {:?} initialize timed out after {timeout_secs}s",
-                server.id
-            ))
-        })??;
+        timeout(init_timeout, client.initialize(None))
+            .await
+            .map_err(|_| {
+                CoworkerError::Other(anyhow::anyhow!(
+                    "mcp server {:?} initialize timed out after {timeout_secs}s",
+                    server.id
+                ))
+            })??;
         Ok(client)
     }
 
@@ -101,10 +103,7 @@ impl HttpMcpClient {
             "arguments": arguments,
         });
         let call_timeout = Duration::from_secs(timeout_secs.max(1));
-        let result = timeout(
-            call_timeout,
-            self.request("tools/call", params, &cancel),
-        )
+        let result = timeout(call_timeout, self.request("tools/call", params, &cancel))
             .await
             .map_err(|_| {
                 CoworkerError::Other(anyhow::anyhow!(
@@ -130,12 +129,12 @@ impl HttpMcpClient {
             call_timeout,
             self.request("resources/read", params, &cancel),
         )
-            .await
-            .map_err(|_| {
-                CoworkerError::Other(anyhow::anyhow!(
-                    "mcp resources/read {uri} timed out after {timeout_secs}s"
-                ))
-            })??;
+        .await
+        .map_err(|_| {
+            CoworkerError::Other(anyhow::anyhow!(
+                "mcp resources/read {uri} timed out after {timeout_secs}s"
+            ))
+        })??;
         Ok(format_resource_result(&result))
     }
 
@@ -283,7 +282,9 @@ impl HttpMcpClient {
     fn finish_rpc(value: Value, expected_id: u64) -> Result<Value> {
         match extract_rpc_result(&value, expected_id) {
             Some(Ok(result)) => Ok(result),
-            Some(Err(err)) => Err(CoworkerError::Other(anyhow::anyhow!("mcp rpc error: {err}"))),
+            Some(Err(err)) => Err(CoworkerError::Other(anyhow::anyhow!(
+                "mcp rpc error: {err}"
+            ))),
             None => Err(CoworkerError::Other(anyhow::anyhow!(
                 "mcp http json response missing id {expected_id}"
             ))),
@@ -318,6 +319,7 @@ mod tests {
             approval: McpApprovalConfig::default(),
             startup: None,
             timeout_secs: None,
+            skills: vec![],
         }
     }
 

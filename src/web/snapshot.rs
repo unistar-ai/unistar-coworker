@@ -2,9 +2,9 @@ use chrono::NaiveDate;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::app::{AppState, Tab};
 use crate::agent::budget::TokenBudget;
 use crate::agent::context::truncate_chars;
+use crate::app::{AppState, Tab};
 
 const WEB_CONTEXT_MSG_CHARS: usize = 4_000;
 /// Tool output bodies in WS chat patches (full snapshot may still be large on first load).
@@ -58,6 +58,8 @@ pub struct WebSnapshot {
     pub llm_latency_ms: Option<u128>,
     pub mcp_servers: Vec<Value>,
     pub attach_mode: bool,
+    /// When true, mutating GitHub/MCP tools run without approval (`chat.auto_approve_mutations`).
+    pub auto_approve_mutations: bool,
     /// Default Web UI theme from config (`dark` | `light`); user override in localStorage.
     pub ui_theme: String,
 }
@@ -281,6 +283,7 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
             })
             .collect(),
         attach_mode: s.attach_mode,
+        auto_approve_mutations: s.config.chat.auto_approve_mutations,
         ui_theme: s.config.web_theme_id().to_string(),
     }
 }
@@ -317,6 +320,8 @@ fn build_chat_context_json(s: &AppState) -> Value {
                 "content": truncate_chars(&m.content, WEB_CONTEXT_MSG_CHARS),
             })).collect::<Vec<_>>(),
             "runtime_context_revision": c.runtime_context_revision,
+            "context_trimmed_turns": c.context_trimmed_turns,
+            "context_summary_note": c.context_summary_note,
         })
     } else {
         let budget = TokenBudget::from_config(s.config.llm.context_limit);
@@ -333,6 +338,8 @@ fn build_chat_context_json(s: &AppState) -> Value {
             "message_count": 0,
             "messages": [],
             "runtime_context_revision": Value::Null,
+            "context_trimmed_turns": 0,
+            "context_summary_note": Value::Null,
         })
     }
 }
@@ -354,6 +361,7 @@ fn build_approval_dialog_json(s: &AppState) -> Option<Value> {
             "id": d.id,
             "tool_name": d.tool_name,
             "description": d.description,
+            "tool_args_json": d.tool_args_json,
             "choice": format!("{:?}", d.choice),
             "deciding": d.deciding,
             "approve_armed": d.approve_armed(),
@@ -419,5 +427,63 @@ pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
         chat_context: Some(build_chat_context_json(s)),
         chat_pending_approval: build_chat_pending_approval_json(s),
         approval_dialog: build_approval_dialog_json(s),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::AppState;
+    use crate::config::Config;
+    use crate::mcp::McpServerStatus;
+
+    fn test_config_yaml(auto_approve: bool) -> Config {
+        let yaml = format!(
+            r#"
+llm: {{ base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }}
+chat:
+  enabled: true
+  auto_approve_mutations: {auto_approve}
+storage: {{ backend: json, path: ./data }}
+repos: [acme/widget]
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    #[test]
+    fn snapshot_exposes_auto_approve_mutations_from_config() {
+        let snap = build_snapshot_from(&AppState::new(
+            test_config_yaml(true),
+            "coworker.yaml".into(),
+        ));
+        assert!(snap.auto_approve_mutations);
+
+        let snap_off = build_snapshot_from(&AppState::new(
+            test_config_yaml(false),
+            "coworker.yaml".into(),
+        ));
+        assert!(!snap_off.auto_approve_mutations);
+    }
+
+    #[test]
+    fn snapshot_exposes_mcp_server_metrics() {
+        let mut app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        app.mcp_servers = vec![McpServerStatus {
+            id: "slack".into(),
+            connected: true,
+            tool_count: 3,
+            last_error: None,
+            last_rpc_ms: Some(42),
+            prefix: "slack_".into(),
+        }];
+        let snap = build_snapshot_from(&app);
+        assert_eq!(snap.mcp_servers.len(), 1);
+        let server = &snap.mcp_servers[0];
+        assert_eq!(server["id"], "slack");
+        assert_eq!(server["connected"], true);
+        assert_eq!(server["tool_count"], 3);
+        assert_eq!(server["last_rpc_ms"], 42);
+        assert!(server["last_error"].is_null());
     }
 }

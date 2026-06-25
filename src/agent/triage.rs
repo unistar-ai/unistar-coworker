@@ -4,18 +4,20 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::agent::log_pages::parse_log_page;
-use crate::agent::parse::{extract_ci_kind, extract_failing_runs_from_overview, parse_failing_runs, ParsedPrLine};
+use crate::agent::parse::{
+    extract_ci_kind, extract_failing_runs_from_overview, parse_failing_runs, ParsedPrLine,
+};
 use crate::app::AppEvent;
 use crate::config::{Config, RuleConfig};
 use crate::engine::prompt::compose_classify_prompt;
 use crate::engine::SkillSpec;
 use crate::error::Result;
+use crate::github::helpers::gh_tool;
+use crate::github::GithubHarness;
 use crate::llm::{
     append_log_chunk, format_policy_digest_line, format_policy_digest_line_from_classify,
     next_prior_summary, ClassifyResult, ClassifyVerdict, LlmClient,
 };
-use crate::github::helpers::gh_tool;
-use crate::github::GithubHarness;
 use crate::store::{Approval, ApprovalKind, ApprovalStatus, PrSnapshot, Store};
 
 #[derive(Debug, Clone)]
@@ -106,10 +108,13 @@ pub async fn triage_pr(
             || extract_ci_kind(&analyze_text) == Some("external_only")
         {
             outcome.preamble.push(
-                "External CI failing — inspect PR checks tab; triage cannot fetch external logs.".into(),
+                "External CI failing — inspect PR checks tab; triage cannot fetch external logs."
+                    .into(),
             );
         } else if extract_ci_kind(&analyze_text) == Some("pending") {
-            outcome.preamble.push("CI checks still pending — re-triage when complete.".into());
+            outcome
+                .preamble
+                .push("CI checks still pending — re-triage when complete.".into());
         } else {
             outcome
                 .preamble
@@ -207,8 +212,7 @@ pub async fn triage_pr(
                 if let Some(excerpt) = digest_excerpt(&digest) {
                     combined_logs = excerpt;
                 }
-                classify =
-                    classify_from_failure_digest(&digest, &run.workflow, &config.rules);
+                classify = classify_from_failure_digest(&digest, &run.workflow, &config.rules);
             }
         }
 

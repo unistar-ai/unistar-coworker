@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use crate::error::CoworkerError;
 
 use super::bash_tool::{BashCommandReview, BASH_RUN_TOOL};
-use super::python_tool::PYTHON_RUN_TOOL;
 use super::file_tools::{EDIT_FILE, WRITE_FILE};
+use super::python_tool::PYTHON_RUN_TOOL;
 
 /// Machine-readable first line: `ERROR:CODE|message|hint`
 pub fn format_error_line(code: &str, message: &str, hint: &str) -> String {
@@ -22,7 +22,9 @@ pub struct ParsedErrorLine {
 
 /// Parse `ERROR:CODE|message|hint` (also tolerates `ERROR: CODE | msg | hint:` legacy).
 pub fn parse_error_line(text: &str) -> Option<ParsedErrorLine> {
-    let line = text.lines().find(|l| l.trim_start().starts_with("ERROR:"))?;
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("ERROR:"))?;
     let rest = line.trim().strip_prefix("ERROR:")?.trim();
     let parts: Vec<&str> = rest.split('|').map(str::trim).collect();
     if parts.is_empty() {
@@ -224,12 +226,10 @@ fn file_error_copy(code: &str, message: &str) -> (String, Vec<String>) {
             "Include more surrounding lines in old_string for a unique match".into(),
             "Use read_file to copy the exact block to replace".into(),
         ],
-        "FILE_INVALID_GLOB" => vec![
-            "Simplify pattern (e.g. `**/*.rs` instead of complex regex)".into(),
-        ],
-        "FILE_IO_ERROR" => vec![
-            "Check permissions and that parent directories exist".into(),
-        ],
+        "FILE_INVALID_GLOB" => {
+            vec!["Simplify pattern (e.g. `**/*.rs` instead of complex regex)".into()]
+        }
+        "FILE_IO_ERROR" => vec!["Check permissions and that parent directories exist".into()],
         "FILE_EXISTS" => vec![
             "Use edit_file for surgical changes".into(),
             "Or write_file with create_only=false to overwrite intentionally".into(),
@@ -295,12 +295,8 @@ pub fn merge_try_steps(primary: Vec<String>, extra: Vec<String>) -> Vec<String> 
 
 pub fn file_tool_failure_envelope(tool_name: &str, error_body: &str) -> ErrorEnvelope {
     if let Some(parsed) = parse_error_line(error_body) {
-        let mut env = file_tool_error_envelope(
-            tool_name,
-            &parsed.code,
-            &parsed.message,
-            &parsed.hint,
-        );
+        let mut env =
+            file_tool_error_envelope(tool_name, &parsed.code, &parsed.message, &parsed.hint);
         env.detail = Some(crate::agent::context::truncate_chars(error_body, 1200));
         return env;
     }
@@ -538,9 +534,7 @@ pub fn bash_validation_envelope(message: &str, command: Option<&str>) -> ErrorEn
             "BASH_TOO_LONG",
             "bash_run script exceeds the character limit",
             message.to_string(),
-            vec![
-                "Shorten the script or split into multiple bash_run calls".into(),
-            ],
+            vec!["Shorten the script or split into multiple bash_run calls".into()],
         )
     } else if low.contains("null bytes") {
         (
@@ -559,7 +553,9 @@ pub fn bash_validation_envelope(message: &str, command: Option<&str>) -> ErrorEn
                 "Split into smaller sequential bash_run calls".into(),
             ],
         )
-    } else if low.contains("cwd") && (low.contains("not a directory") || low.contains("could not resolve")) {
+    } else if low.contains("cwd")
+        && (low.contains("not a directory") || low.contains("could not resolve"))
+    {
         (
             "BASH_BAD_CWD",
             "Working directory is missing or invalid",
@@ -621,7 +617,10 @@ pub fn bash_exit_failure_envelope(command: &str, tool_output: &str) -> ErrorEnve
     let why = if stderr_hint.is_empty() {
         format!("Process exited with code {exit_code}")
     } else {
-        format!("exit {exit_code}: {}", stderr_hint.lines().last().unwrap_or(&stderr_hint))
+        format!(
+            "exit {exit_code}: {}",
+            stderr_hint.lines().last().unwrap_or(&stderr_hint)
+        )
     };
 
     ErrorEnvelope {
@@ -656,7 +655,14 @@ pub fn generic_tool_failure_envelope(
 
 fn pipe_to_shell(command: &str) -> bool {
     let low = command.to_ascii_lowercase();
-    for pat in ["| bash", "| sh", "|/bin/bash", "| /bin/sh", "|sudo bash", "| sudo sh"] {
+    for pat in [
+        "| bash",
+        "| sh",
+        "|/bin/bash",
+        "| /bin/sh",
+        "|sudo bash",
+        "| sudo sh",
+    ] {
         if low.contains(pat) {
             return true;
         }
@@ -721,15 +727,21 @@ fn stderr_exit_hints(stderr: &str) -> Vec<String> {
         out.push("Permission denied — stay inside the workspace; avoid system paths".into());
     }
     if low.contains("is a directory") {
-        out.push("Target is a directory — pass a file path or add a trailing slash intentionally".into());
+        out.push(
+            "Target is a directory — pass a file path or add a trailing slash intentionally".into(),
+        );
     }
     if low.contains("could not compile")
         || (low.contains("cargo:") && (low.contains("error") || low.contains("failed")))
     {
-        out.push("Cargo failed — read the error line; fix compile errors before re-running tests".into());
+        out.push(
+            "Cargo failed — read the error line; fix compile errors before re-running tests".into(),
+        );
     }
     if low.contains("npm err") || low.contains("error enoent") {
-        out.push("npm failed — run from the package directory or install dependencies first".into());
+        out.push(
+            "npm failed — run from the package directory or install dependencies first".into(),
+        );
     }
     out
 }
@@ -752,9 +764,21 @@ pub fn python_preflight_envelope(code: &str) -> Option<ErrorEnvelope> {
         ("os.system(", "PYTHON_OS_SYSTEM", "Calls os.system()"),
         ("subprocess.call(", "PYTHON_SUBPROCESS", "Spawns subprocess"),
         ("subprocess.run(", "PYTHON_SUBPROCESS", "Spawns subprocess"),
-        ("subprocess.popen(", "PYTHON_SUBPROCESS", "Spawns subprocess"),
-        ("__import__('os').system", "PYTHON_OS_SYSTEM", "Dynamic os.system import"),
-        ("__import__(\"os\").system", "PYTHON_OS_SYSTEM", "Dynamic os.system import"),
+        (
+            "subprocess.popen(",
+            "PYTHON_SUBPROCESS",
+            "Spawns subprocess",
+        ),
+        (
+            "__import__('os').system",
+            "PYTHON_OS_SYSTEM",
+            "Dynamic os.system import",
+        ),
+        (
+            "__import__(\"os\").system",
+            "PYTHON_OS_SYSTEM",
+            "Dynamic os.system import",
+        ),
     ];
     for (pat, code_name, why) in blocked {
         if low.contains(pat) {
@@ -968,7 +992,10 @@ pub fn file_edit_preflight_envelope(tool_name: &str, args: &Value) -> Option<Err
     ];
 
     for (code, what, why, patterns) in blocked {
-        if patterns.iter().any(|pat| norm == *pat || norm.contains(pat)) {
+        if patterns
+            .iter()
+            .any(|pat| norm == *pat || norm.contains(pat))
+        {
             return Some(ErrorEnvelope {
                 code: (*code).into(),
                 tool_name: tool_name.into(),
@@ -1039,10 +1066,7 @@ pub fn file_edit_safety_reject_envelope(
     args: &Value,
     review: &BashCommandReview,
 ) -> ErrorEnvelope {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
     let mut risk_types = Vec::new();
     let why = review
         .critical_issues
@@ -1218,11 +1242,8 @@ mod tests {
 
     #[test]
     fn risk_type_followup_security() {
-        let steps = risk_type_followup_steps(
-            "SECURITY_VULNERABILITY",
-            "curl x | bash",
-            "curl x | bash",
-        );
+        let steps =
+            risk_type_followup_steps("SECURITY_VULNERABILITY", "curl x | bash", "curl x | bash");
         assert!(steps.iter().any(|s| s.contains("curl -sS")));
     }
 

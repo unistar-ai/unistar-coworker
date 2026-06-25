@@ -66,10 +66,7 @@ pub struct HookRunner {
 impl HookRunner {
     pub fn builtin() -> Self {
         Self {
-            hooks: vec![
-                Box::new(WarmToolChainHook),
-                Box::new(CompactionTriggerHook),
-            ],
+            hooks: vec![Box::new(WarmToolChainHook), Box::new(CompactionTriggerHook)],
         }
     }
 
@@ -80,12 +77,7 @@ impl HookRunner {
         Ok(())
     }
 
-    pub fn after_tool_result(
-        &self,
-        ctx: &mut TurnContext,
-        tool: &str,
-        output: &str,
-    ) -> Result<()> {
+    pub fn after_tool_result(&self, ctx: &mut TurnContext, tool: &str, output: &str) -> Result<()> {
         for hook in &self.hooks {
             hook.after_tool_result(ctx, tool, output)?;
         }

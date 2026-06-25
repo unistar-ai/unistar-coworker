@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::agent::context::truncate_chars;
 use crate::agent::file_text::{
-    apply_replacement, match_old_string, old_string_candidates, normalize_line_endings_for_file,
+    apply_replacement, match_old_string, normalize_line_endings_for_file, old_string_candidates,
     preserve_trailing_newline, read_text_file, MatchMode, TextFile,
 };
 use crate::agent::harness_errors::file_tool_workflow_error;
@@ -40,9 +40,7 @@ fn file_err(tool: &str, code: &str, message: impl std::fmt::Display, hint: &str)
 
 fn load_text_file(tool: &str, path: &Path) -> Result<TextFile> {
     read_text_file(path).map_err(|e| match e {
-        CoworkerError::Workflow(msg)
-            if msg.contains("binary") || msg.contains("UTF-8") =>
-        {
+        CoworkerError::Workflow(msg) if msg.contains("binary") || msg.contains("UTF-8") => {
             file_err(
                 tool,
                 "FILE_BINARY",
@@ -92,22 +90,30 @@ pub fn resolve_workspace_path(workspace: &Path, user_path: &str) -> Result<PathB
         workspace.join(trimmed)
     };
     let canonical = if candidate.exists() {
-        candidate
-            .canonicalize()
-            .map_err(|e| {
-                file_err(
-                    READ_FILE,
-                    "FILE_IO_ERROR",
-                    format!("could not resolve path: {e}"),
-                    "Check path exists under workspace",
-                )
-            })?
+        candidate.canonicalize().map_err(|e| {
+            file_err(
+                READ_FILE,
+                "FILE_IO_ERROR",
+                format!("could not resolve path: {e}"),
+                "Check path exists under workspace",
+            )
+        })?
     } else {
         let parent = candidate.parent().ok_or_else(|| {
-            file_err(READ_FILE, "FILE_IO_ERROR", "invalid path", "Pass a valid file path")
+            file_err(
+                READ_FILE,
+                "FILE_IO_ERROR",
+                "invalid path",
+                "Pass a valid file path",
+            )
         })?;
         let file_name = candidate.file_name().ok_or_else(|| {
-            file_err(READ_FILE, "FILE_IO_ERROR", "invalid path", "Pass a valid file path")
+            file_err(
+                READ_FILE,
+                "FILE_IO_ERROR",
+                "invalid path",
+                "Pass a valid file path",
+            )
         })?;
         let parent_canonical = parent.canonicalize().map_err(|e| {
             file_err(
@@ -166,17 +172,14 @@ pub fn execute_file_tool(workspace: &Path, name: &str, args: &Value) -> Result<S
 }
 
 fn read_file(workspace: &Path, args: &Value) -> Result<String> {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            file_err(
-                READ_FILE,
-                "FILE_MISSING_ARG",
-                "read_file needs path",
-                "Pass workspace-relative path",
-            )
-        })?;
+    let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+        file_err(
+            READ_FILE,
+            "FILE_MISSING_ARG",
+            "read_file needs path",
+            "Pass workspace-relative path",
+        )
+    })?;
     let start_line = args
         .get("start_line")
         .and_then(|v| v.as_u64())
@@ -228,12 +231,14 @@ fn grep(workspace: &Path, args: &Value) -> Result<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            file_err(GREP, "FILE_MISSING_ARG", "grep needs pattern", "Pass a regex pattern")
+            file_err(
+                GREP,
+                "FILE_MISSING_ARG",
+                "grep needs pattern",
+                "Pass a regex pattern",
+            )
         })?;
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     let resolved = resolve_workspace_path(workspace, path)?;
     if !resolved.exists() {
         return Err(file_err(
@@ -254,28 +259,27 @@ fn grep(workspace: &Path, args: &Value) -> Result<String> {
         Ok(o) => o,
         Err(_) => {
             let mut fallback = Command::new("grep");
-            fallback
-                .arg("-rn")
-                .arg("--")
-                .arg(pattern)
-                .arg(&resolved);
-            fallback
-                .output()
-                .map_err(|e| {
-                    file_err(
-                        GREP,
-                        "FILE_IO_ERROR",
-                        format!("grep spawn failed: {e}"),
-                        "Ensure rg or grep is installed",
-                    )
-                })?
+            fallback.arg("-rn").arg("--").arg(pattern).arg(&resolved);
+            fallback.output().map_err(|e| {
+                file_err(
+                    GREP,
+                    "FILE_IO_ERROR",
+                    format!("grep spawn failed: {e}"),
+                    "Ensure rg or grep is installed",
+                )
+            })?
         }
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut lines: Vec<String> = stdout
         .lines()
-        .map(|l| l.replace(&format!("{}", resolved.display()), &display_relative(workspace, &resolved)))
+        .map(|l| {
+            l.replace(
+                &format!("{}", resolved.display()),
+                &display_relative(workspace, &resolved),
+            )
+        })
         .collect();
     if lines.len() > GREP_MAX_MATCHES {
         let omitted = lines.len() - GREP_MAX_MATCHES;
@@ -299,12 +303,14 @@ fn glob_files(workspace: &Path, args: &Value) -> Result<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            file_err(GLOB, "FILE_MISSING_ARG", "glob needs pattern", "Pass e.g. **/*.rs")
+            file_err(
+                GLOB,
+                "FILE_MISSING_ARG",
+                "glob needs pattern",
+                "Pass e.g. **/*.rs",
+            )
         })?;
-    let base = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let base = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     let base_path = resolve_workspace_path(workspace, base)?;
     if !base_path.is_dir() {
         return Err(file_err(
@@ -356,7 +362,12 @@ fn collect_glob_matches(
     })?;
     for entry in entries {
         let entry = entry.map_err(|e| {
-            file_err(GLOB, "FILE_IO_ERROR", format!("glob entry: {e}"), "Retry glob")
+            file_err(
+                GLOB,
+                "FILE_IO_ERROR",
+                format!("glob entry: {e}"),
+                "Retry glob",
+            )
         })?;
         let path = entry.path();
         let rel = path
@@ -416,17 +427,14 @@ fn glob_pattern_to_regex(pattern: &str) -> Result<regex::Regex> {
 }
 
 fn write_file(workspace: &Path, args: &Value) -> Result<String> {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            file_err(
-                WRITE_FILE,
-                "FILE_MISSING_ARG",
-                "write_file needs path",
-                "Pass workspace-relative path",
-            )
-        })?;
+    let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+        file_err(
+            WRITE_FILE,
+            "FILE_MISSING_ARG",
+            "write_file needs path",
+            "Pass workspace-relative path",
+        )
+    })?;
     let content = args
         .get("content")
         .and_then(|v| v.as_str())
@@ -473,17 +481,14 @@ fn write_file(workspace: &Path, args: &Value) -> Result<String> {
 }
 
 fn edit_file(workspace: &Path, args: &Value) -> Result<String> {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            file_err(
-                EDIT_FILE,
-                "FILE_MISSING_ARG",
-                "edit_file needs path",
-                "Pass workspace-relative path",
-            )
-        })?;
+    let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+        file_err(
+            EDIT_FILE,
+            "FILE_MISSING_ARG",
+            "edit_file needs path",
+            "Pass workspace-relative path",
+        )
+    })?;
     let old_str = args
         .get("old_string")
         .and_then(|v| v.as_str())
@@ -553,7 +558,11 @@ fn edit_file(workspace: &Path, args: &Value) -> Result<String> {
     let old_lines = old_str.lines().count();
     let new_lines = new_str.lines().count();
     let delta = (new_lines as i32 - old_lines as i32)
-        * if mode == MatchMode::All { count as i32 } else { 1 };
+        * if mode == MatchMode::All {
+            count as i32
+        } else {
+            1
+        };
     let rel = display_relative(workspace, &resolved);
     let suffix = if mode == MatchMode::All {
         format!(", {count} replacements")
@@ -575,10 +584,7 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
             )
         })?;
     }
-    let tmp = path.with_extension(format!(
-        "tmp.{}",
-        uuid::Uuid::new_v4().as_simple()
-    ));
+    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().as_simple()));
     std::fs::write(&tmp, content).map_err(|e| {
         file_err(
             WRITE_FILE,
@@ -610,10 +616,14 @@ pub fn format_edit_summary(workspace: &Path, path: &str, tool_name: &str, output
 }
 
 pub(crate) fn display_relative(workspace: &Path, path: &Path) -> String {
-    path.strip_prefix(workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf()))
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    path.strip_prefix(
+        workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf()),
+    )
+    .unwrap_or(path)
+    .to_string_lossy()
+    .replace('\\', "/")
 }
 
 #[cfg(test)]
@@ -627,7 +637,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
         fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("src/foo.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
+        fs::write(
+            root.join("src/foo.rs"),
+            "fn main() {\n    println!(\"hi\");\n}\n",
+        )
+        .unwrap();
         fs::write(root.join("README.md"), "# test\n").unwrap();
         fs::create_dir_all(root.join("nested")).unwrap();
         fs::write(root.join("nested/bar.txt"), "bar\n").unwrap();
@@ -651,7 +665,11 @@ mod tests {
     #[test]
     fn read_file_line_range() {
         let (_dir, root) = workspace_with_files();
-        let out = read_file(&root, &json!({"path": "src/foo.rs", "start_line": 2, "max_lines": 1})).unwrap();
+        let out = read_file(
+            &root,
+            &json!({"path": "src/foo.rs", "start_line": 2, "max_lines": 1}),
+        )
+        .unwrap();
         assert!(out.contains("2|"));
         assert!(out.contains("println"));
     }
@@ -694,11 +712,7 @@ mod tests {
         for i in 0..250 {
             fs::write(root.join(format!("many_{i}.txt")), "needle\n").unwrap();
         }
-        let out = grep(
-            &root,
-            &json!({"pattern": "needle", "path": "."}),
-        )
-        .unwrap();
+        let out = grep(&root, &json!({"pattern": "needle", "path": "."})).unwrap();
         assert!(out.contains("[cap:"));
     }
 
@@ -712,11 +726,7 @@ mod tests {
     #[test]
     fn write_file_creates_new() {
         let (_dir, root) = workspace_with_files();
-        write_file(
-            &root,
-            &json!({"path": "new.txt", "content": "hello\n"}),
-        )
-        .unwrap();
+        write_file(&root, &json!({"path": "new.txt", "content": "hello\n"})).unwrap();
         assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "hello\n");
     }
 
@@ -750,7 +760,10 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(fs::read_to_string(root.join("many.txt")).unwrap(), "y\ny\ny\n");
+        assert_eq!(
+            fs::read_to_string(root.join("many.txt")).unwrap(),
+            "y\ny\ny\n"
+        );
     }
 
     #[test]
@@ -768,11 +781,7 @@ mod tests {
     fn write_file_preserves_crlf_on_overwrite() {
         let (_dir, root) = workspace_with_files();
         fs::write(root.join("win.txt"), "a\r\nb\r\n").unwrap();
-        write_file(
-            &root,
-            &json!({"path": "win.txt", "content": "c\nd\n"}),
-        )
-        .unwrap();
+        write_file(&root, &json!({"path": "win.txt", "content": "c\nd\n"})).unwrap();
         assert_eq!(fs::read(root.join("win.txt")).unwrap(), b"c\r\nd\r\n");
     }
 

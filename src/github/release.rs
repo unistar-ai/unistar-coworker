@@ -76,9 +76,8 @@ async fn list_repo_tags(exec: &GhExec, repo: &str, limit: u32) -> Result<Vec<Git
     let gh_args = ["api", &path];
     let res = exec.run_retry(&gh_args).await;
     let stdout = GhExec::into_result(res, "failed to list tags")?;
-    serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Other(anyhow::anyhow!("failed to parse tag list: {e}"))
-    })
+    serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Other(anyhow::anyhow!("failed to parse tag list: {e}")))
 }
 
 async fn tag_commit_date(exec: &GhExec, repo: &str, tag: &str) -> Result<String> {
@@ -125,9 +124,8 @@ async fn tag_commit_date(exec: &GhExec, repo: &str, tag: &str) -> Result<String>
         #[serde(rename = "type")]
         object_type: String,
     }
-    let tag_ref: TagRef = serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Other(anyhow::anyhow!("failed to parse tag ref: {e}"))
-    })?;
+    let tag_ref: TagRef = serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Other(anyhow::anyhow!("failed to parse tag ref: {e}")))?;
     let mut sha = tag_ref.object.sha.trim().to_string();
     if sha.is_empty() {
         return Err(CoworkerError::Other(anyhow::anyhow!(
@@ -160,11 +158,12 @@ async fn tag_commit_date(exec: &GhExec, repo: &str, tag: &str) -> Result<String>
     let commit_path = format!("repos/{repo}/commits/{sha}");
     let commit_args = ["api", &commit_path, "-q", ".commit.committer.date"];
     let commit_res = exec.run_retry(&commit_args).await;
-    let date_raw =
-        GhExec::into_result(commit_res, &format!("failed to resolve commit date for tag {tag:?}"))?;
-    iso_date_prefix(date_raw.trim()).ok_or_else(|| {
-        CoworkerError::Other(anyhow::anyhow!("empty commit date for tag {tag:?}"))
-    })
+    let date_raw = GhExec::into_result(
+        commit_res,
+        &format!("failed to resolve commit date for tag {tag:?}"),
+    )?;
+    iso_date_prefix(date_raw.trim())
+        .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("empty commit date for tag {tag:?}")))
 }
 
 fn iso_date_prefix(ts: &str) -> Option<String> {

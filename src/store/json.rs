@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::agent::context::harness_nudge_base;
 use crate::error::{CoworkerError, Result};
 use crate::store::{
-    Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, ChatRuntimeState,
-    ChatSession, Digest, PrSnapshot, Store, Transcript, WorkflowRun,
+    Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole,
+    ChatRuntimeState, ChatSession, Digest, PrSnapshot, Store, Transcript, WorkflowRun,
 };
 use async_trait::async_trait;
 
@@ -236,6 +236,22 @@ impl Store for JsonStore {
             return Ok(vec![]);
         }
         Ok(read_json(&path)?)
+    }
+
+    async fn list_approval_history(&self, limit: usize) -> Result<Vec<Approval>> {
+        let path = self.root.join("approvals/history.jsonl");
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        let raw = fs::read_to_string(&path)?;
+        let mut list: Vec<Approval> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        list.sort_by_key(|a| std::cmp::Reverse(a.decided_at.unwrap_or(a.created_at)));
+        list.truncate(limit);
+        Ok(list)
     }
 
     async fn append_audit(&self, entry: &AuditEntry) -> Result<()> {
@@ -492,5 +508,56 @@ mod tests {
         let loaded = store.latest_digest().await.unwrap().unwrap();
         assert_eq!(loaded.id, digest.id);
         assert_eq!(loaded.summary.duration_secs, 1.5);
+    }
+
+    #[tokio::test]
+    async fn approval_history_lists_decided_recent_first() {
+        use crate::store::{ApprovalKind, ApprovalStatus};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonStore::open(dir.path().to_path_buf()).unwrap();
+        let older = Approval {
+            id: Uuid::new_v4(),
+            kind: ApprovalKind::BashRun,
+            repo: "acme/widget".into(),
+            pr_number: None,
+            run_id: None,
+            target_branch: None,
+            incident_id: None,
+            description: "older".into(),
+            status: ApprovalStatus::Pending,
+            created_at: Utc::now() - chrono::Duration::hours(2),
+            decided_at: None,
+            comment_body: Some(r#"{"command":"ls"}"#.into()),
+            issue_number: None,
+            label: None,
+        };
+        let newer = Approval {
+            id: Uuid::new_v4(),
+            kind: ApprovalKind::WriteFile,
+            repo: "acme/widget".into(),
+            pr_number: None,
+            run_id: None,
+            target_branch: None,
+            incident_id: None,
+            description: "newer".into(),
+            status: ApprovalStatus::Pending,
+            created_at: Utc::now(),
+            decided_at: None,
+            comment_body: Some(r#"{"path":"a.txt","content":"x"}"#.into()),
+            issue_number: None,
+            label: None,
+        };
+        store.push_approval(&older).await.unwrap();
+        store.push_approval(&newer).await.unwrap();
+        store.decide_approval(&older.id, false).await.unwrap();
+        store.decide_approval(&newer.id, true).await.unwrap();
+
+        let history = store.list_approval_history(10).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].id, newer.id);
+        assert_eq!(history[0].status, ApprovalStatus::Approved);
+        assert_eq!(history[1].id, older.id);
+        assert_eq!(history[1].status, ApprovalStatus::Denied);
     }
 }

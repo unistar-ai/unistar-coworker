@@ -6,11 +6,9 @@ use super::args::{
 use super::checks::{
     self, external_checks_failing, format_external_check_summary, pending_check_summary,
 };
-use super::ci_common::{
-    self, CI_RUN_LIST_LIMIT, WorkflowRun,
-};
-use super::ci_logs::{self, DistillOptions};
+use super::ci_common::{self, WorkflowRun, CI_RUN_LIST_LIMIT};
 use super::ci_fingerprint;
+use super::ci_logs::{self, DistillOptions};
 use super::error::format_tool_ok;
 use super::exec::GhExec;
 use crate::error::Result;
@@ -51,7 +49,9 @@ pub async fn load_pr_failure_state(
         }
     }
     if include_external {
-        state.rollup = ci_common::pr_status_rollup(exec, repo, pr_num).await.unwrap_or_default();
+        state.rollup = ci_common::pr_status_rollup(exec, repo, pr_num)
+            .await
+            .unwrap_or_default();
     }
     state
         .real_failed
@@ -62,7 +62,11 @@ pub async fn load_pr_failure_state(
     Ok(state)
 }
 
-pub fn compute_ci_kind(real_failed: usize, waiting_approval: usize, rollup: &[checks::CheckRollup]) -> String {
+pub fn compute_ci_kind(
+    real_failed: usize,
+    waiting_approval: usize,
+    rollup: &[checks::CheckRollup],
+) -> String {
     let has_actions = real_failed > 0;
     let has_external = external_checks_failing(rollup);
     let has_approval = waiting_approval > 0;
@@ -103,7 +107,9 @@ pub fn format_analyze_pr_failures(state: &PrFailureState, include_external: bool
         if !ext.is_empty() {
             out.push('\n');
             out.push_str(&ext);
-            out.push_str("Do not call ci_get_failed_logs for external checks — inspect the PR checks tab.\n");
+            out.push_str(
+                "Do not call ci_get_failed_logs for external checks — inspect the PR checks tab.\n",
+            );
         } else {
             let pending = pending_check_summary(&state.rollup);
             if !pending.is_empty() {
@@ -150,7 +156,10 @@ pub fn format_analyze_pr_failures(state: &PrFailureState, include_external: bool
             state.waiting_approval.len()
         ));
         for r in &state.waiting_approval {
-            out.push_str(&format!("{}  {}  action_required\n", r.database_id, r.workflow_name));
+            out.push_str(&format!(
+                "{}  {}  action_required\n",
+                r.database_id, r.workflow_name
+            ));
         }
     }
     if include_external {
@@ -233,10 +242,7 @@ pub async fn ci_get_failed_logs(exec: &GhExec, args: &Value) -> Result<String> {
         .get("offset_lines")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
-    let max_lines = args
-        .get("max_lines")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    let max_lines = args.get("max_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     let run = load_run_summary(exec, &repo, run_id).await?;
     let (log_text, failed_jobs) = ci_logs::fetch_failed_logs(exec, &repo, run_id, job_id).await?;
@@ -261,8 +267,7 @@ pub async fn ci_get_failed_logs(exec: &GhExec, args: &Value) -> Result<String> {
                 names.join("; ")
             ));
         }
-        let synopsis =
-            ci_fingerprint::format_failure_log_synopsis(&repo, &run, run_id, &[], "");
+        let synopsis = ci_fingerprint::format_failure_log_synopsis(&repo, &run, run_id, &[], "");
         return Ok(format!(
             "{synopsis}\n\nRun {run_id} has no failed-step logs (still running or cancelled)."
         ));
@@ -295,10 +300,7 @@ pub async fn ci_list_runs(exec: &GhExec, args: &Value) -> Result<String> {
     let limit = optional_u32(args, "limit", 15).min(50);
     let runs = list_branch_runs(exec, &repo, &branch, limit).await?;
 
-    let mut out = format!(
-        "branch: {branch}\n{} run(s) for {repo}:\n",
-        runs.len()
-    );
+    let mut out = format!("branch: {branch}\n{} run(s) for {repo}:\n", runs.len());
     for r in &runs {
         let conclusion = ci_common::run_conclusion(r);
         let dur = ci_common::format_run_duration(&r.created_at, &r.updated_at, &conclusion);
@@ -323,5 +325,7 @@ pub async fn ci_rerun_workflow(exec: &GhExec, args: &Value) -> Result<String> {
         .run_retry(&["run", "rerun", &run_s, "-R", &repo, "--failed"])
         .await;
     GhExec::into_result(res, "failed to rerun workflow")?;
-    Ok(format_tool_ok(&format!("Reran failed jobs in run {run_id}.")))
+    Ok(format_tool_ok(&format!(
+        "Reran failed jobs in run {run_id}."
+    )))
 }

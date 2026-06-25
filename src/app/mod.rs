@@ -214,6 +214,8 @@ pub struct ApprovalDialog {
     pub id: uuid::Uuid,
     pub tool_name: String,
     pub description: String,
+    /// Serialized tool arguments (or approval payload in `comment_body`).
+    pub tool_args_json: Option<String>,
     pub choice: ApprovalDialogChoice,
     /// True while an approve/deny request is in flight (blocks duplicate submits).
     pub deciding: bool,
@@ -260,15 +262,10 @@ impl DashboardFoldState {
 }
 
 fn default_folded_digest_sections() -> std::collections::HashSet<String> {
-    [
-        "Ignorable",
-        "Clear",
-        "Waiting for review",
-        "Notes",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    ["Ignorable", "Clear", "Waiting for review", "Notes"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -584,7 +581,13 @@ impl AppState {
         self.approval_dialog.is_some() || self.chat_approval_target_id().is_some()
     }
 
-    pub fn open_approval_dialog(&mut self, id: uuid::Uuid, tool_name: String, description: String) {
+    pub fn open_approval_dialog(
+        &mut self,
+        id: uuid::Uuid,
+        tool_name: String,
+        description: String,
+        tool_args_json: Option<String>,
+    ) {
         if self.approval_decision_in_flight.is_some() {
             return;
         }
@@ -592,6 +595,7 @@ impl AppState {
             id,
             tool_name,
             description,
+            tool_args_json,
             choice: ApprovalDialogChoice::Approve,
             deciding: false,
             opened_at: Instant::now(),
@@ -599,8 +603,15 @@ impl AppState {
     }
 
     pub fn open_approval_dialog_from(&mut self, approval: &crate::store::Approval) {
-        let tool_name = approval_tool_name(&approval);
-        self.open_approval_dialog(approval.id, tool_name, approval.description.clone());
+        let tool_name = approval_tool_name(approval);
+        let tool_args_json =
+            crate::approval_payload::resolve_approval_tool_args(None, Some(approval));
+        self.open_approval_dialog(
+            approval.id,
+            tool_name,
+            approval.description.clone(),
+            tool_args_json,
+        );
     }
 
     /// After store hydrate, open modal when workflow approvals grew (attach / refresh).
@@ -1262,7 +1273,8 @@ diff --git a/x.go b/x.go\n\
             id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             role: ChatRole::Tool,
-            content: "tool_result(skill_load):\nargs: {\"name\":\"pr-review\"}\n\n### pr-review".into(),
+            content: "tool_result(skill_load):\nargs: {\"name\":\"pr-review\"}\n\n### pr-review"
+                .into(),
             ts: Utc::now(),
             tool_name: Some("skill_load".into()),
             tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),

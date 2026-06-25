@@ -15,12 +15,12 @@ mod theme;
 
 use theme::ThemePalette;
 
-use approval_modal::{
-    draw_approval_modal, handle_approval_modal_key, handle_approval_modal_mouse,
-};
+use approval_modal::{draw_approval_modal, handle_approval_modal_key, handle_approval_modal_mouse};
 use chat::{draw_chat, focus_pane_at, scroll_page_down, scroll_page_up};
+use context_panel::{
+    context_status_spans, scroll_context_page_down, scroll_context_page_up, store_status_spans,
+};
 use detail_cache::{cached_detail_markdown_lines, detail_body_cache_key};
-use context_panel::{context_status_spans, scroll_context_page_down, scroll_context_page_up, store_status_spans};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -38,8 +38,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::agent::chat_loop::is_chat_cancelled;
 use crate::app::{
     apply_event, export_chat_transcript_markdown, hydrate_from_store, load_chat_session_ui,
-    spawn_approval_decision, AppEvent, AppState, ChatPaneFocus, DashboardSection, SharedState,
-    Tab,
+    spawn_approval_decision, AppEvent, AppState, ChatPaneFocus, DashboardSection, SharedState, Tab,
 };
 use crate::engine::Engine;
 use crate::error::Result;
@@ -95,7 +94,8 @@ pub async fn run(
                         break;
                     }
                     Event::Mouse(mouse)
-                        if handle_mouse(mouse, terminal, &state, &engine, &mut list_state).await? =>
+                        if handle_mouse(mouse, terminal, &state, &engine, &mut list_state)
+                            .await? =>
                     {
                         break;
                     }
@@ -942,11 +942,7 @@ fn dashboard_rows(state: &AppState) -> Vec<DashboardRow> {
             });
         } else {
             for (i, d) in state.digest_history.iter().enumerate() {
-                let updating = if d.summary.complete {
-                    ""
-                } else {
-                    " ◷"
-                };
+                let updating = if d.summary.complete { "" } else { " ◷" };
                 rows.push(DashboardRow {
                     kind: DashboardRowKind::Digest(i),
                     label: format!(
@@ -974,9 +970,7 @@ fn dashboard_rows(state: &AppState) -> Vec<DashboardRow> {
 }
 
 fn dashboard_row_kind_at(state: &AppState, index: usize) -> Option<DashboardRowKind> {
-    dashboard_rows(state)
-        .get(index)
-        .map(|row| row.kind.clone())
+    dashboard_rows(state).get(index).map(|row| row.kind.clone())
 }
 
 fn dashboard_section_for_row(kind: &DashboardRowKind) -> Option<DashboardSection> {
@@ -997,27 +991,20 @@ fn clamp_dashboard_selection(state: &mut AppState) {
 
 fn dashboard_digest_body(state: &AppState, digest_idx: usize) -> Option<String> {
     if digest_idx == 0 {
-        state
-            .latest_digest
-            .as_ref()
-            .map(|d| d.body_md.clone())
+        state.latest_digest.as_ref().map(|d| d.body_md.clone())
     } else {
         state.digest_history.get(digest_idx).and_then(|meta| {
-            state
-                .digest_bodies
-                .get(&meta.date)
-                .cloned()
-                .or_else(|| {
-                    Some(format!(
-                        "Digest {}\nattention: {}  flaky: {}  policy: {}  ok: {}\nrun time: {}",
-                        meta.date,
-                        meta.summary.needs_attention,
-                        meta.summary.flaky_candidates,
-                        meta.summary.policy_gates,
-                        meta.summary.ignorable,
-                        meta.summary.duration_label()
-                    ))
-                })
+            state.digest_bodies.get(&meta.date).cloned().or_else(|| {
+                Some(format!(
+                    "Digest {}\nattention: {}  flaky: {}  policy: {}  ok: {}\nrun time: {}",
+                    meta.date,
+                    meta.summary.needs_attention,
+                    meta.summary.flaky_candidates,
+                    meta.summary.policy_gates,
+                    meta.summary.ignorable,
+                    meta.summary.duration_label()
+                ))
+            })
         })
     }
 }
@@ -1107,12 +1094,8 @@ enum JumpTarget {
 fn jump_target_from_state(state: &AppState) -> Option<JumpTarget> {
     match state.tab {
         Tab::Dashboard => match dashboard_row_kind_at(state, state.selected_index)? {
-            DashboardRowKind::Digest(_) => {
-                selected_dashboard_digest_pr(state).map(|(repo, number)| JumpTarget::Pr {
-                    repo,
-                    number,
-                })
-            }
+            DashboardRowKind::Digest(_) => selected_dashboard_digest_pr(state)
+                .map(|(repo, number)| JumpTarget::Pr { repo, number }),
             _ => None,
         },
         Tab::Prs => {
@@ -1186,9 +1169,7 @@ async fn maybe_request_pr_overview(state: &SharedState, engine: &Arc<Engine>) {
             return;
         };
         let key = AppState::pr_overview_key(&pr.repo, pr.number);
-        if s.pr_overview_cache.contains_key(&key)
-            || s.pr_overview_fetching.as_ref() == Some(&key)
-        {
+        if s.pr_overview_cache.contains_key(&key) || s.pr_overview_fetching.as_ref() == Some(&key) {
             return;
         }
         (pr.repo.clone(), pr.number, key)
@@ -1202,7 +1183,6 @@ async fn maybe_request_pr_overview(state: &SharedState, engine: &Arc<Engine>) {
     }
     engine.fetch_pr_overview(repo, number).await;
 }
-
 
 async fn jump_to_pr_from_context(state: &SharedState, list_state: &mut ListState) {
     let target = {
@@ -1251,9 +1231,9 @@ async fn handle_mouse(
         return Ok(false);
     }
 
-    let size = terminal.size().map_err(|e| {
-        crate::error::CoworkerError::Other(anyhow::anyhow!("terminal size: {e}"))
-    })?;
+    let size = terminal
+        .size()
+        .map_err(|e| crate::error::CoworkerError::Other(anyhow::anyhow!("terminal size: {e}")))?;
     let frame_area = Rect::new(0, 0, size.width, size.height);
     let content = ui_content_area(frame_area);
     let (list_area, detail_area) = list_detail_panes(content);
@@ -1369,8 +1349,7 @@ async fn handle_mouse(
                         if clipboard::copy_text(&text) {
                             s.status = format!("copied {} line(s) to clipboard", hi - lo + 1);
                         } else {
-                            s.status =
-                                "copy failed (install pbcopy, wl-copy, or xclip)".into();
+                            s.status = "copy failed (install pbcopy, wl-copy, or xclip)".into();
                         }
                     }
                 } else {
@@ -1540,9 +1519,9 @@ fn draw_list(
             .into_iter()
             .map(|row| {
                 let style = match row.kind {
-                    DashboardRowKind::SectionHeader(_) => Style::default()
-                        .fg(th.accent)
-                        .add_modifier(Modifier::BOLD),
+                    DashboardRowKind::SectionHeader(_) => {
+                        Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
+                    }
                     _ => Style::default().fg(th.text),
                 };
                 ListItem::new(Line::from(Span::styled(row.label, style)))
@@ -1694,7 +1673,8 @@ struct DetailBody {
 
 fn config_connectivity_detail(state: &AppState) -> String {
     const BAR_W: usize = 24;
-    let github_status = context_panel::format_probe_latency(state.github_ok, state.github_latency_ms);
+    let github_status =
+        context_panel::format_probe_latency(state.github_ok, state.github_latency_ms);
     let llm_status = context_panel::format_probe_latency(state.llm_ok, state.llm_latency_ms);
     let github_bar = state
         .github_ok
@@ -1808,9 +1788,7 @@ fn detail_body(state: &AppState) -> (String, bool) {
                                 p.repo,
                                 p.ci_summary,
                                 p.review_summary,
-                                p.triage_note
-                                    .as_deref()
-                                    .unwrap_or("_No triage yet._")
+                                p.triage_note.as_deref().unwrap_or("_No triage yet._")
                             )
                         })
                         .unwrap_or_else(|| "Select a PR".into()),
@@ -2015,9 +1993,7 @@ fn copy_detail_text_from_state(
         return None;
     }
     let lo = sel_lo.min(sel_hi) as usize;
-    let hi = sel_lo
-        .max(sel_hi)
-        .min(lines.len().saturating_sub(1) as u16) as usize;
+    let hi = sel_lo.max(sel_hi).min(lines.len().saturating_sub(1) as u16) as usize;
     let text = lines[lo..=hi]
         .iter()
         .map(line_plain)
@@ -2123,13 +2099,18 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: The
         .filter(|_| state.engine_busy)
         .map(|id| format!(" │ {id}"))
         .unwrap_or_default();
+    let auto_approve_note = if state.config.chat.auto_approve_mutations {
+        " │ auto-approve ON"
+    } else {
+        ""
+    };
     let mut line = theme::status_line(
         th,
         busy,
         &state.status,
         state.github_ok,
         state.llm_ok,
-        "",
+        auto_approve_note,
     );
     line.spans.extend(context_status_spans(th, state));
     line.spans.extend(store_status_spans(th, state));
@@ -2145,7 +2126,8 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: The
             Style::default().fg(th.muted).bg(th.surface),
         ));
     }
-    line.spans.push(Span::styled(" ", Style::default().bg(th.surface)));
+    line.spans
+        .push(Span::styled(" ", Style::default().bg(th.surface)));
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(th.surface)),
         area,

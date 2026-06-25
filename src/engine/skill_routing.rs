@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use crate::agent::chat_discovery;
 use crate::error::Result;
 
-use super::skill::{
-    load_prompt, load_skills, load_skills_from_refs, SkillSpec,
-};
+use super::skill::{load_prompt, load_skills, load_skills_from_refs, SkillSpec};
 
 /// All technique skills available to a chat session.
 #[derive(Debug, Clone)]
@@ -125,7 +123,11 @@ impl SkillRegistry {
     }
 
     pub fn format_skill_load(skill: &SkillSpec) -> String {
-        format!("### {}\n{}", skill.name, crate::engine::skill::skill_body_for_prompt(&skill.body))
+        format!(
+            "### {}\n{}",
+            skill.name,
+            crate::engine::skill::skill_body_for_prompt(&skill.body)
+        )
     }
 }
 
@@ -225,49 +227,49 @@ mod tests {
 
     fn sample_registry() -> SkillRegistry {
         SkillRegistry::from_skills(vec![
-                SkillSpec {
-                    name: "github-ops-tone".into(),
-                    description: "Secretary tone".into(),
-                    body: "Be accurate".into(),
-                    skill_refs: vec![],
-                    tool_refs: vec![],
-                    always_load: true,
-                    intent_keywords: vec![],
-                    intent_phrases: vec![],
-                    intent_bonus_keywords: vec![],
-                    intent_penalty_keywords: vec![],
-                    intent_penalty_phrases: vec![],
-                    intent_penalty: 0,
-                },
-                SkillSpec {
-                    name: "ci-triage".into(),
-                    description: "Classify CI failures".into(),
-                    body: "Tool chains here".into(),
-                    skill_refs: vec![],
-                    tool_refs: vec!["pr_get_ci_snapshot".into()],
-                    always_load: false,
-                    intent_keywords: vec!["ci".into(), "fail".into(), "test".into()],
-                    intent_phrases: vec![],
-                    intent_bonus_keywords: vec!["pr".into(), "#".into()],
-                    intent_penalty_keywords: vec![],
-                    intent_penalty_phrases: vec![],
-                    intent_penalty: 0,
-                },
-                SkillSpec {
-                    name: "pr-merge".into(),
-                    description: "Merge blockers".into(),
-                    body: "Blockers".into(),
-                    skill_refs: vec![],
-                    tool_refs: vec!["pr_get_merge_blockers".into()],
-                    always_load: false,
-                    intent_keywords: vec!["merge".into(), "approve".into()],
-                    intent_phrases: vec!["needs to approve".into()],
-                    intent_bonus_keywords: vec![],
-                    intent_penalty_keywords: vec![],
-                    intent_penalty_phrases: vec![],
-                    intent_penalty: 0,
-                },
-            ])
+            SkillSpec {
+                name: "github-ops-tone".into(),
+                description: "Secretary tone".into(),
+                body: "Be accurate".into(),
+                skill_refs: vec![],
+                tool_refs: vec![],
+                always_load: true,
+                intent_keywords: vec![],
+                intent_phrases: vec![],
+                intent_bonus_keywords: vec![],
+                intent_penalty_keywords: vec![],
+                intent_penalty_phrases: vec![],
+                intent_penalty: 0,
+            },
+            SkillSpec {
+                name: "ci-triage".into(),
+                description: "Classify CI failures".into(),
+                body: "Tool chains here".into(),
+                skill_refs: vec![],
+                tool_refs: vec!["pr_get_ci_snapshot".into()],
+                always_load: false,
+                intent_keywords: vec!["ci".into(), "fail".into(), "test".into()],
+                intent_phrases: vec![],
+                intent_bonus_keywords: vec!["pr".into(), "#".into()],
+                intent_penalty_keywords: vec![],
+                intent_penalty_phrases: vec![],
+                intent_penalty: 0,
+            },
+            SkillSpec {
+                name: "pr-merge".into(),
+                description: "Merge blockers".into(),
+                body: "Blockers".into(),
+                skill_refs: vec![],
+                tool_refs: vec!["pr_get_merge_blockers".into()],
+                always_load: false,
+                intent_keywords: vec!["merge".into(), "approve".into()],
+                intent_phrases: vec!["needs to approve".into()],
+                intent_bonus_keywords: vec![],
+                intent_penalty_keywords: vec![],
+                intent_penalty_phrases: vec![],
+                intent_penalty: 0,
+            },
+        ])
     }
 
     #[test]

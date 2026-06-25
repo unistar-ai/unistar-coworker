@@ -32,13 +32,12 @@ pub use harness::{spawn_github, GithubHarness};
 use crate::config::ChatToolMode;
 
 /// Lazy discovery is always native when GitHub harness is available.
-pub fn effective_chat_tool_mode(
-    configured: ChatToolMode,
-    harness: &GithubHarness,
-) -> ChatToolMode {
+pub fn effective_chat_tool_mode(configured: ChatToolMode, harness: &GithubHarness) -> ChatToolMode {
     match configured {
         ChatToolMode::Native => ChatToolMode::Native,
-        ChatToolMode::Auto | ChatToolMode::Lazy if harness.supports_lazy_meta() => ChatToolMode::Auto,
+        ChatToolMode::Auto | ChatToolMode::Lazy if harness.supports_lazy_meta() => {
+            ChatToolMode::Auto
+        }
         ChatToolMode::Auto | ChatToolMode::Lazy => ChatToolMode::Native,
     }
 }

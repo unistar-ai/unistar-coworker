@@ -39,9 +39,8 @@ pub async fn pr_create_backport(exec: &GhExec, args: &Value) -> Result<String> {
     struct MergeCommit {
         oid: String,
     }
-    let info: PrBackportInfo = serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Other(anyhow::anyhow!("failed to parse PR details: {e}"))
-    })?;
+    let info: PrBackportInfo = serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Other(anyhow::anyhow!("failed to parse PR details: {e}")))?;
     let merge_commit = info
         .merge_commit
         .map(|m| m.oid)
@@ -53,15 +52,9 @@ pub async fn pr_create_backport(exec: &GhExec, args: &Value) -> Result<String> {
         })?;
 
     let who = gh_current_user(exec).await;
-    let branch_name = format!(
-        "backport-{pr_num}-to-{}",
-        sanitize_ref(&target_branch)
-    );
+    let branch_name = format!("backport-{pr_num}-to-{}", sanitize_ref(&target_branch));
 
-    let work_path = std::env::temp_dir().join(format!(
-        "unistar-backport-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let work_path = std::env::temp_dir().join(format!("unistar-backport-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&work_path).map_err(|e| {
         CoworkerError::Other(anyhow::anyhow!("failed to create temporary workspace: {e}"))
     })?;
@@ -85,7 +78,10 @@ pub async fn pr_create_backport(exec: &GhExec, args: &Value) -> Result<String> {
     }
 
     let checkout_res = git
-        .run(Some(work_path.to_str().unwrap()), &["checkout", "-B", &branch_name])
+        .run(
+            Some(work_path.to_str().unwrap()),
+            &["checkout", "-B", &branch_name],
+        )
         .await;
     if checkout_res.err.is_some() {
         return Err(checkout_res.wrap("failed to create backport branch"));
@@ -167,9 +163,9 @@ pub async fn pr_create_backport(exec: &GhExec, args: &Value) -> Result<String> {
         )
         .await;
     if create_res.err.is_some() {
-        return Err(create_res.wrap(
-            "cherry-pick succeeded and branch pushed, but failed to create PR",
-        ));
+        return Err(
+            create_res.wrap("cherry-pick succeeded and branch pushed, but failed to create PR")
+        );
     }
 
     Ok(format_tool_ok(&format!(
@@ -265,7 +261,9 @@ pub async fn backport_suggest_resolution(exec: &GhExec, args: &Value) -> Result<
         match std::fs::read_to_string(&path) {
             Ok(content) => {
                 let (ours, theirs, hint) = analyze_conflict_markers(&content);
-                lines.push(format!("\n{f}:\n  ours:{ours} lines  theirs:{theirs} lines\n  hint: {hint}"));
+                lines.push(format!(
+                    "\n{f}:\n  ours:{ours} lines  theirs:{theirs} lines\n  hint: {hint}"
+                ));
             }
             Err(_) => {
                 lines.push(format!("\n{f}: (could not read file)"));

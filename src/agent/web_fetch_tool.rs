@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use regex::Regex;
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, USER_AGENT};
 use reqwest::Url;
 use serde_json::Value;
 
@@ -83,7 +83,7 @@ pub async fn execute_web_fetch_tool(
 
     let normalized = normalize_url_input(raw_url);
     let fetched = if use_browser {
-        fetch_with_browser(config, workspace, &normalized).await?
+        fetch_when_browser_requested(config, workspace, &normalized).await?
     } else if is_remote_url(&normalized) {
         fetch_remote_page(config, &normalized).await?
     } else {
@@ -101,7 +101,9 @@ pub async fn execute_web_fetch_tool(
     }
 
     let mut out = format!("web_fetch: {}\n", fetched.source_label);
-    if fetched.status_line.contains("chromium") {
+    if fetched.status_line.contains("browser-fallback") {
+        out.push_str("engine: http-fallback\n");
+    } else if fetched.status_line.contains("chromium") {
         out.push_str("engine: headless-chromium\n");
     }
     if !fetched.status_line.is_empty() {
@@ -164,15 +166,69 @@ fn parse_browser_arg(args: &Value) -> bool {
         .map(|v| {
             v.as_bool().unwrap_or(false)
                 || v.as_str().is_some_and(|s| {
-                    matches!(
-                        s.trim().to_ascii_lowercase().as_str(),
-                        "true" | "1" | "yes"
-                    )
+                    matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")
                 })
         })
         .unwrap_or(false)
 }
 
+async fn fetch_when_browser_requested(
+    config: &WebFetchToolConfig,
+    workspace: &Path,
+    url_or_path: &str,
+) -> Result<FetchedContent> {
+    #[cfg(feature = "web-browser")]
+    {
+        fetch_with_browser_fallback(config, workspace, url_or_path).await
+    }
+    #[cfg(not(feature = "web-browser"))]
+    {
+        let _ = (config, workspace, url_or_path);
+        Err(browser_feature_disabled_error())
+    }
+}
+
+#[cfg(not(feature = "web-browser"))]
+fn browser_feature_disabled_error() -> CoworkerError {
+    harness_errors::web_fetch_validation_error(
+        "WEB_BROWSER_DISABLED",
+        "Headless browser fetch is not available in this build (web-browser feature disabled)",
+        "Rebuild with `--features web-browser` (on by default), or omit browser:true and use HTTP fetch",
+    )
+}
+
+#[cfg(feature = "web-browser")]
+async fn fetch_with_browser_fallback(
+    config: &WebFetchToolConfig,
+    workspace: &Path,
+    url_or_path: &str,
+) -> Result<FetchedContent> {
+    match fetch_with_browser(config, workspace, url_or_path).await {
+        Ok(content) => Ok(content),
+        Err(e) if crate::agent::web_fetch_chromium::is_browser_fetch_failure(&e) => {
+            let reason = crate::agent::web_fetch_chromium::browser_failure_brief(&e);
+            let content = if is_remote_url(url_or_path) {
+                fetch_remote_page(config, url_or_path).await?
+            } else {
+                load_local_html(workspace, url_or_path)?
+            };
+            Ok(annotate_http_fallback(content, &reason))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(feature = "web-browser")]
+fn annotate_http_fallback(mut content: FetchedContent, reason: &str) -> FetchedContent {
+    content.body_text_override = None;
+    content.status_line = format!(
+        "browser-fallback: {reason}; using HTTP fetch\n{}",
+        content.status_line
+    );
+    content
+}
+
+#[cfg(feature = "web-browser")]
 async fn fetch_with_browser(
     config: &WebFetchToolConfig,
     workspace: &Path,
@@ -219,10 +275,7 @@ fn normalize_url_input(input: &str) -> String {
     if is_remote_url(s) {
         return s.to_string();
     }
-    if s.starts_with("localhost:")
-        || s.starts_with("127.0.0.1:")
-        || s.starts_with("[::1]:")
-    {
+    if s.starts_with("localhost:") || s.starts_with("127.0.0.1:") || s.starts_with("[::1]:") {
         return format!("http://{s}");
     }
     s.to_string()
@@ -252,7 +305,10 @@ fn validate_remote_url(url: &str, config: &WebFetchToolConfig) -> Result<Url> {
     }
     if let Some(host) = parsed.host_str() {
         if is_blocked_host(host, config.allow_localhost) {
-            return Err(workflow_error(web_fetch_ssrf_envelope(host, config.allow_localhost)));
+            return Err(workflow_error(web_fetch_ssrf_envelope(
+                host,
+                config.allow_localhost,
+            )));
         }
     }
     Ok(parsed)
@@ -333,10 +389,13 @@ async fn fetch_remote_page(config: &WebFetchToolConfig, url: &str) -> Result<Fet
 
     let status = response.status();
     let headers: HeaderMap = response.headers().clone();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| workflow_error(web_fetch_envelope(url, &e.to_string(), Some(status.as_u16()))))?;
+    let bytes = response.bytes().await.map_err(|e| {
+        workflow_error(web_fetch_envelope(
+            url,
+            &e.to_string(),
+            Some(status.as_u16()),
+        ))
+    })?;
 
     if bytes.len() > config.max_download_bytes {
         return Err(workflow_error(web_fetch_too_large_envelope(
@@ -521,14 +580,11 @@ fn decode_bytes(bytes: &[u8], header_charset: Option<&str>, html_sniff: Option<&
 }
 
 fn parse_charset_from_content_type(content_type: &str) -> Option<String> {
-    content_type
-        .split(';')
-        .skip(1)
-        .find_map(|part| {
-            let part = part.trim();
-            part.strip_prefix("charset=")
-                .map(|rest| rest.trim().trim_matches('"').to_string())
-        })
+    content_type.split(';').skip(1).find_map(|part| {
+        let part = part.trim();
+        part.strip_prefix("charset=")
+            .map(|rest| rest.trim().trim_matches('"').to_string())
+    })
 }
 
 fn parse_meta_charset(html: &str) -> Option<String> {
@@ -578,7 +634,9 @@ fn extract_tag_inner(html: &str, lower: &str, tag: &str) -> Option<String> {
 
 fn extract_meta_description(html: &str) -> Option<String> {
     let lower = html.to_ascii_lowercase();
-    let idx = lower.find("name=\"description\"").or_else(|| lower.find("name='description'"))?;
+    let idx = lower
+        .find("name=\"description\"")
+        .or_else(|| lower.find("name='description'"))?;
     let snippet = &html[idx..idx.saturating_add(300).min(html.len())];
     extract_attr_value(snippet, "content").map(|s| decode_basic_entities(s.trim()))
 }
@@ -718,7 +776,10 @@ fn replace_block_tags_with_newlines(html: &str) -> String {
             out = out.replace(&token, "\n");
         }
         if tag == "br" {
-            out = out.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n");
+            out = out
+                .replace("<br>", "\n")
+                .replace("<br/>", "\n")
+                .replace("<br />", "\n");
         }
     }
     out
@@ -801,10 +862,7 @@ fn web_fetch_forbidden_envelope(status: u16, js_challenge: bool) -> ErrorEnvelop
         "For GitHub data use MCP tools (pr_get_*), not web_fetch on github.com".into(),
     ];
     if js_challenge {
-        try_steps.insert(
-            0,
-            "Retry with browser: true on the same URL".into(),
-        );
+        try_steps.insert(0, "Retry with browser: true on the same URL".into());
     }
     ErrorEnvelope {
         code: if js_challenge {
@@ -964,7 +1022,10 @@ mod tests {
 
     #[test]
     fn normalize_localhost_url() {
-        assert_eq!(normalize_url_input("localhost:5173"), "http://localhost:5173");
+        assert_eq!(
+            normalize_url_input("localhost:5173"),
+            "http://localhost:5173"
+        );
     }
 
     #[test]
@@ -989,7 +1050,58 @@ mod tests {
         assert!(parse_browser_arg(&json!({ "browser": "yes" })));
     }
 
+    #[test]
+    #[cfg(feature = "web-browser")]
+    fn browser_fetch_failure_codes_trigger_http_fallback() {
+        use crate::agent::harness_errors::{workflow_error, ErrorEnvelope};
+        use crate::agent::web_fetch_chromium::{
+            browser_failure_brief, is_browser_fetch_failure, BROWSER_FETCH_FAILURE_CODES,
+        };
+
+        for code in BROWSER_FETCH_FAILURE_CODES {
+            let err = workflow_error(ErrorEnvelope {
+                code: (*code).into(),
+                tool_name: WEB_FETCH_TOOL.into(),
+                what: "browser failed".into(),
+                why: "test".into(),
+                try_steps: vec![],
+                example: None,
+                detail: None,
+            });
+            assert!(
+                is_browser_fetch_failure(&err),
+                "expected fallback for {code}"
+            );
+            assert!(!browser_failure_brief(&err).is_empty());
+        }
+
+        let validation_err = harness_errors::web_fetch_validation_error(
+            "WEB_NOT_FILE",
+            "not a file",
+            "use a workspace HTML path",
+        );
+        assert!(!is_browser_fetch_failure(&validation_err));
+    }
+
+    #[test]
+    #[cfg(feature = "web-browser")]
+    fn annotate_http_fallback_adds_note_and_clears_body_override() {
+        let content = FetchedContent {
+            source_label: "https://example.com".into(),
+            body: "<html></html>".into(),
+            content_type: "text/html".into(),
+            status_line: "status: 200 OK\n".into(),
+            base_url: Some("https://example.com".into()),
+            body_text_override: Some("rendered".into()),
+        };
+        let out = annotate_http_fallback(content, "headless Chromium launch failed");
+        assert!(out.status_line.contains("browser-fallback"));
+        assert!(out.status_line.contains("headless Chromium launch failed"));
+        assert!(out.body_text_override.is_none());
+    }
+
     #[tokio::test]
+    #[cfg(feature = "web-browser")]
     #[ignore = "manual: needs Chrome + network"]
     async fn chromium_fetch_example_smoke() {
         let config = WebFetchToolConfig::default();
@@ -1007,6 +1119,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "web-browser")]
     #[ignore = "manual: needs Chrome + network"]
     async fn chromium_fetch_zhihu_smoke() {
         let config = WebFetchToolConfig::default();
@@ -1070,5 +1183,21 @@ mod tests {
         assert!(out.contains("title: T"));
         assert!(!out.contains("Secret body"));
         assert!(!out.contains("---"));
+    }
+
+    #[tokio::test]
+    #[cfg(not(feature = "web-browser"))]
+    async fn browser_true_errors_when_feature_disabled() {
+        let dir = TempDir::new().unwrap();
+        let config = WebFetchToolConfig::default();
+        let err = execute_web_fetch_tool(
+            &config,
+            dir.path(),
+            &json!({ "url": "https://example.com", "browser": true }),
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("WEB_BROWSER_DISABLED") || msg.contains("web-browser"));
     }
 }

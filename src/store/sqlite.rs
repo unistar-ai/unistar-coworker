@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::agent::context::harness_nudge_base;
 use crate::error::{CoworkerError, Result};
 use crate::store::{
-    Approval, AuditEntry, BackportQueueItem, ChatMessage, ChatRole, ChatRuntimeState, ChatSession,
-    Digest, PrSnapshot, Store, Transcript, WorkflowRun,
+    Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole,
+    ChatRuntimeState, ChatSession, Digest, PrSnapshot, Store, Transcript, WorkflowRun,
 };
 
 pub struct SqliteStore {
@@ -31,7 +31,7 @@ impl SqliteStore {
         Ok(Self { path })
     }
 
-    fn with_conn<F, T>(&self, f: F) -> Result<T>
+    pub(crate) fn with_conn<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T>,
     {
@@ -235,6 +235,31 @@ impl Store for SqliteStore {
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             rows.map(|r| Ok(serde_json::from_str(&r?)?))
                 .collect::<Result<Vec<_>>>()
+        })
+    }
+
+    async fn list_approval_history(&self, limit: usize) -> Result<Vec<Approval>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT payload_json, status FROM approvals WHERE status != 'pending'",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut list = Vec::new();
+            for row in rows {
+                let (payload, status_str) = row?;
+                let mut item: Approval = serde_json::from_str(&payload)?;
+                item.status = match status_str.as_str() {
+                    "approved" => ApprovalStatus::Approved,
+                    "denied" => ApprovalStatus::Denied,
+                    _ => continue,
+                };
+                list.push(item);
+            }
+            list.sort_by_key(|a| std::cmp::Reverse(a.decided_at.unwrap_or(a.created_at)));
+            list.truncate(limit);
+            Ok(list)
         })
     }
 

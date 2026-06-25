@@ -56,8 +56,7 @@ fn build_branch_health_text(repo: &str, branch: &str, runs: &[BranchRun]) -> Str
         if dur > slowest_dur {
             slowest_dur = dur;
             slowest_name = r.workflow_name.clone();
-            slowest_dur_str =
-                ci_common::format_run_duration(&r.created_at, &r.updated_at, &c);
+            slowest_dur_str = ci_common::format_run_duration(&r.created_at, &r.updated_at, &c);
         }
     }
 

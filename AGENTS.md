@@ -66,7 +66,7 @@ Entry: [`src/engine/chat.rs`](./src/engine/chat.rs) → [`src/agent/chat_loop.rs
 | Mutating tool gate | `is_mutating_tool` → approval queue in `chat_loop.rs` / [`src/engine/approvals.rs`](./src/engine/approvals.rs) |
 | Session persistence | [`src/store/json.rs`](./src/store/json.rs), [`src/store/sqlite.rs`](./src/store/sqlite.rs) (`data/chat/` when using JSON backend) |
 
-Chat system prompt: [`prompts/chat.md`](./prompts/chat.md) (`chat.prompt` in config; legacy alias `chat.agent`).
+Chat system prompt: [`prompts/chat.md`](./prompts/chat.md) — **embedded at build time** (`include_str!`); default `chat.prompt` does not read from cwd. Custom `chat.prompt` paths still load from disk for overrides.
 
 Legacy JSON `action: reply | tool | approval` has been removed; chat uses native `tools` / `tool_calls` only.
 
@@ -79,7 +79,7 @@ Legacy JSON `action: reply | tool | approval` has been removed; chat uses native
 | **GitHub** | `github:` in `coworker.yaml` | [`src/github/harness.rs`](./src/github/harness.rs) — in-process `gh`; meta-tools (`tool_list`, `tool_search`, `tool_describe`, `tool_call`) index GitHub + local harness only. |
 | **Third-party** | `mcp.servers[]` | [`src/mcp/`](./src/mcp/) — `McpPool`; `transport: stdio` (subprocess) or `http` (Streamable HTTP POST + JSON/SSE). |
 
-- Chat routes federated readonly MCP tools through `execute_readonly_tool` in [`chat_loop.rs`](./src/agent/chat_loop.rs); mutating MCP tools require approval (routing TBD for some paths).
+- Chat routes federated readonly MCP tools through `execute_readonly_tool` in [`chat_loop.rs`](./src/agent/chat_loop.rs); mutating MCP tools are split out alongside GitHub harness mutators in the tool-call loop and queued through `queue_mutating_approval` (same approval queue as `ci_rerun_workflow`, etc.) unless `chat.auto_approve_mutations` or per-server `approval.mutating: auto` applies.
 - Lazy mode: when `mcp.servers[]` is non-empty, `tool_list` / `tool_search` / `tool_describe` federate GitHub harness + MCP registry ([`src/mcp/lazy_adapter.rs`](./src/mcp/lazy_adapter.rs)).
 - TUI Config tab shows per-server `mcp[id]` status from `AppState.mcp_servers`.
 

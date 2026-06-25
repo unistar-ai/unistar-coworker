@@ -25,7 +25,12 @@ pub fn check_display_name(c: &CheckRollup) -> String {
 }
 
 pub fn check_details_url(c: &CheckRollup) -> String {
-    if let Some(u) = c.details_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(u) = c
+        .details_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return u.to_string();
     }
     c.target_url
@@ -53,9 +58,8 @@ pub fn tally_checks(checks: &[CheckRollup]) -> (i32, i32, i32) {
     for c in checks {
         match check_verdict(c).to_ascii_uppercase().as_str() {
             "SUCCESS" | "NEUTRAL" | "SKIPPED" => pass += 1,
-            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
-                fail += 1
-            }
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+            | "STARTUP_FAILURE" => fail += 1,
             _ => pending += 1,
         }
     }

@@ -129,12 +129,7 @@ async fn resolve_pr_line(
     repo: &str,
     pr_number: u32,
 ) -> Result<ParsedPrLine> {
-    let list_text = gh_tool(
-        github,
-        "pr_list_open",
-        json!({ "repo": repo, "limit": 50 }),
-    )
-    .await?;
+    let list_text = gh_tool(github, "pr_list_open", json!({ "repo": repo, "limit": 50 })).await?;
     if let Some(p) = list_text.lines().find_map(|line| {
         let p = parse_pr_line(line)?;
         (p.number == pr_number).then_some(p)

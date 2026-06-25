@@ -15,7 +15,7 @@ pub struct Config {
     #[serde(default)]
     pub schedule: ScheduleConfig,
     #[serde(default)]
-    pub workflows: HashMap<String, WorkflowConfig>,
+    pub workflows: WorkflowsSettings,
     pub repos: Vec<String>,
     #[serde(default)]
     pub policy: PolicyConfig,
@@ -209,6 +209,9 @@ pub struct McpServerConfig {
     /// Per-server RPC timeout; falls back to `mcp.defaults.timeout_secs`.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Technique skill names to auto-load when this server's tools are warmed in chat.
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -324,6 +327,33 @@ fn default_ci_rescan_cron() -> Option<String> {
     Some("0 */4 * * *".into())
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WorkflowsSettings {
+    /// When true, batch workflows may call readonly third-party MCP tools (default: false).
+    #[serde(default)]
+    pub mcp_readonly: bool,
+    #[serde(flatten)]
+    entries: HashMap<String, WorkflowConfig>,
+}
+
+impl WorkflowsSettings {
+    pub fn get(&self, id: &str) -> Option<&WorkflowConfig> {
+        self.entries.get(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &WorkflowConfig)> {
+        self.entries.iter()
+    }
+
+    /// Effective readonly-MCP flag for a workflow (per-workflow override, else global).
+    pub fn mcp_readonly_for(&self, workflow_id: &str) -> bool {
+        self.entries
+            .get(workflow_id)
+            .and_then(|w| w.mcp_readonly)
+            .unwrap_or(self.mcp_readonly)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WorkflowConfig {
     #[serde(default = "default_true")]
@@ -332,6 +362,9 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub skills: Vec<String>,
     pub schedule: Option<String>,
+    /// Override `workflows.mcp_readonly` for this workflow.
+    #[serde(default)]
+    pub mcp_readonly: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -494,6 +527,10 @@ pub struct ChatConfig {
     /// Max seconds for a single LLM step (streaming thinking + JSON). 0 = unlimited.
     #[serde(default = "default_chat_llm_step_timeout_secs")]
     pub llm_step_timeout_secs: u64,
+    /// When the model streams reasoning but no assistant text/tool_calls, stop the
+    /// stream after this many seconds (avoids waiting the full ~90s stream wall). 0 = off.
+    #[serde(default = "default_chat_reasoning_only_warn_secs")]
+    pub reasoning_only_warn_secs: u64,
     #[serde(default = "default_chat_history_messages")]
     pub history_messages: u32,
     /// Max tokens for prior session turns in LLM context. 0 = auto (~40% of input budget).
@@ -710,6 +747,10 @@ fn default_chat_llm_step_timeout_secs() -> u64 {
     180
 }
 
+fn default_chat_reasoning_only_warn_secs() -> u64 {
+    30
+}
+
 fn default_chat_history_messages() -> u32 {
     24
 }
@@ -725,6 +766,7 @@ impl Default for ChatConfig {
             max_tool_calls: default_chat_max_tool_calls(),
             max_duration_secs: default_chat_max_duration_secs(),
             llm_step_timeout_secs: default_chat_llm_step_timeout_secs(),
+            reasoning_only_warn_secs: default_chat_reasoning_only_warn_secs(),
             history_messages: default_chat_history_messages(),
             history_tokens: 0,
             compress_reasoning: true,
@@ -773,6 +815,9 @@ pub struct WebConfig {
     /// Bind address for `unistar-coworker serve` (default 127.0.0.1:8787).
     #[serde(default = "default_web_bind")]
     pub bind: String,
+    /// When set, `/api/*` and `/ws` require `Authorization: Bearer <token>`.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 fn default_web_bind() -> String {
@@ -783,7 +828,25 @@ impl Default for WebConfig {
     fn default() -> Self {
         Self {
             bind: default_web_bind(),
+            auth_token: None,
         }
+    }
+}
+
+impl WebConfig {
+    /// Non-empty `auth_token` after trim — enables API/WebSocket bearer auth.
+    pub fn auth_enabled(&self) -> bool {
+        self.auth_token
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty())
+    }
+
+    /// Trimmed bearer secret when auth is enabled.
+    pub fn effective_auth_token(&self) -> Option<&str> {
+        self.auth_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
     }
 }
 
@@ -1069,5 +1132,48 @@ mcp:
             cfg.mcp.servers[1].url.as_deref(),
             Some("http://127.0.0.1:9090/mcp")
         );
+    }
+
+    #[test]
+    fn mcp_server_skills_parse() {
+        let yaml = r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+repos: [org/repo]
+mcp:
+  servers:
+    - id: slack
+      transport: stdio
+      command: npx
+      skills: [slack-ops, github-ops-tone]
+"#;
+        let cfg = Config::load_from_str(yaml).expect("parse");
+        assert_eq!(cfg.mcp.servers[0].skills, vec!["slack-ops", "github-ops-tone"]);
+    }
+
+    #[test]
+    fn web_auth_token_deserializes() {
+        let yaml = r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+repos: [acme/widget]
+web:
+  bind: 0.0.0.0:8787
+  auth_token: secret
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.web.bind, "0.0.0.0:8787");
+        assert_eq!(cfg.web.auth_token.as_deref(), Some("secret"));
+        assert!(cfg.web.auth_enabled());
+        assert_eq!(cfg.web.effective_auth_token(), Some("secret"));
+    }
+
+    #[test]
+    fn web_auth_token_defaults_none() {
+        let yaml = r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+repos: [acme/widget]
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.web.auth_token.is_none());
+        assert!(!cfg.web.auth_enabled());
     }
 }

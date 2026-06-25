@@ -44,7 +44,9 @@ pub fn tool_list_category(category: &str) -> Result<String> {
             "no tools in category {category:?}"
         )));
     }
-    Ok(format!("{n} tool(s) in [{want}]:\n{body}").trim_end().to_string())
+    Ok(format!("{n} tool(s) in [{want}]:\n{body}")
+        .trim_end()
+        .to_string())
 }
 
 pub fn tool_search(query: &str, limit: usize) -> Result<String> {

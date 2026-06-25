@@ -22,7 +22,10 @@ pub async fn notify_post_slack(_exec: &super::exec::GhExec, args: &Value) -> Res
 
     let mut url = optional_str(args, "webhook_url").unwrap_or_default();
     if url.is_empty() {
-        url = env::var("SLACK_WEBHOOK_URL").unwrap_or_default().trim().to_string();
+        url = env::var("SLACK_WEBHOOK_URL")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
     }
     if url.is_empty() {
         return Err(CoworkerError::Other(anyhow::anyhow!(format_tool_error(

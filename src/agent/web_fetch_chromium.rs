@@ -7,7 +7,8 @@ use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::detection::{default_executable, DetectionOptions};
 use futures_util::StreamExt;
 
-use crate::agent::harness_errors::{self, workflow_error, ErrorEnvelope};
+use crate::agent::harness_errors::{self, parse_error_line, workflow_error, ErrorEnvelope};
+use crate::error::CoworkerError;
 use crate::agent::web_fetch_tool::{FetchedContent, WEB_FETCH_TOOL};
 use crate::config::WebFetchToolConfig;
 use crate::error::Result;
@@ -43,8 +44,8 @@ async fn fetch_page_inner(
         .await
         .map_err(browser_launch_err)?;
 
-    // Pump CDP events until the browser shuts down. chromiumoxide 0.9+ ignores unknown
-    // CDP messages by default; stop on fatal handler errors.
+    // Pump CDP events until the browser shuts down. chromiumoxide ignores unknown CDP
+    // messages (Chrome often sends events ahead of chromiumoxide_cdp schemas).
     let mut pump = tokio::spawn(async move {
         while let Some(ev) = handler.next().await {
             if let Err(e) = ev {
@@ -156,13 +157,13 @@ async fn wait_for_readable_body(
 }
 
 pub fn file_url_for_path(path: &Path) -> Result<String> {
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| harness_errors::web_fetch_validation_error(
+    let canonical = path.canonicalize().map_err(|e| {
+        harness_errors::web_fetch_validation_error(
             "WEB_LOCAL_PATH",
             format!("cannot resolve path for browser: {e}"),
             "Use a workspace-relative HTML path without `..`",
-        ))?;
+        )
+    })?;
     Ok(format!("file://{}", canonical.display()))
 }
 
@@ -211,6 +212,36 @@ fn browser_nav_err(url: &str, err: &str) -> crate::error::CoworkerError {
     })
 }
 
+/// Error codes from headless Chromium launch, navigation, or timeout — eligible for HTTP fallback.
+pub const BROWSER_FETCH_FAILURE_CODES: &[&str] = &[
+    "WEB_FETCH_LAUNCH_FAILED",
+    "WEB_FETCH_NAV_FAILED",
+    "WEB_FETCH_TIMEOUT",
+];
+
+pub fn is_browser_fetch_failure(err: &CoworkerError) -> bool {
+    let CoworkerError::Workflow(body) = err else {
+        return false;
+    };
+    parse_error_line(body)
+        .is_some_and(|p| BROWSER_FETCH_FAILURE_CODES.contains(&p.code.as_str()))
+}
+
+pub fn browser_failure_brief(err: &CoworkerError) -> String {
+    let CoworkerError::Workflow(body) = err else {
+        return "headless browser failed".into();
+    };
+    let Some(parsed) = parse_error_line(body) else {
+        return "headless browser failed".into();
+    };
+    match parsed.code.as_str() {
+        "WEB_FETCH_LAUNCH_FAILED" => "headless Chromium launch failed".into(),
+        "WEB_FETCH_NAV_FAILED" => "headless browser navigation failed".into(),
+        "WEB_FETCH_TIMEOUT" => "headless browser timed out".into(),
+        _ => parsed.message,
+    }
+}
+
 fn browser_timeout_envelope(url: &str, secs: u64) -> ErrorEnvelope {
     ErrorEnvelope {
         code: "WEB_FETCH_TIMEOUT".into(),
@@ -221,7 +252,9 @@ fn browser_timeout_envelope(url: &str, secs: u64) -> ErrorEnvelope {
             "Increase chat.web_fetch.browser_timeout_secs".into(),
             "Increase chat.web_fetch.browser_wait_ms for slow JS challenges".into(),
         ],
-        example: Some(harness_errors::web_fetch_tool_example(url, "metadata", true)),
+        example: Some(harness_errors::web_fetch_tool_example(
+            url, "metadata", true,
+        )),
         detail: Some(format!("url: {url}")),
     }
 }

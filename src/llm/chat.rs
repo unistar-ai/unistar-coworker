@@ -283,6 +283,8 @@ pub struct ChatStreamUpdate {
 pub struct ChatStepOptions {
     pub compress_reasoning: bool,
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Shorter stream wall when only reasoning grows (0 = use client default / off).
+    pub reasoning_only_warn_secs: u64,
 }
 
 impl Default for ChatStepOptions {
@@ -290,6 +292,7 @@ impl Default for ChatStepOptions {
         Self {
             compress_reasoning: true,
             cancel: None,
+            reasoning_only_warn_secs: 0,
         }
     }
 }
@@ -334,6 +337,7 @@ impl LlmClient {
                 &msgs,
                 tools,
                 options.cancel.clone(),
+                options.reasoning_only_warn_secs,
                 |content, thinking, tool_calls| {
                     if !thinking.is_empty() {
                         last_reasoning = thinking.to_string();
@@ -399,7 +403,9 @@ pub async fn materialize_reasoning_for_context(
             reasoning_chars = trimmed.len(),
             "reasoning summarizer failed; using local truncation"
         );
-        return Ok(crate::agent::context::truncate_reasoning_local(trimmed, 720));
+        return Ok(crate::agent::context::truncate_reasoning_local(
+            trimmed, 720,
+        ));
     }
     Ok(trimmed.to_string())
 }

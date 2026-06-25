@@ -10,12 +10,11 @@ use tokio::process::Command;
 use tokio::time;
 
 use crate::agent::bash_tool::{
-    parse_bash_review_response, bash_review_response_schema, BashCommandReview,
+    bash_review_response_schema, parse_bash_review_response, BashCommandReview,
 };
 use crate::agent::context::truncate_chars;
 use crate::agent::harness_errors::{
-    python_preflight_envelope, python_validation_envelope,
-    ErrorEnvelope,
+    python_preflight_envelope, python_validation_envelope, ErrorEnvelope,
 };
 use crate::agent::review_gate::ReviewGateOutcome;
 use crate::config::PythonToolConfig;
@@ -127,13 +126,7 @@ async fn run_python_code(
     })?;
 
     let started = std::time::Instant::now();
-    let output = run_with_timeout(
-        &config.command,
-        code,
-        &workdir,
-        config.timeout_secs,
-    )
-    .await?;
+    let output = run_with_timeout(&config.command, code, &workdir, config.timeout_secs).await?;
     let elapsed_ms = started.elapsed().as_millis();
     let review = BashCommandReview {
         verdict: "APPROVE".into(),
@@ -162,11 +155,8 @@ async fn review_code(llm: &LlmClient, code: &str) -> Result<BashCommandReview> {
         .await?;
     parse_bash_review_response(&raw).map_err(|e| match e {
         CoworkerError::Workflow(msg) => CoworkerError::Workflow(
-            python_validation_envelope(
-                &msg.replace("bash_run", "python_run"),
-                Some(code),
-            )
-            .format_tool_error_body(),
+            python_validation_envelope(&msg.replace("bash_run", "python_run"), Some(code))
+                .format_tool_error_body(),
         ),
         other => other,
     })
@@ -271,10 +261,9 @@ async fn run_with_timeout(
             })?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(code.as_bytes())
-                .await
-                .map_err(|e| CoworkerError::Workflow(format!("python_run stdin write failed: {e}")))?;
+            stdin.write_all(code.as_bytes()).await.map_err(|e| {
+                CoworkerError::Workflow(format!("python_run stdin write failed: {e}"))
+            })?;
         }
 
         let mut stdout = child.stdout.take();
@@ -304,25 +293,23 @@ async fn run_with_timeout(
             stderr: err,
         })
     };
-    time::timeout(timeout, fut)
-        .await
-        .map_err(|_| {
-            CoworkerError::Workflow(
-                ErrorEnvelope {
-                    code: "PYTHON_TIMEOUT".into(),
-                    tool_name: PYTHON_RUN_TOOL.into(),
-                    what: "Python script timed out".into(),
-                    why: format!("Exceeded {timeout_secs}s"),
-                    try_steps: vec![
-                        "Increase chat.python.timeout_secs".into(),
-                        "Simplify the script or process less data".into(),
-                    ],
-                    example: None,
-                    detail: None,
-                }
-                .format_tool_error_body(),
-            )
-        })?
+    time::timeout(timeout, fut).await.map_err(|_| {
+        CoworkerError::Workflow(
+            ErrorEnvelope {
+                code: "PYTHON_TIMEOUT".into(),
+                tool_name: PYTHON_RUN_TOOL.into(),
+                what: "Python script timed out".into(),
+                why: format!("Exceeded {timeout_secs}s"),
+                try_steps: vec![
+                    "Increase chat.python.timeout_secs".into(),
+                    "Simplify the script or process less data".into(),
+                ],
+                example: None,
+                detail: None,
+            }
+            .format_tool_error_body(),
+        )
+    })?
 }
 
 fn format_output(

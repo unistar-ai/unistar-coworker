@@ -63,7 +63,7 @@ impl Scheduler {
             push("daily-work", c, "ci_rescan");
         }
 
-        for (id, wf) in &config.workflows {
+        for (id, wf) in config.workflows.iter() {
             if wf.enabled {
                 if let Some(ref c) = wf.schedule {
                     push(id, c, "workflow");

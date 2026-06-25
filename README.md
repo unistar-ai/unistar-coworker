@@ -100,6 +100,8 @@ cargo run --release -- serve
 
 Streaming chat, tool/reasoning cards with **source** labels (`github` vs `mcp:…`), context pane, approval modal, theme toggle. Static assets: `src/web/static/` (rebuild after UI changes).
 
+**Security:** The Web UI is intended for **trusted local use** on your machine. Keep `web.bind` at the default `127.0.0.1:8787` so chat, approvals, and workflows are not exposed on the LAN. If you must bind to `0.0.0.0` (e.g. access from another device on your network), set `web.auth_token` — all `/api/*` routes and the `/ws` WebSocket then require `Authorization: Bearer <token>`. Static HTML/JS/CSS are still served without auth; API clients (including the browser UI) must send the header. Leave `auth_token` unset for normal localhost development.
+
 ### Chat
 
 ```bash
@@ -184,6 +186,7 @@ chat:
 
 web:
   bind: 127.0.0.1:8787
+  # auth_token: your-secret   # required for /api/* and /ws when binding beyond localhost
 
 theme: dark
 
@@ -197,7 +200,28 @@ policy:
 | `mcp.servers[]` | Optional third-party MCP (stdio / http) — see below |
 | `chat.prompt` | Chat system prompt file (default `prompts/chat.md`; legacy alias `chat.agent`) |
 | `chat.skills` | Override skill list (else from prompt frontmatter `skills:`) |
+| `web.bind` | `serve` listen address (default `127.0.0.1:8787`) |
+| `web.auth_token` | Optional bearer token for `/api/*` and `/ws` when binding beyond localhost |
 | `workflows.<id>.skills` | Override default skills per workflow |
+| `workflows.mcp_readonly` | Global default: allow readonly third-party MCP in batch workflows (default `false`) |
+| `workflows.<id>.mcp_readonly` | Per-workflow override; mutating MCP stays chat-only |
+
+## Storage
+
+Default backend is JSON under `./data` (gitignored). For long-running `serve` / `daemon` deployments or many chat sessions, prefer **SQLite** — single-file, better for concurrent reads and large histories:
+
+```yaml
+storage:
+  backend: sqlite
+  path: ./data/coworker.db
+```
+
+Migrate an existing JSON store with:
+
+```bash
+cargo run --release -- store migrate --from json --to sqlite \
+  --source ./data --dest ./data/coworker.db
+```
 
 ## MCP federation
 
@@ -210,9 +234,11 @@ GitHub **always** uses `github:` / `GithubHarness`. External tools (Slack, files
 | Discovery | Federated `tool_list` / `tool_search` / `tool_describe` (GitHub + each server section) |
 | Mutating | `approval.mutating: required` → same approval queue as `ci_rerun_workflow` (`ApprovalKind::McpTool`) |
 | Resources | `resource_read` with `mcp+{server_id}://…` URIs |
-| UI | TUI/Web Config: `mcp[id]: ok (N tools)`; tool cards show `mcp:slack · post_message` |
+| UI | TUI/Web Config: per-server `connected`, `tool_count`, `last_rpc_ms`, `last_error`; tool cards show `mcp:slack · post_message` |
 | Reload | Web/TUI **Re-probe** reloads config and reconnects MCP servers |
+| Per-server skills | `skills: [name]` on a server auto-loads those technique skills when its tools are warmed in chat |
 | Cancel | Chat cancel aborts HTTP requests and kills stdio MCP children |
+| Workflows | Batch workflows block third-party MCP by default; set `workflows.mcp_readonly: true` or per-workflow `mcp_readonly: true` for readonly MCP only |
 
 ```yaml
 mcp:
@@ -230,6 +256,7 @@ mcp:
         prefix: slack_
       approval:
         mutating: required
+      skills: [slack-ops]
     - id: ops
       transport: http
       url: http://127.0.0.1:9090/mcp
@@ -283,6 +310,22 @@ cargo check
 cargo clippy -- -D warnings
 cargo test
 ```
+
+### Web UI E2E (Playwright)
+
+Smoke tests live in [`web-e2e/`](./web-e2e/) (page load, theme toggle, approval dialog payload). They start a real `unistar-coworker serve` instance via Playwright `webServer` and a minimal temp `coworker.yaml`.
+
+```bash
+cargo build                                    # once: binary at target/debug/unistar-coworker
+cd web-e2e
+npm install
+npm run install:browsers                       # first time: download Chromium
+npm test
+```
+
+Optional: `UNISTAR_BIN=/path/to/unistar-coworker npm test` if the binary is elsewhere; `E2E_PORT=18787` to change the test bind port.
+
+CI runs these as an **optional** job (`continue-on-error: true`) because they need a Rust build plus browser install and are slower than `cargo test`; Rust checks remain the merge gate.
 
 ```
 unistar-coworker/

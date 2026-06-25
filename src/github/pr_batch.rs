@@ -43,7 +43,9 @@ pub async fn pr_get_status_batch(exec: &GhExec, args: &Value) -> Result<String> 
         ));
     }
     if found.is_empty() {
-        lines.push("No PR status returned — verify numbers are open/accessible PRs in this repo.".into());
+        lines.push(
+            "No PR status returned — verify numbers are open/accessible PRs in this repo.".into(),
+        );
     }
     Ok(lines.join("\n").trim().to_string())
 }
@@ -77,7 +79,8 @@ pub async fn pr_get_overview_batch(exec: &GhExec, args: &Value) -> Result<String
     if found.is_empty() {
         lines.push("No PR overview returned.".into());
     } else {
-        lines.push("Next: pr_get_overview or ci_analyze_pr_failures on PRs with failing CI.".into());
+        lines
+            .push("Next: pr_get_overview or ci_analyze_pr_failures on PRs with failing CI.".into());
     }
     Ok(lines.join("\n").trim().to_string())
 }
@@ -171,7 +174,10 @@ async fn fetch_proverview_batch(
     exec: &GhExec,
     repo: &str,
     numbers: &[u32],
-) -> Result<(std::collections::HashMap<u32, PullRequestOverviewBatch>, Vec<u32>)> {
+) -> Result<(
+    std::collections::HashMap<u32, PullRequestOverviewBatch>,
+    Vec<u32>,
+)> {
     let (owner, name) = split_owner_repo(repo)?;
     let query = build_proverview_batch_query(&owner, &name, numbers);
     let query_arg = format!("query={query}");
@@ -196,6 +202,32 @@ struct GraphqlData {
 #[derive(Debug, Deserialize)]
 struct GraphqlError {
     message: String,
+}
+
+const STATUS_CHECK_ROLLUP_GRAPHQL: &str = r#"
+			statusCheckRollup {
+				state
+				contexts(first: 100) {
+					nodes {
+						__typename
+						... on CheckRun { name status conclusion detailsUrl }
+						... on StatusContext { context state targetUrl }
+					}
+				}
+			}"#;
+
+fn normalize_status_check_rollup(raw: &mut serde_json::Value) {
+    let Some(scr) = raw.get_mut("statusCheckRollup") else {
+        return;
+    };
+    if scr.is_array() {
+        return;
+    }
+    let Some(nodes) = scr.get("contexts").and_then(|c| c.get("nodes")).cloned() else {
+        *scr = serde_json::Value::Array(vec![]);
+        return;
+    };
+    *scr = nodes;
 }
 
 fn parse_batch_response(
@@ -238,7 +270,9 @@ fn parse_batch_response(
             missing.push(n);
             continue;
         }
-        let mut pr: PullRequest = serde_json::from_value(raw.clone()).unwrap_or_default();
+        let mut raw = raw.clone();
+        normalize_status_check_rollup(&mut raw);
+        let mut pr: PullRequest = serde_json::from_value(raw).unwrap_or_default();
         if pr.number == 0 {
             pr.number = n;
         }
@@ -294,7 +328,9 @@ fn parse_overview_batch_response(
             missing.push(n);
             continue;
         }
-        let mut pr: PullRequestOverviewBatch = serde_json::from_value(raw.clone()).unwrap_or_default();
+        let mut raw = raw.clone();
+        normalize_status_check_rollup(&mut raw);
+        let mut pr: PullRequestOverviewBatch = serde_json::from_value(raw).unwrap_or_default();
         if pr.number == 0 {
             pr.number = n;
         }
@@ -318,15 +354,10 @@ fn build_pr_status_batch_query(owner: &str, name: &str, numbers: &[u32]) -> Stri
         b.push_str(
             r#"
 			number title isDraft reviewDecision mergeable state
-			author { login }
-			statusCheckRollup {
-				__typename
-				... on CheckRun { name status conclusion }
-				... on StatusContext { context state }
-			}
-		}"#,
+			author { login }"#,
         );
-        b.push('}');
+        b.push_str(STATUS_CHECK_ROLLUP_GRAPHQL);
+        b.push_str("\n\t\t}");
     }
     b.push_str(" } }");
     b
@@ -344,16 +375,66 @@ fn build_proverview_batch_query(owner: &str, name: &str, numbers: &[u32]) -> Str
             r#"
 			number title isDraft reviewDecision mergeable state
 			additions deletions changedFiles
-			author { login }
-			statusCheckRollup {
-				__typename
-				... on CheckRun { name status conclusion }
-				... on StatusContext { context state }
-			}
-		}"#,
+			author { login }"#,
         );
-        b.push('}');
+        b.push_str(STATUS_CHECK_ROLLUP_GRAPHQL);
+        b.push_str("\n\t\t}");
     }
     b.push_str(" } }");
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overview_batch_query_uses_status_contexts_nodes() {
+        let q = build_proverview_batch_query("Kong", "kong", &[14916, 14909]);
+        assert!(q.contains("contexts(first:"));
+        assert!(q.contains("... on CheckRun"));
+        assert!(!q.contains("statusCheckRollup {\n\t\t\t\t__typename"));
+    }
+
+    #[test]
+    fn normalize_status_check_rollup_flattens_graphql_nodes() {
+        let mut raw = serde_json::json!({
+            "number": 1,
+            "statusCheckRollup": {
+                "state": "FAILURE",
+                "contexts": {
+                    "nodes": [
+                        {"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                    ]
+                }
+            }
+        });
+        normalize_status_check_rollup(&mut raw);
+        let arr = raw.get("statusCheckRollup").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].get("name").unwrap(), "ci");
+    }
+
+    #[test]
+    fn overview_batch_query_balanced_braces_for_multiple_prs() {
+        let q = build_proverview_batch_query("Kong", "kong", &[14916, 14909, 14908]);
+        assert!(
+            !q.contains("}} pr"),
+            "extra closing brace before next PR alias: {q}"
+        );
+        let open = q.chars().filter(|&c| c == '{').count();
+        let close = q.chars().filter(|&c| c == '}').count();
+        assert_eq!(open, close, "unbalanced braces: {q}");
+        assert!(q.contains("pr14916: pullRequest(number: 14916)"));
+        assert!(q.contains("pr14908: pullRequest(number: 14908)"));
+    }
+
+    #[test]
+    fn status_batch_query_balanced_braces_for_multiple_prs() {
+        let q = build_pr_status_batch_query("Kong", "kong", &[42, 43]);
+        assert!(!q.contains("}} pr"), "extra closing brace: {q}");
+        let open = q.chars().filter(|&c| c == '{').count();
+        let close = q.chars().filter(|&c| c == '}').count();
+        assert_eq!(open, close, "unbalanced braces: {q}");
+    }
 }

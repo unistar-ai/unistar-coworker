@@ -613,10 +613,7 @@ impl ToolCatalog {
     }
 
     pub fn format_unknown_tool_nudge(&self, bad: &str) -> String {
-        let fallback = TOOLS
-            .first()
-            .map(|t| t.name)
-            .unwrap_or("pr_list_open");
+        let fallback = TOOLS.first().map(|t| t.name).unwrap_or("pr_list_open");
         let suggestion = self
             .suggest_tool_name(bad)
             .unwrap_or_else(|| fallback.to_string());
@@ -769,9 +766,7 @@ impl ToolCatalog {
             .get("command")
             .and_then(|v| v.as_str())
             .unwrap_or("?");
-        if error_body.contains("bash_run:")
-            && bash_tool::output_indicates_failure(error_body)
-        {
+        if error_body.contains("bash_run:") && bash_tool::output_indicates_failure(error_body) {
             return bash_exit_failure_envelope(command, error_body);
         }
         bash_validation_envelope(error_body, Some(command))
@@ -787,23 +782,25 @@ impl ToolCatalog {
         repo: Option<&str>,
     ) -> ErrorEnvelope {
         let fields = missing.join(", ");
-        let example = serde_json::from_str::<Value>(&example_native_tool_args(
-            tool_name, pr, run_id, repo,
-        ))
-        .ok()
-        .map(|args| {
-            serde_json::json!({
-                "name": tool_name,
-                "arguments": args
-            })
-        });
+        let example =
+            serde_json::from_str::<Value>(&example_native_tool_args(tool_name, pr, run_id, repo))
+                .ok()
+                .map(|args| {
+                    serde_json::json!({
+                        "name": tool_name,
+                        "arguments": args
+                    })
+                });
         generic_tool_failure_envelope(
             tool_name,
             &format!("Tool `{tool_name}` is missing required arguments"),
             &format!("Missing: {fields}"),
             vec![format!("Add required field(s): {fields}")],
             example,
-            &format!("Args sent: {}", serde_json::to_string(tool_args).unwrap_or_default()),
+            &format!(
+                "Args sent: {}",
+                serde_json::to_string(tool_args).unwrap_or_default()
+            ),
         )
         .with_code("TOOL_MISSING_ARGS")
     }
@@ -847,16 +844,15 @@ impl ToolCatalog {
             .map(|n| n as u32);
         let run_id = tool_args.get("run_id").and_then(|v| v.as_i64());
         let repo = tool_args.get("repo").and_then(|v| v.as_str());
-        let example = serde_json::from_str::<Value>(&example_native_tool_args(
-            tool_name, pr, run_id, repo,
-        ))
-        .ok()
-        .map(|args| {
-            serde_json::json!({
-                "name": tool_name,
-                "arguments": args
-            })
-        });
+        let example =
+            serde_json::from_str::<Value>(&example_native_tool_args(tool_name, pr, run_id, repo))
+                .ok()
+                .map(|args| {
+                    serde_json::json!({
+                        "name": tool_name,
+                        "arguments": args
+                    })
+                });
         let mut env = generic_tool_failure_envelope(
             tool_name,
             &format!("Tool `{tool_name}` call failed"),
@@ -894,7 +890,11 @@ impl ToolCatalog {
         let mut out = String::from(
             "Args include all required fields — this is not a missing-parameter error.",
         );
-        if err_code.as_deref() == Some("NOT_FOUND") || low.contains("not found") || low.contains("http 404") || low.contains("could not resolve to a repository") {
+        if err_code.as_deref() == Some("NOT_FOUND")
+            || low.contains("not found")
+            || low.contains("http 404")
+            || low.contains("could not resolve to a repository")
+        {
             out.push_str(
                 "\nGitHub could not find the repo, PR, workflow run, or log for those IDs.",
             );
@@ -924,7 +924,8 @@ impl ToolCatalog {
                     "\nLogs may be pending or expired — try `ci_get_run_summary` before fetching failed logs.",
                 );
             }
-        } else if err_code.as_deref() == Some("TRANSIENT") || err_code.as_deref() == Some("RATE_LIMIT")
+        } else if err_code.as_deref() == Some("TRANSIENT")
+            || err_code.as_deref() == Some("RATE_LIMIT")
             || low.contains("temporary server error")
             || low.contains("http 504")
             || low.contains("http 503")
@@ -936,13 +937,16 @@ impl ToolCatalog {
             } else {
                 out.push_str("\nTransient GitHub error — retry the same call once.");
             }
-        } else if err_code.as_deref() == Some("FORBIDDEN") || err_code.as_deref() == Some("AUTH")
+        } else if err_code.as_deref() == Some("FORBIDDEN")
+            || err_code.as_deref() == Some("AUTH")
             || low.contains("permission")
             || low.contains("http 403")
             || low.contains("forbidden")
             || low.contains("authentication")
         {
-            out.push_str("\nPermission or auth error — check GH_TOKEN / `gh auth login` for this repo.");
+            out.push_str(
+                "\nPermission or auth error — check GH_TOKEN / `gh auth login` for this repo.",
+            );
         } else if err_code.as_deref() == Some("EXTERNAL_CI") {
             out.push_str("\nExternal CI failure — use `ci_list_external_checks`; do not call ci_get_failed_logs.");
         } else {
@@ -994,9 +998,7 @@ impl ToolCatalog {
     fn tool_blurb(&self, name: &str) -> Cow<'static, str> {
         spec_by_name(name)
             .map(|s| Cow::Borrowed(s.blurb))
-            .unwrap_or(Cow::Borrowed(
-                "MCP tool — see TOOLS.md or tool_describe",
-            ))
+            .unwrap_or(Cow::Borrowed("MCP tool — see TOOLS.md or tool_describe"))
     }
 
     fn resolved_args(&self, name: &str) -> (Vec<&'static str>, Vec<&'static str>) {
@@ -1011,18 +1013,47 @@ impl ToolCatalog {
         let related: &[&str] = match tool {
             "pr_get_overview" => &["pr_list_changed_files", "pr_get_diff", "pr_list_open"],
             "pr_list_changed_files" => &["pr_diff_risk_scan", "pr_get_diff", "pr_get_overview"],
-            "ci_analyze_pr_failures" => {
-                &["pr_get_ci_snapshot", "ci_get_run_summary", "ci_failure_fingerprint", "ci_get_failed_logs"]
-            }
+            "ci_analyze_pr_failures" => &[
+                "pr_get_ci_snapshot",
+                "ci_get_run_summary",
+                "ci_failure_fingerprint",
+                "ci_get_failed_logs",
+            ],
             "pr_get_ci_snapshot" => &["ci_get_failed_logs", "ci_rerun_workflow", "ci_compare_runs"],
-            "ci_get_run_summary" => &["ci_get_failure_digest", "ci_get_failed_logs", "ci_get_job_logs", "ci_correlate_prs"],
-            "ci_get_failure_digest" => &["ci_get_failed_logs", "policy_classify_failure", "ci_rerun_workflow"],
+            "ci_get_run_summary" => &[
+                "ci_get_failure_digest",
+                "ci_get_failed_logs",
+                "ci_get_job_logs",
+                "ci_correlate_prs",
+            ],
+            "ci_get_failure_digest" => &[
+                "ci_get_failed_logs",
+                "policy_classify_failure",
+                "ci_rerun_workflow",
+            ],
             "ci_get_failed_logs" => &["policy_classify_failure", "ci_get_job_logs"],
-            "ci_failure_fingerprint" => &["ci_get_failure_digest", "policy_classify_failure", "ci_compare_runs", "ci_get_failed_logs"],
-            "policy_classify_failure" => &["ci_rerun_workflow", "pr_draft_ci_comment", "ci_get_failed_logs"],
-            "ci_list_runs" => &["ci_branch_health", "ci_get_run_summary", "ci_list_workflows"],
+            "ci_failure_fingerprint" => &[
+                "ci_get_failure_digest",
+                "policy_classify_failure",
+                "ci_compare_runs",
+                "ci_get_failed_logs",
+            ],
+            "policy_classify_failure" => &[
+                "ci_rerun_workflow",
+                "pr_draft_ci_comment",
+                "ci_get_failed_logs",
+            ],
+            "ci_list_runs" => &[
+                "ci_branch_health",
+                "ci_get_run_summary",
+                "ci_list_workflows",
+            ],
             "ci_list_workflows" => &["ci_list_runs", "ci_branch_health", "ci_workflow_stats"],
-            "ci_branch_health" => &["ci_workflow_stats", "ci_get_run_summary", "ci_correlate_prs"],
+            "ci_branch_health" => &[
+                "ci_workflow_stats",
+                "ci_get_run_summary",
+                "ci_correlate_prs",
+            ],
             "ci_workflow_stats" => &["ci_branch_health", "ci_list_runs"],
             "release_list_tags" => &["release_notes_draft", "pr_list_merged"],
             "pr_get_merge_blockers" => &["pr_get_review_state", "pr_list_merge_blocked"],
@@ -1038,7 +1069,11 @@ impl ToolCatalog {
             "alert_list_open" => &["alert_summarize_open"],
             "alert_summarize_open" => &["alert_list_open"],
             "ci_rerun_workflow" => &["ci_compare_runs"],
-            "pr_list_open" => &["pr_get_overview", "pr_list_waiting_review", "pr_get_status_batch"],
+            "pr_list_open" => &[
+                "pr_get_overview",
+                "pr_list_waiting_review",
+                "pr_get_status_batch",
+            ],
             "pr_list_waiting_review" => &["pr_get_status_batch", "pr_get_overview_batch"],
             "pr_get_status_batch" => &["pr_get_overview", "pr_get_overview_batch"],
             "pr_get_overview_batch" => &["pr_get_overview", "ci_analyze_pr_failures"],
@@ -1234,7 +1269,10 @@ fn inferred_spec_fields(name: &str) -> (&'static [&'static str], &'static [&'sta
         return (&["name", "args"], &[]);
     }
     if name == "ci_get_failed_logs" {
-        return (&["repo", "run_id"], &["job_id", "focus", "offset_lines", "max_lines"]);
+        return (
+            &["repo", "run_id"],
+            &["job_id", "focus", "offset_lines", "max_lines"],
+        );
     }
     if name == "ci_get_failure_digest" {
         return (&["repo", "run_id"], &["job_id"]);
@@ -1273,7 +1311,10 @@ fn inferred_spec_fields(name: &str) -> (&'static [&'static str], &'static [&'sta
         return (&["repo", "run_id"], &["window_days", "limit"]);
     }
     if name == "ci_get_job_logs" {
-        return (&["repo", "run_id", "job_id"], &["offset_lines", "max_lines"]);
+        return (
+            &["repo", "run_id", "job_id"],
+            &["offset_lines", "max_lines"],
+        );
     }
     if name == "ci_list_external_checks" || name == "ci_get_check_url" {
         return (&["repo", "pr_number"], &[]);
@@ -1388,7 +1429,11 @@ fn example_native_tool_args(
         | "ci_list_workflows"
         | "release_list_tags" => format!("{{\"repo\":\"{repo}\"}}"),
         "release_notes_draft" => format!(r#"{{"repo":"{repo}","since_tag":"v1.0.0"}}"#),
-        "ci_get_run_summary" | "ci_get_failed_logs" | "ci_get_failure_digest" | "ci_failure_fingerprint" | "ci_correlate_prs" => {
+        "ci_get_run_summary"
+        | "ci_get_failed_logs"
+        | "ci_get_failure_digest"
+        | "ci_failure_fingerprint"
+        | "ci_correlate_prs" => {
             format!("{{\"repo\":\"{repo}\",\"run_id\":{run}}}")
         }
         "ci_get_job_logs" => {
@@ -1409,7 +1454,9 @@ fn example_native_tool_args(
         "pr_get_status_batch" => format!(r#"{{"repo":"{repo}","pr_numbers":"{pr}"}}"#),
         "pr_get_overview_batch" => format!(r#"{{"repo":"{repo}","pr_numbers":"{pr},99"}}"#),
         "issue_get" => format!(r#"{{"repo":"{repo}","issue_number":42}}"#),
-        "store_get_latest_digest" | "store_list_pending_approvals" | "store_get_oncall_handoff"
+        "store_get_latest_digest"
+        | "store_list_pending_approvals"
+        | "store_get_oncall_handoff"
         | "tool_list" => "{}".to_string(),
         "tool_describe" => r#"{"name":"pr_get_overview"}"#.to_string(),
         "tool_call" => format!(r#"{{"name":"pr_list_open","args":{{"repo":"{repo}"}}}}"#),
@@ -1618,15 +1665,11 @@ mod tests {
     fn warmed_tools_gain_native_schema() {
         let mut warmed = HashSet::new();
         warmed.insert("pr_get_overview".to_string());
-        let defs = ToolCatalog::new().native_tool_definitions_for_session(ChatToolMode::Auto, &warmed);
+        let defs =
+            ToolCatalog::new().native_tool_definitions_for_session(ChatToolMode::Auto, &warmed);
         let names: Vec<String> = defs
             .iter()
-            .filter_map(|d| {
-                d.get("function")?
-                    .get("name")?
-                    .as_str()
-                    .map(str::to_string)
-            })
+            .filter_map(|d| d.get("function")?.get("name")?.as_str().map(str::to_string))
             .collect();
         assert!(names.contains(&"pr_get_overview".to_string()));
         assert!(names.contains(&"tool_search".to_string()));
@@ -1637,16 +1680,14 @@ mod tests {
         let defs = ToolCatalog::new().native_tool_definitions(ChatToolMode::Lazy);
         let names: Vec<String> = defs
             .iter()
-            .filter_map(|d| {
-                d.get("function")?
-                    .get("name")?
-                    .as_str()
-                    .map(str::to_string)
-            })
+            .filter_map(|d| d.get("function")?.get("name")?.as_str().map(str::to_string))
             .collect();
         assert_eq!(names.len(), PRELOAD_NATIVE_TOOLS.len());
         for tool in PRELOAD_NATIVE_TOOLS {
-            assert!(names.contains(&tool.to_string()), "missing preload tool {tool}");
+            assert!(
+                names.contains(&tool.to_string()),
+                "missing preload tool {tool}"
+            );
         }
         assert!(!names.contains(&"store_get_latest_digest".to_string()));
         assert!(!names.contains(&"pr_get_overview".to_string()));
@@ -1685,5 +1726,80 @@ mod tests {
             ToolCatalog::new().suggest_tool_name("pr_get_overview_and_changed_files"),
             Some("pr_get_overview".to_string())
         );
+    }
+
+    /// CI: covered by `cargo test` (no separate workflow step needed).
+    ///
+    /// Compares documented tool names in `skills/_base/TOOLS.md` against the static
+    /// `TOOLS` catalog. Tools documented in TOOLS.md but missing from the catalog
+    /// fail the test; catalog-only tools emit a warning so new harness tools can land
+    /// before docs catch up.
+    #[test]
+    fn tools_md_matches_catalog() {
+        let catalog: HashSet<String> = list_github_tool_names().into_iter().collect();
+        let tools_md_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/_base/TOOLS.md");
+        let tools_md =
+            std::fs::read_to_string(&tools_md_path).unwrap_or_else(|e| {
+                panic!("read {}: {e}", tools_md_path.display())
+            });
+        let documented = parse_tools_md_documented_names(&tools_md);
+
+        let mut missing_from_md: Vec<String> = catalog
+            .iter()
+            .filter(|name| !documented.contains(*name))
+            .cloned()
+            .collect();
+        missing_from_md.sort();
+        if !missing_from_md.is_empty() {
+            eprintln!(
+                "WARN: tools in catalog but not documented in TOOLS.md: {}",
+                missing_from_md.join(", ")
+            );
+        }
+
+        let mut missing_from_catalog: Vec<String> = documented
+            .iter()
+            .filter(|name| !catalog.contains(*name))
+            .cloned()
+            .collect();
+        missing_from_catalog.sort();
+        assert!(
+            missing_from_catalog.is_empty(),
+            "TOOLS.md documents tools missing from catalog: {}",
+            missing_from_catalog.join(", ")
+        );
+    }
+
+    /// Extract documented tool names from TOOLS.md via lightweight regex (not a full MD parser).
+    fn parse_tools_md_documented_names(content: &str) -> HashSet<String> {
+        use regex::Regex;
+
+        let mut names = HashSet::new();
+
+        // `### `pr_get_overview`` and `### `read_file` / `grep` / `glob``
+        let heading = Regex::new(r"(?m)^### (.+)$").expect("heading regex");
+        let backtick = Regex::new(r"`([a-z][a-z0-9_]+)`").expect("backtick regex");
+        for cap in heading.captures_iter(content) {
+            for tool in backtick.captures_iter(&cap[1]) {
+                names.insert(tool[1].to_string());
+            }
+        }
+
+        // Lazy meta-tools table (no per-tool ### headings).
+        if let Some(start) = content.find("## Lazy meta-tools") {
+            let rest = &content[start..];
+            let end = rest[1..]
+                .find("\n## ")
+                .map(|i| i + 1)
+                .unwrap_or(rest.len());
+            let section = &rest[..end];
+            let table_row = Regex::new(r"(?m)^\| `([a-z][a-z0-9_]+)` \|").expect("table regex");
+            for cap in table_row.captures_iter(section) {
+                names.insert(cap[1].to_string());
+            }
+        }
+
+        names
     }
 }

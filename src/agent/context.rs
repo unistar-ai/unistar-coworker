@@ -58,17 +58,13 @@ pub fn format_tools_for_context_panel(tools: &[Value]) -> String {
         let Some(func) = t.get("function") else {
             continue;
         };
-        let name = func
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("?");
+        let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("?");
         let desc = func
             .get("description")
             .and_then(|d| d.as_str())
             .unwrap_or("");
         let params = func.get("parameters").cloned().unwrap_or_else(|| json!({}));
-        let params_str =
-            serde_json::to_string_pretty(&params).unwrap_or_else(|_| "{}".to_string());
+        let params_str = serde_json::to_string_pretty(&params).unwrap_or_else(|_| "{}".to_string());
         let block = format!("### {name}\n{desc}\n\n```json\n{params_str}\n```");
         total = total.saturating_add(block.len());
         if total > CONTEXT_PANEL_SECTION_MAX_CHARS {
@@ -90,24 +86,18 @@ pub fn format_system_for_context_panel(content: &str) -> String {
     if let Some(tech_start) = content.find(TECH) {
         let before = &content[..tech_start];
         if let Some(ctx_start) = content.find(CTX) {
-            return format!(
-                "{before}{CTX}{}",
-                &content[ctx_start + CTX.len()..]
-            )
-            .trim()
-            .to_string();
+            return format!("{before}{CTX}{}", &content[ctx_start + CTX.len()..])
+                .trim()
+                .to_string();
         }
         return before.trim().to_string();
     }
     if let Some(tools_start) = content.find(TOOLS) {
         let before = &content[..tools_start];
         if let Some(ctx_start) = content.find(CTX) {
-            return format!(
-                "{before}{CTX}{}",
-                &content[ctx_start + CTX.len()..]
-            )
-            .trim()
-            .to_string();
+            return format!("{before}{CTX}{}", &content[ctx_start + CTX.len()..])
+                .trim()
+                .to_string();
         }
     }
     content.trim().to_string()
@@ -174,7 +164,9 @@ pub enum CompactionStrategy {
 pub fn tool_result_char_cap(strategy: CompactionStrategy, tool_name: &str) -> usize {
     match strategy {
         CompactionStrategy::Code => coding_tool_result_char_cap(tool_name),
-        CompactionStrategy::Ops | CompactionStrategy::Generic => ops_tool_result_char_cap(tool_name),
+        CompactionStrategy::Ops | CompactionStrategy::Generic => {
+            ops_tool_result_char_cap(tool_name)
+        }
     }
 }
 
@@ -206,8 +198,12 @@ fn ops_tool_result_char_cap(tool_name: &str) -> usize {
         "ci_get_failed_logs" => 7_200,
         "pr_list_changed_files" => 4_800,
         "pr_get_diff" => 6_000,
-        "pr_get_overview" | "pr_get_status" | "pr_get_status_batch" | "ci_analyze_pr_failures"
-        | "ci_get_run_summary" | "ci_failure_fingerprint" => 5_250,
+        "pr_get_overview"
+        | "pr_get_status"
+        | "pr_get_status_batch"
+        | "ci_analyze_pr_failures"
+        | "ci_get_run_summary"
+        | "ci_failure_fingerprint" => 5_250,
         "ci_compare_runs" | "ci_list_external_checks" => 3_000,
         "repo_get_info" => 2_500,
         "store_get_latest_digest" | "store_list_pending_approvals" => 3_000,
@@ -647,11 +643,7 @@ pub fn tool_body_header_indicates_failure(output: &str) -> bool {
     if pr_get_diff_raw_output_is_success(trimmed) {
         return false;
     }
-    let first_line = trimmed
-        .lines()
-        .next()
-        .unwrap_or(trimmed)
-        .trim();
+    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
     let first_lower = first_line.to_ascii_lowercase();
     if first_lower.starts_with("ok:") {
         return false;
@@ -960,6 +952,71 @@ pub fn is_rolling_summary_content(content: &str) -> bool {
         || (t.starts_with("[earlier ") && t.contains("omitted from context"))
 }
 
+/// Parse `[N earlier message(s) omitted from context …]` markers.
+fn parse_omitted_message_count(content: &str) -> Option<u32> {
+    let rest = content.strip_prefix('[')?;
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if num.is_empty() {
+        return None;
+    }
+    if !rest[num.len()..].starts_with(" earlier message") {
+        return None;
+    }
+    num.parse().ok()
+}
+
+/// Trim/summary signals for the context panel (derived from LLM message markers).
+pub fn analyze_context_trim_metadata(messages: &[LlmTurnMessage]) -> (u32, Option<String>) {
+    let mut omitted_turns = 0u32;
+    let mut session_summary = false;
+    let mut context_summaries = 0u32;
+    let mut summarized_tools = 0u32;
+
+    for m in messages {
+        let t = m.content.trim_start();
+        if let Some(n) = parse_omitted_message_count(t) {
+            omitted_turns = omitted_turns.saturating_add(n);
+        } else if t.starts_with("[session history summary]") {
+            session_summary = true;
+        } else if t.starts_with("[earlier context summary]") {
+            context_summaries += 1;
+        } else if t.starts_with("[summarized tool_result") {
+            summarized_tools += 1;
+        }
+    }
+
+    let mut parts = Vec::new();
+    if omitted_turns > 0 {
+        parts.push(format!(
+            "{omitted_turns} earlier turn{} omitted",
+            if omitted_turns == 1 { "" } else { "s" }
+        ));
+    }
+    if session_summary {
+        parts.push("session history summarized".to_string());
+    }
+    if context_summaries > 0 {
+        parts.push(if context_summaries == 1 {
+            "earlier turns summarized".to_string()
+        } else {
+            format!("{context_summaries} earlier turn blocks summarized")
+        });
+    }
+    if summarized_tools > 0 {
+        parts.push(format!(
+            "{summarized_tools} tool output{} summarized",
+            if summarized_tools == 1 { "" } else { "s" }
+        ));
+    }
+
+    let note = if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    };
+    (omitted_turns, note)
+}
+
 /// Compressed thinking trace injected after a long reasoning stream.
 pub fn is_reasoning_summary_content(content: &str) -> bool {
     content
@@ -1038,10 +1095,7 @@ async fn summarize_history_batch(
     if compaction == CompactionStrategy::Ops {
         let preserved = extract_ops_critical_lines(text);
         if preserved.len() >= 2 {
-            return Ok(format!(
-                "Preserved ops facts:\n{}",
-                preserved.join("\n")
-            ));
+            return Ok(format!("Preserved ops facts:\n{}", preserved.join("\n")));
         }
     }
     match compaction {
@@ -1094,7 +1148,9 @@ pub fn trim_llm_messages(
             break;
         }
         let compress_until = len.saturating_sub(TAIL_PROTECT);
-        if compress_until > 1 && compress_oldest_tool_in_slice(messages, 1, compress_until, compaction) {
+        if compress_until > 1
+            && compress_oldest_tool_in_slice(messages, 1, compress_until, compaction)
+        {
             continue;
         }
         if compress_until > 1 {
@@ -1116,7 +1172,12 @@ pub fn trim_llm_messages(
         let tail_start = len.saturating_sub(TAIL_PROTECT);
         if tail_start > 0
             && tail_start < len.saturating_sub(1)
-            && compress_oldest_tool_in_slice(messages, tail_start, len.saturating_sub(1), compaction)
+            && compress_oldest_tool_in_slice(
+                messages,
+                tail_start,
+                len.saturating_sub(1),
+                compaction,
+            )
         {
             continue;
         }
@@ -1680,6 +1741,42 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
     }
 
     #[test]
+    fn analyze_context_trim_metadata_detects_markers() {
+        let msgs = vec![
+            LlmTurnMessage::new("system", "sys"),
+            LlmTurnMessage::new(
+                "user",
+                "[12 earlier message(s) omitted from context — full transcript is in the session store]",
+            ),
+            LlmTurnMessage::new("user", "[session history summary]\n- asked about PR #42"),
+            LlmTurnMessage::new("user", "[earlier context summary]\n- reran CI"),
+            LlmTurnMessage::new(
+                "user",
+                "[summarized tool_result pr_get_diff]\n#42 title…",
+            ),
+        ];
+        let (trimmed, note) = analyze_context_trim_metadata(&msgs);
+        assert_eq!(trimmed, 12);
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "12 earlier turns omitted · session history summarized · earlier turns summarized · 1 tool output summarized"
+            )
+        );
+    }
+
+    #[test]
+    fn analyze_context_trim_metadata_empty_when_clean() {
+        let msgs = vec![
+            LlmTurnMessage::new("system", "sys"),
+            LlmTurnMessage::new("user", "hello"),
+        ];
+        let (trimmed, note) = analyze_context_trim_metadata(&msgs);
+        assert_eq!(trimmed, 0);
+        assert!(note.is_none());
+    }
+
+    #[test]
     fn is_rolling_summary_content_detects_prior_summaries() {
         assert!(is_rolling_summary_content(
             "[session history summary]\n- user asked about PR #42"
@@ -1745,7 +1842,8 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
 
     #[test]
     fn ops_compaction_preserves_ci_kind_and_verdict() {
-        let body = "CI_KIND: actions_only\nverdict: flaky\nnoise line\n#19264 acme/widget CI failing";
+        let body =
+            "CI_KIND: actions_only\nverdict: flaky\nnoise line\n#19264 acme/widget CI failing";
         let out = summarize_ops_tool_content(
             "ci_analyze_pr_failures",
             &format!("tool_result(ci_analyze_pr_failures):\n{body}"),

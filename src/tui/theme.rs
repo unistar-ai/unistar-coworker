@@ -55,11 +55,7 @@ impl ThemePalette {
         let mut palette = Self::from_mode(theme);
         palette.osc8_links = tui.osc8_links;
         if theme != ThemeMode::None {
-            if let Some(accent) = tui
-                .accent
-                .as_deref()
-                .and_then(parse_hex_rgb)
-            {
+            if let Some(accent) = tui.accent.as_deref().and_then(parse_hex_rgb) {
                 palette.accent = accent;
                 palette.accent_dim = dim_rgb(accent);
                 palette.link = accent;
@@ -417,9 +413,7 @@ fn system_session_row_line(th: ThemePalette, id: &str, date: &str, title: &str) 
         Span::raw(indent),
         Span::styled(
             short_id,
-            Style::default()
-                .fg(th.accent)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  {date}  "),
@@ -611,11 +605,7 @@ fn message_lines(
     let mut out = Vec::with_capacity(content_lines.len().max(1));
     for (i, content) in content_lines.into_iter().enumerate() {
         if i == 0 {
-            let mut spans = vec![
-                bar.clone(),
-                badge.clone(),
-                Span::raw(MESSAGE_BODY_GAP),
-            ];
+            let mut spans = vec![bar.clone(), badge.clone(), Span::raw(MESSAGE_BODY_GAP)];
             spans.extend(content.spans);
             out.push(Line::from(spans));
         } else if content.spans.is_empty() {
@@ -804,7 +794,10 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(!joined.contains('\r'), "carriage returns must not reach TUI spans");
+        assert!(
+            !joined.contains('\r'),
+            "carriage returns must not reach TUI spans"
+        );
         assert!(joined.contains("100  116k"));
         assert!(!joined.contains("% Total"));
     }
@@ -866,10 +859,22 @@ mod tests {
         let user = format_chat_lines(th, "you> hello", None);
         let sys_first: String = system[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let you_first: String = user[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(sys_first.starts_with('▌'), "system should use solid bar: {sys_first:?}");
-        assert!(you_first.starts_with('▌'), "user should use solid bar: {you_first:?}");
-        assert!(sys_first.contains(" system "), "expected system badge: {sys_first:?}");
-        assert!(you_first.contains(" You "), "expected You badge: {you_first:?}");
+        assert!(
+            sys_first.starts_with('▌'),
+            "system should use solid bar: {sys_first:?}"
+        );
+        assert!(
+            you_first.starts_with('▌'),
+            "user should use solid bar: {you_first:?}"
+        );
+        assert!(
+            sys_first.contains(" system "),
+            "expected system badge: {sys_first:?}"
+        );
+        assert!(
+            you_first.contains(" You "),
+            "expected You badge: {you_first:?}"
+        );
     }
 
     #[test]
@@ -914,11 +919,7 @@ mod tests {
             None,
         );
         assert_eq!(rows.len(), 1);
-        let joined: String = rows[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let joined: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(joined.contains("1080bda6"));
         assert!(joined.contains("06-12"));
         assert!(joined.contains("CI triage"));
@@ -978,7 +979,8 @@ mod tests {
         let th = ThemePalette::dark();
         let panel = 30u16;
         let content_w = chat_content_max_width(panel);
-        let body = "The GitHub secretary will analyze CI failures and suggest reruns for flaky jobs.";
+        let body =
+            "The GitHub secretary will analyze CI failures and suggest reruns for flaky jobs.";
         let rows = format_assistant_message_lines(th, body, Some(content_w));
         assert!(!rows.is_empty());
         for line in &rows {
@@ -1014,13 +1016,18 @@ mod tests {
         let th = ThemePalette::dark();
         let panel = 50u16;
         let content_w = chat_content_max_width(panel);
-        let url = "https://github.com/acme/widget/actions/runs/27400805815/job/12345678901?pr=19194";
-        let rows = format_chat_lines(th, &format!("you> Read this PR runs: {url}"), Some(content_w));
+        let url =
+            "https://github.com/acme/widget/actions/runs/27400805815/job/12345678901?pr=19194";
+        let rows = format_chat_lines(
+            th,
+            &format!("you> Read this PR runs: {url}"),
+            Some(content_w),
+        );
         let fitted = crate::tui::markdown::ensure_chat_lines_fit_panel(rows, panel);
         assert!(
-            fitted.iter().all(|line| {
-                crate::tui::markdown::line_display_width(line) <= panel as usize
-            }),
+            fitted
+                .iter()
+                .all(|line| { crate::tui::markdown::line_display_width(line) <= panel as usize }),
             "long URLs must wrap inside the Messages pane"
         );
     }

@@ -100,6 +100,8 @@ cargo run --release -- serve
 
 流式聊天、工具/reasoning 卡片（含 `github` / `mcp:…` 来源标签）、上下文面板、审批弹窗、主题切换。静态资源：`src/web/static/`（改 UI 后需重新编译）。
 
+**安全说明：** Web UI 面向**本机可信环境**。建议保持 `web.bind` 为默认 `127.0.0.1:8787`，避免聊天、审批、workflow 暴露到局域网。若必须绑定 `0.0.0.0`（例如从同网段其他设备访问），请设置 `web.auth_token` — 所有 `/api/*` 与 `/ws` WebSocket 升级需携带 `Authorization: Bearer <token>`。静态 HTML/JS/CSS 仍可无鉴权访问；API 客户端（含浏览器 UI）须发送该请求头。本地开发保持 `auth_token` 未设置即可。
+
 ### Chat
 
 ```bash
@@ -184,6 +186,7 @@ chat:
 
 web:
   bind: 127.0.0.1:8787
+  # auth_token: your-secret   # 非本机绑定时 /api/* 与 /ws 需要 Bearer
 
 theme: dark
 
@@ -197,7 +200,26 @@ policy:
 | `mcp.servers[]` | 可选第三方 MCP — 见下文 |
 | `chat.prompt` | Chat system prompt（默认 `prompts/chat.md`；旧字段 `chat.agent` 仍可用） |
 | `chat.skills` | 覆盖 skill 列表（否则用 prompt frontmatter 的 `skills:`） |
+| `web.bind` | `serve` 监听地址（默认 `127.0.0.1:8787`） |
+| `web.auth_token` | 非本机绑定时 `/api/*` 与 `/ws` 的可选 Bearer 令牌 |
 | `workflows.<id>.skills` | 覆盖 workflow 默认 skills |
+
+## 存储
+
+默认使用 `./data` 下的 JSON 后端（已 gitignore）。长期运行 `serve` / `daemon` 或多会话场景建议改用 **SQLite** — 单文件、并发读与长历史更稳：
+
+```yaml
+storage:
+  backend: sqlite
+  path: ./data/coworker.db
+```
+
+从已有 JSON 迁移：
+
+```bash
+cargo run --release -- store migrate --from json --to sqlite \
+  --source ./data --dest ./data/coworker.db
+```
 
 ## MCP 联邦
 

@@ -9,11 +9,12 @@ use ratatui::Frame;
 use uuid::Uuid;
 
 use crate::app::{spawn_approval_decision, AppState, ApprovalDialogChoice, SharedState};
+use crate::approval_payload::build_approval_payload_sections;
 use crate::engine::Engine;
 use crate::tui::theme::ThemePalette;
 
-const MODAL_WIDTH_PCT: u16 = 54;
-const MODAL_HEIGHT_PCT: u16 = 32;
+const MODAL_WIDTH_PCT: u16 = 58;
+const MODAL_HEIGHT_PCT: u16 = 42;
 
 struct ModalLayout {
     modal_area: Rect,
@@ -54,7 +55,8 @@ pub fn draw_approval_modal(frame: &mut Frame, state: &AppState, th: ThemePalette
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Min(2),
+            Constraint::Min(4),
+            Constraint::Length(2),
             Constraint::Length(1),
             Constraint::Length(3),
             Constraint::Length(1),
@@ -80,31 +82,64 @@ pub fn draw_approval_modal(frame: &mut Frame, state: &AppState, th: ThemePalette
         chunks[1],
     );
 
-    let detail_block = Block::default()
+    let payload_sections =
+        build_approval_payload_sections(&dialog.tool_name, dialog.tool_args_json.as_deref());
+    let payload_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(th.border))
+        .border_style(Style::default().fg(th.border_active))
+        .title(Span::styled(
+            " Payload ",
+            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+        ))
         .style(Style::default().bg(th.surface));
-    let detail_inner = detail_block.inner(chunks[2]);
-    frame.render_widget(detail_block, chunks[2]);
-    fill_rect(frame, detail_inner, th.surface);
+    let payload_inner = payload_block.inner(chunks[2]);
+    frame.render_widget(payload_block, chunks[2]);
+    fill_rect(frame, payload_inner, th.surface);
+    let payload_lines = if payload_sections.is_empty() {
+        vec![Line::from(Span::styled(
+            dialog.description.as_str(),
+            Style::default().fg(th.text),
+        ))]
+    } else {
+        payload_detail_lines(&payload_sections, th)
+    };
     frame.render_widget(
-        Paragraph::new(dialog.description.as_str())
+        Paragraph::new(payload_lines)
             .wrap(Wrap { trim: true })
             .style(Style::default().fg(th.text)),
-        detail_inner,
+        payload_inner,
     );
+
+    let show_description = !payload_sections.is_empty() && !dialog.description.trim().is_empty();
+    if show_description {
+        let desc_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .border_style(Style::default().fg(th.border))
+            .title(Span::styled(" Summary ", Style::default().fg(th.muted)))
+            .style(Style::default().bg(th.panel));
+        let desc_inner = desc_block.inner(chunks[3]);
+        frame.render_widget(desc_block, chunks[3]);
+        fill_rect(frame, desc_inner, th.panel);
+        frame.render_widget(
+            Paragraph::new(dialog.description.as_str())
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(th.muted)),
+            desc_inner,
+        );
+    }
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("ID  ", Style::default().fg(th.muted)),
             Span::styled(short_uuid(&dialog.id), Style::default().fg(th.muted)),
         ])),
-        chunks[3],
+        chunks[4],
     );
 
     if dialog.deciding {
-        fill_rect(frame, chunks[4], th.panel);
+        fill_rect(frame, chunks[5], th.panel);
         frame.render_widget(
             Paragraph::new("Sending decision…")
                 .alignment(Alignment::Center)
@@ -113,7 +148,7 @@ pub fn draw_approval_modal(frame: &mut Frame, state: &AppState, th: ThemePalette
                         .fg(th.accent)
                         .add_modifier(Modifier::ITALIC),
                 ),
-            chunks[4],
+            chunks[5],
         );
     } else {
         let selected = dialog.choice;
@@ -152,7 +187,7 @@ pub fn draw_approval_modal(frame: &mut Frame, state: &AppState, th: ThemePalette
             Paragraph::new(arm_note)
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(th.muted)),
-            chunks[5],
+            chunks[6],
         );
     }
 }
@@ -194,6 +229,29 @@ fn scrim_color(th: ThemePalette) -> ratatui::style::Color {
 fn short_uuid(id: &Uuid) -> String {
     let s = id.to_string();
     format!("{}…", &s[..8.min(s.len())])
+}
+
+fn payload_detail_lines(
+    sections: &[crate::approval_payload::ApprovalPayloadSection],
+    th: ThemePalette,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (i, sec) in sections.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(vec![Span::styled(
+            sec.label.clone(),
+            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+        )]));
+        for line in sec.text.lines() {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(th.text),
+            )));
+        }
+    }
+    lines
 }
 
 fn draw_modal_button(
@@ -363,7 +421,8 @@ fn modal_layout(frame_area: Rect) -> ModalLayout {
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Min(2),
+            Constraint::Min(4),
+            Constraint::Length(2),
             Constraint::Length(1),
             Constraint::Length(3),
             Constraint::Length(1),
@@ -376,7 +435,7 @@ fn modal_layout(frame_area: Rect) -> ModalLayout {
             Constraint::Length(1),
             Constraint::Percentage(50),
         ])
-        .split(chunks[4]);
+        .split(chunks[5]);
     ModalLayout {
         modal_area,
         approve_button: buttons[0],
@@ -410,6 +469,20 @@ mod tests {
     }
 
     #[test]
+    fn approval_modal_payload_lines_render_bash_command() {
+        let sections =
+            build_approval_payload_sections("bash_run", Some(r#"{"command":"rm -rf /tmp/test"}"#));
+        let lines = payload_detail_lines(&sections, ThemePalette::dark());
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.clone()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.contains("Command"));
+        assert!(text.contains("rm -rf /tmp/test"));
+    }
+
+    #[test]
     fn approval_not_armed_immediately() {
         use crate::app::{ApprovalDialog, ApprovalDialogChoice};
         use std::time::Instant;
@@ -419,6 +492,7 @@ mod tests {
             id: Uuid::new_v4(),
             tool_name: "ci_rerun".into(),
             description: "rerun".into(),
+            tool_args_json: None,
             choice: ApprovalDialogChoice::Approve,
             deciding: false,
             opened_at: Instant::now(),

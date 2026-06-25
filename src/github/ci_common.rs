@@ -126,9 +126,8 @@ pub async fn failing_runs_for_pr(
     ];
     let res = exec.run_retry(&args).await;
     let stdout = GhExec::into_result(res, "failed to list workflow runs")?;
-    let runs: Vec<WorkflowRun> = serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Other(anyhow::anyhow!("failed to parse run list: {e}"))
-    })?;
+    let runs: Vec<WorkflowRun> = serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Other(anyhow::anyhow!("failed to parse run list: {e}")))?;
     let truncated = runs.len() == CI_RUN_LIST_LIMIT as usize;
 
     let mut failed = Vec::new();
@@ -283,9 +282,8 @@ pub async fn list_branch_runs(
     ];
     let res = exec.run_retry(&args).await;
     let stdout = GhExec::into_result(res, "failed to list workflow runs")?;
-    serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Other(anyhow::anyhow!("failed to parse run list: {e}"))
-    })
+    serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Other(anyhow::anyhow!("failed to parse run list: {e}")))
 }
 
 pub async fn load_run_summary(exec: &GhExec, repo: &str, run_id: u64) -> Result<RunSummary> {
@@ -301,9 +299,8 @@ pub async fn load_run_summary(exec: &GhExec, repo: &str, run_id: u64) -> Result<
     ];
     let res = exec.run_retry(&args).await;
     let stdout = GhExec::into_result(res, "failed to fetch run summary")?;
-    serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Other(anyhow::anyhow!("failed to parse run summary: {e}"))
-    })
+    serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Other(anyhow::anyhow!("failed to parse run summary: {e}")))
 }
 
 pub async fn pr_status_rollup(exec: &GhExec, repo: &str, pr_num: u32) -> Result<Vec<CheckRollup>> {
@@ -324,9 +321,8 @@ pub async fn pr_status_rollup(exec: &GhExec, repo: &str, pr_num: u32) -> Result<
         #[serde(rename = "statusCheckRollup")]
         status_check: Vec<CheckRollup>,
     }
-    let wrapper: Wrapper = serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Other(anyhow::anyhow!("failed to parse PR checks: {e}"))
-    })?;
+    let wrapper: Wrapper = serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Other(anyhow::anyhow!("failed to parse PR checks: {e}")))?;
     Ok(wrapper.status_check)
 }
 

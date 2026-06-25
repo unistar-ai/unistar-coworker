@@ -67,9 +67,8 @@ async fn fetch_open_dependabot_alerts(
     repo: &str,
     limit: u32,
 ) -> Result<Vec<DependabotAlertRow>> {
-    let jq = format!(
-        ".[] | {{number, state, security_advisory: {{severity, summary}}}} | .[0:{limit}]"
-    );
+    let jq =
+        format!(".[] | {{number, state, security_advisory: {{severity, summary}}}} | .[0:{limit}]");
     let path = format!("repos/{repo}/dependabot/alerts");
     let gh_args = ["api", &path, "-f", "state=open", "--paginate", "--jq", &jq];
     let res = exec.run_retry(&gh_args).await;

@@ -59,7 +59,12 @@ pub fn build_workspace_git_summary(workspace: &Path) -> String {
 
 fn git_branch(workspace: &Path) -> Option<String> {
     let out = Command::new("git")
-        .args(["-C", &workspace.to_string_lossy(), "branch", "--show-current"])
+        .args([
+            "-C",
+            &workspace.to_string_lossy(),
+            "branch",
+            "--show-current",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -142,7 +147,10 @@ pub fn plan_runtime_context(input: RuntimeContextInput<'_>) -> RuntimeContextPla
 
     let edits_delta = diff_lines(&prev.recent_edits, input.recent_edits);
     if !edits_delta.is_empty() {
-        delta_parts.push(format!("## Recent edits (updated)\n{}", edits_delta.join("\n")));
+        delta_parts.push(format!(
+            "## Recent edits (updated)\n{}",
+            edits_delta.join("\n")
+        ));
     }
 
     if let Some(skill_delta) = diff_skills(&prev.loaded_skills, &input.loaded_skills) {

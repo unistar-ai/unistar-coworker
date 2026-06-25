@@ -24,9 +24,7 @@ fn ansi_re() -> &'static Regex {
 
 fn gh_log_line_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^([^\t]*)\t([^\t]*)\t\d{4}-\d{2}-\d{2}T[\d:.]+Z (.*)$").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"^([^\t]*)\t([^\t]*)\t\d{4}-\d{2}-\d{2}T[\d:.]+Z (.*)$").unwrap())
 }
 
 fn raw_log_prefix_re() -> &'static Regex {
@@ -36,9 +34,7 @@ fn raw_log_prefix_re() -> &'static Regex {
 
 fn job_section_header_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?m)^=== job: (.+?) \(job_id=(\d+)\) ===\n").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"(?m)^=== job: (.+?) \(job_id=(\d+)\) ===\n").unwrap())
 }
 
 pub struct DistillOptions<'a> {
@@ -145,7 +141,15 @@ pub async fn fetch_failed_job_log_text(
     let job_id_s = job.database_id.to_string();
     let run_id_s = run_id.to_string();
     let attempts: [&[&str]; 4] = [
-        &["run", "view", "-R", repo, "--job", &job_id_s, "--log-failed"],
+        &[
+            "run",
+            "view",
+            "-R",
+            repo,
+            "--job",
+            &job_id_s,
+            "--log-failed",
+        ],
         &[
             "run",
             "view",
@@ -158,14 +162,7 @@ pub async fn fetch_failed_job_log_text(
         ],
         &["run", "view", "-R", repo, "--job", &job_id_s, "--log"],
         &[
-            "run",
-            "view",
-            &run_id_s,
-            "-R",
-            repo,
-            "--job",
-            &job_id_s,
-            "--log",
+            "run", "view", &run_id_s, "-R", repo, "--job", &job_id_s, "--log",
         ],
     ];
 
@@ -210,16 +207,7 @@ pub async fn fetch_job_log_text(
     }
     let run_s = run_id.to_string();
     let job_s = job.database_id.to_string();
-    let args = [
-        "run",
-        "view",
-        &run_s,
-        "-R",
-        repo,
-        "--job",
-        &job_s,
-        "--log",
-    ];
+    let args = ["run", "view", &run_s, "-R", repo, "--job", &job_s, "--log"];
     let job_res = exec.run_retry(&args).await;
     if !job_res.stdout.trim().is_empty() {
         return Ok(job_res.stdout);
@@ -316,7 +304,11 @@ pub fn extract_errors(clean: &str) -> (String, usize) {
     extract_errors_with_focus(clean, "last", "")
 }
 
-pub fn extract_errors_with_focus(clean: &str, focus_mode: &str, step_name: &str) -> (String, usize) {
+pub fn extract_errors_with_focus(
+    clean: &str,
+    focus_mode: &str,
+    step_name: &str,
+) -> (String, usize) {
     let lines: Vec<&str> = clean.split('\n').collect();
     if let Some((body, n)) = extract_marked_lines(&lines, "##[error]") {
         if n > 0 {
@@ -552,10 +544,7 @@ fn distill_single_log(clean: &str, focus_mode: &str, step_name: &str) -> (String
     if clean.trim().is_empty() {
         return (String::new(), "log tail");
     }
-    (
-        ci_common::tail_bytes(clean, FALLBACK_TAIL),
-        "log tail",
-    )
+    (ci_common::tail_bytes(clean, FALLBACK_TAIL), "log tail")
 }
 
 fn split_logs_into_job_chunks(raw: &str) -> Vec<JobLogChunk> {
@@ -580,10 +569,7 @@ fn split_marked_job_sections(raw: &str) -> Vec<JobLogChunk> {
     let mut meta: Vec<(usize, usize, String, u64)> = Vec::new();
     for m in re.captures_iter(raw) {
         let name = m.get(1).map(|x| x.as_str().to_string()).unwrap_or_default();
-        let id = m
-            .get(2)
-            .and_then(|x| x.as_str().parse().ok())
-            .unwrap_or(0);
+        let id = m.get(2).and_then(|x| x.as_str().parse().ok()).unwrap_or(0);
         let start = m.get(0).map(|x| x.end()).unwrap_or(0);
         meta.push((m.get(0).map(|x| x.start()).unwrap_or(0), start, name, id));
     }
@@ -688,9 +674,7 @@ pub fn format_failed_logs_response(
         let (page_body, total, next, has_more) =
             ci_common::paginate_lines(body, offset_lines, max_lines);
         if total == 0 && body.trim().is_empty() {
-            return format!(
-                "{synopsis}\n\nRun {run_id} — empty {mode} (offset {offset_lines})."
-            );
+            return format!("{synopsis}\n\nRun {run_id} — empty {mode} (offset {offset_lines}).");
         }
         let start = offset_lines + 1;
         let mut end = next;

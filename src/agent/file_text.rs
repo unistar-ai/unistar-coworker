@@ -32,9 +32,8 @@ pub struct TextFile {
 
 /// Read a workspace file as UTF-8 text; reject binary payloads.
 pub fn read_text_file(path: &Path) -> Result<TextFile> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        CoworkerError::Workflow(format!("read failed: {e}"))
-    })?;
+    let bytes =
+        std::fs::read(path).map_err(|e| CoworkerError::Workflow(format!("read failed: {e}")))?;
     decode_utf8_text(&bytes)
 }
 

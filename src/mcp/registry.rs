@@ -96,11 +96,7 @@ impl GlobalToolRegistry {
 }
 
 fn tool_exposed(expose: &McpExposeConfig, remote_name: &str) -> bool {
-    if expose
-        .denylist
-        .iter()
-        .any(|d| d == remote_name)
-    {
+    if expose.denylist.iter().any(|d| d == remote_name) {
         return false;
     }
     if expose.allowlist.is_empty() {
@@ -146,6 +142,7 @@ mod tests {
             },
             startup: None,
             timeout_secs: None,
+            skills: vec![],
         };
         let tools = vec![McpToolDescriptor {
             remote_name: "post_message".into(),

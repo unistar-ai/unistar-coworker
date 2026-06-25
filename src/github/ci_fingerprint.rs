@@ -182,7 +182,10 @@ pub fn format_failure_log_synopsis(
         run.workflow_name, run.head_branch
     );
     for j in &target_jobs {
-        out.push_str(&format!("Failed job: {} (job_id={})\n", j.name, j.database_id));
+        out.push_str(&format!(
+            "Failed job: {} (job_id={})\n",
+            j.name, j.database_id
+        ));
     }
     let steps = ci_common::failed_step_names(&target_jobs);
     if !steps.is_empty() {
@@ -207,7 +210,7 @@ pub fn format_failure_log_synopsis(
 
 use serde_json::Value;
 
-use super::args::{require_str, require_u64, require_u32};
+use super::args::{require_str, require_u32, require_u64};
 use super::error::{format_tool_error, ErrCode};
 
 pub async fn ci_failure_fingerprint(exec: &GhExec, args: &Value) -> Result<String> {
@@ -222,35 +225,38 @@ pub async fn ci_compare_runs(exec: &GhExec, args: &Value) -> Result<String> {
     let run_a = require_u64(args, "run_id_a")?;
     let run_b = require_u64(args, "run_id_b")?;
 
-    let analysis_a = analyze_run_failure(exec, &repo, run_a)
-        .await
-        .map_err(|e| {
-            crate::error::CoworkerError::Other(anyhow::anyhow!(format_tool_error(
-                ErrCode::NotFound,
-                &format!("run_id_a {run_a}: {e}"),
-                "Confirm run IDs from ci_analyze_pr_failures or ci_list_runs",
-            )))
-        })?;
-    let analysis_b = analyze_run_failure(exec, &repo, run_b)
-        .await
-        .map_err(|e| {
-            crate::error::CoworkerError::Other(anyhow::anyhow!(format_tool_error(
-                ErrCode::NotFound,
-                &format!("run_id_b {run_b}: {e}"),
-                "Confirm run IDs from ci_analyze_pr_failures or ci_list_runs",
-            )))
-        })?;
+    let analysis_a = analyze_run_failure(exec, &repo, run_a).await.map_err(|e| {
+        crate::error::CoworkerError::Other(anyhow::anyhow!(format_tool_error(
+            ErrCode::NotFound,
+            &format!("run_id_a {run_a}: {e}"),
+            "Confirm run IDs from ci_analyze_pr_failures or ci_list_runs",
+        )))
+    })?;
+    let analysis_b = analyze_run_failure(exec, &repo, run_b).await.map_err(|e| {
+        crate::error::CoworkerError::Other(anyhow::anyhow!(format_tool_error(
+            ErrCode::NotFound,
+            &format!("run_id_b {run_b}: {e}"),
+            "Confirm run IDs from ci_analyze_pr_failures or ci_list_runs",
+        )))
+    })?;
 
-    let same_fp = analysis_a.fingerprint == analysis_b.fingerprint && !analysis_a.fingerprint.is_empty();
+    let same_fp =
+        analysis_a.fingerprint == analysis_b.fingerprint && !analysis_a.fingerprint.is_empty();
     let same_workflow = analysis_a.workflow == analysis_b.workflow;
 
     let mut out = format!("Compare runs in {repo}\n\n");
-    out.push_str(&format!("Run A: {}  {}\n", analysis_a.run_id, analysis_a.workflow));
+    out.push_str(&format!(
+        "Run A: {}  {}\n",
+        analysis_a.run_id, analysis_a.workflow
+    ));
     out.push_str(&format!("  Fingerprint: {}\n", analysis_a.fingerprint));
     if !analysis_a.job.is_empty() {
         out.push_str(&format!("  Job: {}\n", analysis_a.job));
     }
-    out.push_str(&format!("Run B: {}  {}\n", analysis_b.run_id, analysis_b.workflow));
+    out.push_str(&format!(
+        "Run B: {}  {}\n",
+        analysis_b.run_id, analysis_b.workflow
+    ));
     out.push_str(&format!("  Fingerprint: {}\n", analysis_b.fingerprint));
     if !analysis_b.job.is_empty() {
         out.push_str(&format!("  Job: {}\n", analysis_b.job));

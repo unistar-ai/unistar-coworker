@@ -137,15 +137,7 @@ pub async fn issue_add_label(exec: &GhExec, args: &Value) -> Result<String> {
     let num = require_u32(args, "issue_number")?;
     let label = require_str(args, "label")?;
     let num_s = num.to_string();
-    let gh_args = [
-        "issue",
-        "edit",
-        &num_s,
-        "-R",
-        &repo,
-        "--add-label",
-        &label,
-    ];
+    let gh_args = ["issue", "edit", &num_s, "-R", &repo, "--add-label", &label];
     let res = exec.run(&gh_args).await;
     GhExec::into_result(res, "failed to add label")?;
     Ok(super::error::format_tool_ok(&format!(

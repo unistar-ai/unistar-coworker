@@ -228,7 +228,9 @@ Failed logs (this page only):\n{logs}"
                 None
             };
 
-            let content = if let Some(ollama_base) = crate::llm::ollama::ollama_native_base(&self.cfg.base_url) {
+            let content = if let Some(ollama_base) =
+                crate::llm::ollama::ollama_native_base(&self.cfg.base_url)
+            {
                 match self
                     .chat_ollama_native(&ollama_base, &msgs, think_override)
                     .await
@@ -355,8 +357,12 @@ Failed logs (this page only):\n{logs}"
 
     /// OpenAI-compatible `/v1/chat/completions` (OpenAI, vLLM, or Ollama fallback).
     async fn chat_openai_compatible(&self, messages: &serde_json::Value) -> Result<String> {
-        self.chat_openai_structured(messages, &classify_response_schema(), self.llm_output_limit())
-            .await
+        self.chat_openai_structured(
+            messages,
+            &classify_response_schema(),
+            self.llm_output_limit(),
+        )
+        .await
     }
 
     async fn chat_openai_structured(
@@ -497,6 +503,7 @@ Failed logs (this page only):\n{logs}"
         messages: &serde_json::Value,
         tools: &[serde_json::Value],
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        reasoning_only_warn_secs: u64,
         mut on_buffer: F,
     ) -> Result<super::chat::ChatToolsTurn>
     where
@@ -545,7 +552,9 @@ Call one or more tools or reply to the user in plain text."
                     "content": nudge,
                 }));
             }
-            let turn = if let Some(ollama_base) = crate::llm::ollama::ollama_native_base(&self.cfg.base_url) {
+            let turn = if let Some(ollama_base) =
+                crate::llm::ollama::ollama_native_base(&self.cfg.base_url)
+            {
                 match self
                     .chat_ollama_with_tools_stream(
                         &ollama_base,
@@ -554,6 +563,7 @@ Call one or more tools or reply to the user in plain text."
                         think_override,
                         num_predict,
                         cancel.clone(),
+                        reasoning_only_warn_secs,
                         &mut on_buffer,
                     )
                     .await
@@ -573,6 +583,7 @@ Call one or more tools or reply to the user in plain text."
                         tools,
                         num_predict,
                         cancel.clone(),
+                        reasoning_only_warn_secs,
                         &mut on_buffer,
                     )
                     .await
@@ -615,6 +626,7 @@ Call one or more tools or reply to the user in plain text."
         think_override: Option<bool>,
         num_predict: u32,
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        reasoning_only_warn_secs: u64,
         on_buffer: &mut F,
     ) -> Result<super::chat::ChatToolsTurn>
     where
@@ -657,8 +669,9 @@ Call one or more tools or reply to the user in plain text."
         let mut done_reason = None;
         let mut line_buf = String::new();
         let idle_timeout = std::time::Duration::from_secs(30);
-        let stream_wall_limit = std::time::Duration::from_secs(90);
+        let stream_wall_limit = std::time::Duration::from_secs(CHAT_STREAM_WALL_SECS);
         let stream_started = std::time::Instant::now();
+        let mut reasoning_only_since: Option<std::time::Instant> = None;
         let mut stop_stream = false;
         let mut thinking_soft_capped = false;
 
@@ -666,10 +679,22 @@ Call one or more tools or reply to the user in plain text."
             if super::chat::chat_cancel_requested(&cancel) {
                 return Err(super::chat::chat_cancelled_error());
             }
-            if stream_started.elapsed() >= stream_wall_limit {
+            if stream_wall_exceeded(
+                stream_started.elapsed(),
+                reasoning_only_since.map(|t| t.elapsed()),
+                full.len(),
+                thinking_full.len(),
+                tool_calls.len(),
+                stream_wall_limit,
+                reasoning_only_warn_secs,
+            ) {
+                let reason = if full.trim().is_empty() && !thinking_full.trim().is_empty() {
+                    "reasoning-only cap"
+                } else {
+                    "stream wall"
+                };
                 tracing::warn!(
-                    "chat tools stream wall limit {}s (thinking {} chars, content {} chars, tools {})",
-                    stream_wall_limit.as_secs(),
+                    "chat tools stream {reason} (thinking {} chars, content {} chars, tools {})",
                     thinking_full.len(),
                     full.len(),
                     tool_calls.len()
@@ -723,6 +748,13 @@ Call one or more tools or reply to the user in plain text."
                 if changed {
                     on_buffer(&full, &thinking_full, &tool_calls);
                 }
+                if full.trim().is_empty() && !thinking_full.trim().is_empty() {
+                    if reasoning_only_since.is_none() {
+                        reasoning_only_since = Some(std::time::Instant::now());
+                    }
+                } else if !full.trim().is_empty() {
+                    reasoning_only_since = None;
+                }
                 if think && full.trim().is_empty() && !thinking_full.trim().is_empty() {
                     if stream_text_appears_stuck(&thinking_full) {
                         tracing::warn!(
@@ -772,6 +804,7 @@ Call one or more tools or reply to the user in plain text."
         tools: &[serde_json::Value],
         num_predict: u32,
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        reasoning_only_warn_secs: u64,
         on_buffer: &mut F,
     ) -> Result<super::chat::ChatToolsTurn>
     where
@@ -813,23 +846,50 @@ Call one or more tools or reply to the user in plain text."
         let mut tool_call_acc: Vec<serde_json::Value> = Vec::new();
         let mut line_buf = String::new();
         let idle_timeout = std::time::Duration::from_secs(30);
-        let stream_wall_limit = std::time::Duration::from_secs(90);
+        let stream_wall_limit = std::time::Duration::from_secs(CHAT_STREAM_WALL_SECS);
         let stream_started = std::time::Instant::now();
+        let mut reasoning_only_since: Option<std::time::Instant> = None;
+        let mut stop_stream = false;
 
-        while let Ok(chunk_result) =
-            tokio::time::timeout(idle_timeout, stream.next()).await
-        {
+        while !stop_stream {
             if super::chat::chat_cancel_requested(&cancel) {
                 return Err(super::chat::chat_cancelled_error());
             }
-            if stream_started.elapsed() >= stream_wall_limit {
+            if stream_wall_exceeded(
+                stream_started.elapsed(),
+                reasoning_only_since.map(|t| t.elapsed()),
+                content.len(),
+                reasoning.len(),
+                tool_call_acc.len(),
+                stream_wall_limit,
+                reasoning_only_warn_secs,
+            ) {
+                let reason = if content.trim().is_empty() && !reasoning.trim().is_empty() {
+                    "reasoning-only cap"
+                } else {
+                    "stream wall"
+                };
                 tracing::warn!(
-                    "openai chat tools stream wall limit {}s (reasoning {} chars, content {} chars)",
-                    stream_wall_limit.as_secs(),
+                    "openai chat tools stream {reason} (reasoning {} chars, content {} chars)",
                     reasoning.len(),
                     content.len()
                 );
                 break;
+            }
+            let chunk_result = match tokio::time::timeout(idle_timeout, stream.next()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        "openai chat tools stream idle {}s (reasoning {} chars, content {} chars)",
+                        idle_timeout.as_secs(),
+                        reasoning.len(),
+                        content.len()
+                    );
+                    break;
+                }
+            };
+            if super::chat::chat_cancel_requested(&cancel) {
+                return Err(super::chat::chat_cancelled_error());
             }
             let chunk = match chunk_result {
                 Some(Ok(chunk)) => chunk,
@@ -880,6 +940,21 @@ Call one or more tools or reply to the user in plain text."
                     let tool_calls = parse_accumulated_openai_tool_calls(&tool_call_acc);
                     on_buffer(&content, &reasoning, &tool_calls);
                 }
+                if content.trim().is_empty() && !reasoning.trim().is_empty() {
+                    if reasoning_only_since.is_none() {
+                        reasoning_only_since = Some(std::time::Instant::now());
+                    }
+                    if stream_text_appears_stuck(&reasoning) {
+                        tracing::warn!(
+                            "openai chat tools stream aborted: reasoning loop (~{} chars)",
+                            reasoning.len()
+                        );
+                        stop_stream = true;
+                        break;
+                    }
+                } else if !content.trim().is_empty() {
+                    reasoning_only_since = None;
+                }
             }
         }
 
@@ -898,7 +973,8 @@ Call one or more tools or reply to the user in plain text."
 
     /// Compress a long thinking trace into bullet lines for chat context (always think=false).
     pub async fn summarize_reasoning_trace(&self, reasoning: &str) -> Result<String> {
-        const SYSTEM: &str = "You compress internal agent reasoning into 2-5 short bullet lines for \
+        const SYSTEM: &str =
+            "You compress internal agent reasoning into 2-5 short bullet lines for \
 later context. Keep PR numbers, tool names, run IDs, and conclusions. \
 Output plain-text bullets only — do NOT call tools or emit tool_calls JSON. \
 No preamble or markdown fences.";
@@ -1149,9 +1225,9 @@ fn extract_ollama_plain_content(v: &serde_json::Value) -> Result<String> {
 
 #[allow(dead_code)] // unit tests; non-stream OpenAI fallback helper
 fn parse_openai_tools_turn(v: &serde_json::Value) -> Result<super::chat::ChatToolsTurn> {
-    let choice = v.pointer("/choices/0").ok_or_else(|| {
-        CoworkerError::Other(anyhow::anyhow!("llm missing choices[0]"))
-    })?;
+    let choice = v
+        .pointer("/choices/0")
+        .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm missing choices[0]")))?;
     let msg = choice
         .get("message")
         .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm missing choices[0].message")))?;
@@ -1336,6 +1412,32 @@ fn chat_thinking_char_cap(max_thinking_tokens: u32) -> usize {
     (max_thinking_tokens as usize).saturating_mul(4).max(1024)
 }
 
+const CHAT_STREAM_WALL_SECS: u64 = 90;
+
+/// Stop streaming when the full wall is hit, or sooner when only reasoning grows.
+pub fn stream_wall_exceeded(
+    stream_elapsed: std::time::Duration,
+    reasoning_only_elapsed: Option<std::time::Duration>,
+    content_len: usize,
+    reasoning_len: usize,
+    tool_calls_len: usize,
+    full_wall: std::time::Duration,
+    reasoning_only_warn_secs: u64,
+) -> bool {
+    if stream_elapsed >= full_wall {
+        return true;
+    }
+    if reasoning_only_warn_secs == 0
+        || content_len > 0
+        || reasoning_len == 0
+        || tool_calls_len > 0
+    {
+        return false;
+    }
+    reasoning_only_elapsed
+        .is_some_and(|e| e >= std::time::Duration::from_secs(reasoning_only_warn_secs))
+}
+
 /// Merge Ollama stream chunks that may be delta or cumulative (full prefix) updates.
 fn append_stream_text(acc: &mut String, part: &str) {
     if part.is_empty() {
@@ -1422,7 +1524,9 @@ fn merge_openai_tool_call_deltas(acc: &mut Vec<serde_json::Value>, deltas: &[ser
     }
 }
 
-fn parse_accumulated_openai_tool_calls(chunks: &[serde_json::Value]) -> Vec<super::chat::LlmToolCall> {
+fn parse_accumulated_openai_tool_calls(
+    chunks: &[serde_json::Value],
+) -> Vec<super::chat::LlmToolCall> {
     if chunks.is_empty() {
         return Vec::new();
     }
@@ -2138,9 +2242,7 @@ mod tests {
             crate::llm::ollama::ollama_native_base("http://localhost:11434/v1").as_deref(),
             Some("http://localhost:11434")
         );
-        assert!(
-            crate::llm::ollama::ollama_native_base("http://localhost:12345/v1").is_none()
-        );
+        assert!(crate::llm::ollama::ollama_native_base("http://localhost:12345/v1").is_none());
     }
 
     #[test]
@@ -2176,6 +2278,65 @@ mod tests {
         });
         let text = extract_ollama_chat_content(&v).unwrap();
         assert!(text.contains("\"verdict\":\"policy\""));
+    }
+
+    #[test]
+    fn stream_wall_exceeded_reasoning_only_cap() {
+        let full = std::time::Duration::from_secs(CHAT_STREAM_WALL_SECS);
+        assert!(!stream_wall_exceeded(
+            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(10)),
+            0,
+            500,
+            0,
+            full,
+            30,
+        ));
+        assert!(stream_wall_exceeded(
+            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(30)),
+            0,
+            500,
+            0,
+            full,
+            30,
+        ));
+        assert!(!stream_wall_exceeded(
+            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(60)),
+            12,
+            500,
+            0,
+            full,
+            30,
+        ));
+        assert!(!stream_wall_exceeded(
+            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(60)),
+            0,
+            500,
+            1,
+            full,
+            30,
+        ));
+        assert!(stream_wall_exceeded(
+            std::time::Duration::from_secs(CHAT_STREAM_WALL_SECS),
+            None,
+            0,
+            0,
+            0,
+            full,
+            30,
+        ));
+        assert!(!stream_wall_exceeded(
+            std::time::Duration::from_secs(60),
+            Some(std::time::Duration::from_secs(60)),
+            0,
+            500,
+            0,
+            full,
+            0,
+        ));
     }
 
     #[test]
@@ -2345,7 +2506,10 @@ mod tests {
             }]
         });
         let msg = v.pointer("/choices/0/message").unwrap();
-        assert_eq!(extract_openai_message_reasoning(msg), "Step 1: greet the user.");
+        assert_eq!(
+            extract_openai_message_reasoning(msg),
+            "Step 1: greet the user."
+        );
         assert_eq!(extract_openai_visible_content(msg), "Hi there");
         let turn = parse_openai_tools_turn(&v).unwrap();
         assert_eq!(turn.reasoning, "Step 1: greet the user.");

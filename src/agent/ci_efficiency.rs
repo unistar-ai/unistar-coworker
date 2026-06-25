@@ -7,7 +7,10 @@ use crate::error::{CoworkerError, Result};
 use crate::github::GithubHarness;
 
 /// Build CI efficiency markdown without publishing a digest (for `report ci`).
-pub async fn build_ci_efficiency_markdown(config: &Config, github: &GithubHarness) -> Result<String> {
+pub async fn build_ci_efficiency_markdown(
+    config: &Config,
+    github: &GithubHarness,
+) -> Result<String> {
     if !github.is_available() {
         return Err(CoworkerError::Workflow(
             "GitHub harness (gh) is required for CI report".into(),

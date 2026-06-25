@@ -10,7 +10,11 @@ pub fn extract_pr_refs_from_digest(body: &str, fallback_repo: &str) -> Vec<(Stri
             continue;
         }
         if let Some(pr) = parse_pr_from_line(line, current_repo.as_deref(), fallback_repo) {
-            if out.last().map(|(r, n)| r != &pr.0 || n != &pr.1).unwrap_or(true) {
+            if out
+                .last()
+                .map(|(r, n)| r != &pr.0 || n != &pr.1)
+                .unwrap_or(true)
+            {
                 out.push(pr);
             }
         }
@@ -40,7 +44,10 @@ pub fn pr_ref_at_source_line(
             }
         }
     }
-    extract_pr_refs_from_digest(body, fallback_repo).into_iter().next().or(first)
+    extract_pr_refs_from_digest(body, fallback_repo)
+        .into_iter()
+        .next()
+        .or(first)
 }
 
 fn parse_pr_from_line(
@@ -64,13 +71,17 @@ fn parse_pr_from_line(
     if let Some(rest) = body.strip_prefix("[#") {
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         let num: u32 = digits.parse().ok()?;
-        let r = repo.map(str::to_string).unwrap_or_else(|| fallback_repo.to_string());
+        let r = repo
+            .map(str::to_string)
+            .unwrap_or_else(|| fallback_repo.to_string());
         return Some((r, num));
     }
     if let Some(rest) = body.strip_prefix('#') {
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         let num: u32 = digits.parse().ok()?;
-        let r = repo.map(str::to_string).unwrap_or_else(|| fallback_repo.to_string());
+        let r = repo
+            .map(str::to_string)
+            .unwrap_or_else(|| fallback_repo.to_string());
         return Some((r, num));
     }
     None
@@ -95,10 +106,7 @@ fn pr_number_from_github_pull_url(s: &str) -> Option<u32> {
     let marker = "/pull/";
     let i = s.find(marker)?;
     let rest = &s[i + marker.len()..];
-    let digits: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
 }
 

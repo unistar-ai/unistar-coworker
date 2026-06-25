@@ -1,11 +1,12 @@
 mod agent;
 mod app;
+mod approval_payload;
 mod config;
 mod engine;
 mod error;
+mod github;
 mod llm;
 mod logging;
-mod github;
 mod mcp;
 mod output;
 mod store;
@@ -75,7 +76,7 @@ enum Commands {
         #[arg(long)]
         list_sessions: bool,
     },
-    /// Store maintenance (migrate json ↔ sqlite)
+    /// Store maintenance (migrate, compact)
     Store {
         #[command(subcommand)]
         cmd: StoreCommands,
@@ -110,6 +111,18 @@ enum StoreCommands {
         source: String,
         #[arg(long)]
         dest: String,
+    },
+    /// Prune old audit entries, digests, and workflow runs
+    Compact {
+        /// Prune audit entries older than N days
+        #[arg(long, default_value_t = 90)]
+        audit_days: u32,
+        /// Keep only the N most recent digests
+        #[arg(long, default_value_t = 30)]
+        digest_keep: u32,
+        /// Prune completed workflow runs finished more than N days ago
+        #[arg(long, default_value_t = 30)]
+        workflow_runs_days: u32,
     },
 }
 
@@ -207,7 +220,7 @@ fn parse_storage_backend(name: &str) -> Result<config::StorageBackend> {
 
 async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<()> {
     use config::expand_tilde;
-    use store::{format_migrate_summary, migrate};
+    use store::{compact, format_compact_summary, format_migrate_summary, migrate, CompactOptions};
 
     match cmd {
         StoreCommands::Migrate {
@@ -227,6 +240,30 @@ async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<()> {
                 "Update coworker.yaml storage.backend to {:?} and storage.path to {}",
                 to,
                 dest_path.display()
+            );
+        }
+        StoreCommands::Compact {
+            audit_days,
+            digest_keep,
+            workflow_runs_days,
+        } => {
+            let opts = CompactOptions {
+                audit_days,
+                digest_keep,
+                workflow_runs_days,
+            };
+            let path = config.storage_path();
+            let stats = compact(
+                config.storage.backend,
+                path.clone(),
+                config.storage.wal,
+                &opts,
+            )?;
+            println!("{}", format_compact_summary(&stats));
+            eprintln!(
+                "compacted {:?} store at {}",
+                config.storage.backend,
+                path.display()
             );
         }
     }
@@ -575,6 +612,12 @@ async fn run_web(
         s.push_log("info", format!("WebUI listening on http://{bind}"));
     }
 
+    let auth_token = config.web.effective_auth_token().map(str::to_owned);
+    if !bind.ip().is_loopback() && !config.web.auth_enabled() {
+        tracing::warn!(
+            "web.bind is {bind} without web.auth_token — /api/* and /ws are unauthenticated on the network"
+        );
+    }
     let engine =
         Arc::new(Engine::new(config, Arc::clone(&store), tx.clone(), Arc::clone(&state)).await);
     engine.clone().spawn_background();
@@ -589,7 +632,7 @@ async fn run_web(
         engine.clone().spawn_scheduler();
     }
 
-    web::run(bind, state, engine, store, rx, attach).await
+    web::run(bind, state, engine, store, rx, attach, auth_token).await
 }
 
 async fn run_tui(

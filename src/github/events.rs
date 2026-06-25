@@ -141,5 +141,10 @@ fn resolve_event_file_path() -> Option<PathBuf> {
     let home = std::env::var("HOME")
         .ok()
         .or_else(|| std::env::var("USERPROFILE").ok())?;
-    Some(PathBuf::from(home).join(".cache").join("unistar-mcp").join("events.jsonl"))
+    Some(
+        PathBuf::from(home)
+            .join(".cache")
+            .join("unistar-mcp")
+            .join("events.jsonl"),
+    )
 }

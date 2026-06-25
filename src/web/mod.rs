@@ -1,27 +1,33 @@
 mod snapshot;
 
+#[cfg(test)]
+mod api_tests;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header::AUTHORIZATION, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::app::{
-    apply_event, hydrate_from_store, load_chat_session_ui, spawn_approval_decision, AppEvent,
-    SharedState, Tab,
-};
 use crate::agent::chat_loop::ChatProgress;
+use crate::app::{
+    apply_event, export_chat_transcript_markdown, hydrate_from_store, load_chat_session_ui,
+    spawn_approval_decision, AppEvent, SharedState, Tab,
+};
 use crate::engine::Engine;
 use crate::error::Result;
 use crate::store::Store;
@@ -43,6 +49,7 @@ pub async fn run(
     store: Arc<dyn Store>,
     events_rx: broadcast::Receiver<AppEvent>,
     attach: bool,
+    auth_token: Option<String>,
 ) -> Result<()> {
     let (snap_tx, _) = broadcast::channel::<String>(256);
     let runtime = Arc::new(WebRuntime {
@@ -52,12 +59,28 @@ pub async fn run(
         snap_tx: snap_tx.clone(),
     });
 
-    spawn_event_loop(state.clone(), store.clone(), events_rx, snap_tx.clone(), attach);
+    spawn_event_loop(
+        state.clone(),
+        store.clone(),
+        events_rx,
+        snap_tx.clone(),
+        attach,
+    );
 
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/app.js", get(js))
-        .route("/style.css", get(css))
+    let app = build_router(runtime, auth_token);
+
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .map_err(|e| crate::error::CoworkerError::Workflow(format!("bind {bind}: {e}")))?;
+    tracing::info!("WebUI at http://{bind}");
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| crate::error::CoworkerError::Workflow(format!("web server: {e}")))?;
+    Ok(())
+}
+
+pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>) -> Router {
+    let protected = Router::new()
         .route("/api/state", get(api_state))
         .route("/api/tab/{tab}", post(api_set_tab))
         .route("/api/chat", post(api_chat))
@@ -67,7 +90,9 @@ pub async fn run(
         .route("/api/chat/sessions/new", post(api_new_chat_session))
         .route("/api/chat/sessions/{id}", post(api_load_chat_session))
         .route("/api/chat/context", post(api_toggle_context))
+        .route("/api/chat/export", get(api_chat_export))
         .route("/api/approvals/{id}", post(api_approval))
+        .route("/api/approvals/history", get(api_approval_history))
         .route("/api/workflows/{id}", post(api_run_workflow))
         .route("/api/store/refresh", post(api_refresh_store))
         .route("/api/prs/filter", post(api_prs_filter))
@@ -78,19 +103,56 @@ pub async fn run(
         .route("/api/logs/filter", post(api_logs_filter))
         .route("/api/digest/{index}/select", post(api_digest_select))
         .route("/api/config/probe", post(api_config_probe))
-        .route("/ws", get(ws_handler))
+        .route("/ws", get(ws_handler));
+
+    let protected = if let Some(token) = effective_auth_token(auth_token.as_ref()) {
+        tracing::info!("Web UI bearer auth enabled for /api/* and /ws");
+        protected.layer(middleware::from_fn_with_state(
+            Arc::from(token),
+            require_bearer_auth,
+        ))
+    } else {
+        protected
+    };
+
+    Router::new()
+        .route("/", get(index))
+        .route("/markdown.js", get(markdown_js))
+        .route("/approvals.js", get(approvals_js))
+        .route("/app.js", get(js))
+        .route("/style.css", get(css))
+        .route("/api/health", get(api_health))
+        .merge(protected)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
-        .with_state(runtime);
+        .with_state(runtime)
+}
 
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .map_err(|e| crate::error::CoworkerError::Workflow(format!("bind {bind}: {e}")))?;
-    tracing::info!("WebUI at http://{bind}");
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| crate::error::CoworkerError::Workflow(format!("web server: {e}")))?;
-    Ok(())
+fn effective_auth_token(token: Option<&String>) -> Option<&str> {
+    token
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
+fn bearer_matches(headers: &axum::http::HeaderMap, expected: &str) -> bool {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|token| token == expected)
+}
+
+async fn require_bearer_auth(
+    State(expected): State<Arc<str>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if bearer_matches(req.headers(), expected.as_ref()) {
+        next.run(req).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
 }
 
 fn spawn_event_loop(
@@ -227,6 +289,20 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("static/index.html"))
 }
 
+async fn markdown_js() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("static/markdown.js"),
+    )
+}
+
+async fn approvals_js() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("static/approvals.js"),
+    )
+}
+
 async fn js() -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
@@ -245,10 +321,7 @@ async fn api_state(State(rt): State<Arc<WebRuntime>>) -> Json<snapshot::WebSnaps
     Json(build_snapshot(&rt.state).await)
 }
 
-async fn api_set_tab(
-    State(rt): State<Arc<WebRuntime>>,
-    Path(tab): Path<String>,
-) -> StatusCode {
+async fn api_set_tab(State(rt): State<Arc<WebRuntime>>, Path(tab): Path<String>) -> StatusCode {
     {
         let mut s = rt.state.write().await;
         s.tab = match tab.as_str() {
@@ -412,9 +485,68 @@ async fn api_toggle_context(
     StatusCode::NO_CONTENT
 }
 
+async fn api_chat_export(State(rt): State<Arc<WebRuntime>>) -> impl IntoResponse {
+    let s = rt.state.read().await;
+    let md = export_chat_transcript_markdown(&s);
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8",
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"chat-transcript.md\"",
+            ),
+        ],
+        md,
+    )
+}
+
 #[derive(Deserialize)]
 struct ApprovalBody {
     approve: bool,
+}
+
+#[derive(Deserialize)]
+struct ApprovalHistoryQuery {
+    #[serde(default = "default_approval_history_limit")]
+    limit: usize,
+}
+
+fn default_approval_history_limit() -> usize {
+    50
+}
+
+fn approval_to_json(a: &crate::store::Approval) -> Value {
+    json!({
+        "id": a.id,
+        "kind": format!("{:?}", a.kind),
+        "description": a.description,
+        "created_at": a.created_at.to_rfc3339(),
+        "decided_at": a.decided_at.map(|t| t.to_rfc3339()),
+        "repo": a.repo,
+        "pr_number": a.pr_number,
+        "run_id": a.run_id,
+        "target_branch": a.target_branch,
+        "status": format!("{:?}", a.status),
+        "comment_body": a.comment_body,
+        "issue_number": a.issue_number,
+        "label": a.label,
+    })
+}
+
+async fn api_approval_history(
+    State(rt): State<Arc<WebRuntime>>,
+    Query(q): Query<ApprovalHistoryQuery>,
+) -> std::result::Result<Json<Vec<Value>>, StatusCode> {
+    let limit = q.limit.clamp(1, 200);
+    let items = rt
+        .store
+        .list_approval_history(limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(items.iter().map(approval_to_json).collect()))
 }
 
 async fn api_approval(
@@ -427,10 +559,7 @@ async fn api_approval(
     StatusCode::ACCEPTED
 }
 
-async fn api_run_workflow(
-    State(rt): State<Arc<WebRuntime>>,
-    Path(id): Path<String>,
-) -> StatusCode {
+async fn api_run_workflow(State(rt): State<Arc<WebRuntime>>, Path(id): Path<String>) -> StatusCode {
     let engine = Arc::clone(&rt.engine);
     let state = rt.state.clone();
     let snap_tx = rt.snap_tx.clone();
@@ -492,10 +621,7 @@ async fn api_prs_sort(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-async fn api_prs_select(
-    State(rt): State<Arc<WebRuntime>>,
-    Path(index): Path<usize>,
-) -> StatusCode {
+async fn api_prs_select(State(rt): State<Arc<WebRuntime>>, Path(index): Path<usize>) -> StatusCode {
     {
         let mut s = rt.state.write().await;
         if index >= s.sorted_filtered_prs().len() {
@@ -507,10 +633,7 @@ async fn api_prs_select(
     StatusCode::NO_CONTENT
 }
 
-async fn api_prs_triage(
-    State(rt): State<Arc<WebRuntime>>,
-    Path(index): Path<usize>,
-) -> StatusCode {
+async fn api_prs_triage(State(rt): State<Arc<WebRuntime>>, Path(index): Path<usize>) -> StatusCode {
     let (repo, number) = {
         let s = rt.state.read().await;
         let filtered = s.sorted_filtered_prs();
@@ -555,10 +678,51 @@ async fn api_config_probe(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(rt): State<Arc<WebRuntime>>,
-) -> Response {
+#[derive(Serialize)]
+struct HealthResponse {
+    ok: bool,
+    gh: String,
+    llm: String,
+    mcp: Vec<Value>,
+}
+
+fn format_probe_status(ok: bool, latency_ms: Option<u128>) -> String {
+    if !ok {
+        "offline".to_string()
+    } else {
+        latency_ms
+            .map(|ms| format!("{ms}ms"))
+            .unwrap_or_else(|| "ok".to_string())
+    }
+}
+
+async fn api_health(State(rt): State<Arc<WebRuntime>>) -> Json<HealthResponse> {
+    let s = rt.state.read().await;
+    let gh = format_probe_status(s.github_ok, s.github_latency_ms);
+    let llm = format_probe_status(s.llm_ok, s.llm_latency_ms);
+    let mcp = s
+        .mcp_servers
+        .iter()
+        .map(|server| {
+            json!({
+                "id": server.id,
+                "connected": server.connected,
+                "tool_count": server.tool_count,
+                "last_error": server.last_error,
+                "last_rpc_ms": server.last_rpc_ms,
+                "prefix": server.prefix,
+            })
+        })
+        .collect();
+    Json(HealthResponse {
+        ok: s.github_ok && s.llm_ok,
+        gh,
+        llm,
+        mcp,
+    })
+}
+
+async fn ws_handler(ws: WebSocketUpgrade, State(rt): State<Arc<WebRuntime>>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, rt))
 }
 
@@ -599,5 +763,31 @@ async fn handle_socket(socket: WebSocket, rt: Arc<WebRuntime>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn effective_auth_token_rejects_blank() {
+        assert_eq!(effective_auth_token(None), None);
+        assert_eq!(effective_auth_token(Some(&String::new())), None);
+        assert_eq!(effective_auth_token(Some(&"   ".into())), None);
+        assert_eq!(effective_auth_token(Some(&"secret".into())), Some("secret"));
+        assert_eq!(effective_auth_token(Some(&"  tok  ".into())), Some("tok"));
+    }
+
+    #[test]
+    fn bearer_matches_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!bearer_matches(&headers, "tok"));
+
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer tok"));
+        assert!(bearer_matches(&headers, "tok"));
+        assert!(!bearer_matches(&headers, "wrong"));
+        assert!(!bearer_matches(&headers, "tok "));
     }
 }

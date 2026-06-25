@@ -61,12 +61,7 @@ pub fn aggregate_workflow_stats(runs: &[ParsedBranchRun]) -> HashMap<String, Wor
     let mut by_workflow: HashMap<String, WorkflowStats> = HashMap::new();
     for run in runs {
         let c = run.conclusion.to_ascii_lowercase();
-        if c.is_empty()
-            || matches!(
-                c.as_str(),
-                "in_progress" | "queued" | "waiting" | "pending"
-            )
-        {
+        if c.is_empty() || matches!(c.as_str(), "in_progress" | "queued" | "waiting" | "pending") {
             continue;
         }
         let entry = by_workflow.entry(run.workflow.clone()).or_default();

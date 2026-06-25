@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use crate::config::ChatToolMode;
 use crate::error::Result;
 
-use super::skill::{load_skills, load_skills_from_refs, skill_body_for_prompt, PromptSpec, SkillSpec};
+use super::skill::{
+    load_skills, load_skills_from_refs, skill_body_for_prompt, PromptSpec, SkillSpec,
+};
 use super::skill_routing::SkillRegistry;
 
 /// Classify output contract — harness field limits (not domain technique).
@@ -233,7 +235,10 @@ mod tests {
 
         let mut bundle_b = bundle.clone();
         bundle_b.runtime_context = "repos: other-store".into();
-        assert_eq!(compose_static_system_prompt(&bundle), compose_static_system_prompt(&bundle_b));
+        assert_eq!(
+            compose_static_system_prompt(&bundle),
+            compose_static_system_prompt(&bundle_b)
+        );
     }
 
     #[test]
@@ -318,15 +323,9 @@ mod tests {
 
     #[test]
     fn load_chat_prompt_bundle_eager_loads_all_skills() {
-        let (bundle, _) = load_chat_prompt_bundle_for_session(
-            "",
-            &[],
-            String::new(),
-            String::new(),
-            "",
-            false,
-        )
-        .unwrap();
+        let (bundle, _) =
+            load_chat_prompt_bundle_for_session("", &[], String::new(), String::new(), "", false)
+                .unwrap();
         assert!(bundle.skills.len() >= 5);
         let names: Vec<_> = bundle.skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"code-edit"));

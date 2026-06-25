@@ -73,7 +73,9 @@ impl GithubHarness {
                 let category = args
                     .get("category")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoworkerError::Workflow("tool_list_category needs category".into()))?;
+                    .ok_or_else(|| {
+                        CoworkerError::Workflow("tool_list_category needs category".into())
+                    })?;
                 discovery::tool_list_category(category)
             }
             "tool_search" => {
@@ -81,10 +83,7 @@ impl GithubHarness {
                     .get("query")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| CoworkerError::Workflow("tool_search needs query".into()))?;
-                let limit = args
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(5) as usize;
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
                 discovery::tool_search(query, limit)
             }
             "tool_describe" => {
@@ -99,7 +98,10 @@ impl GithubHarness {
                     .get("name")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| CoworkerError::Workflow("tool_call needs name".into()))?;
-                let inner_args = args.get("args").cloned().unwrap_or_else(|| Value::Object(Default::default()));
+                let inner_args = args
+                    .get("args")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default()));
                 return self.dispatch_tool(inner, inner_args).await;
             }
             other => self.dispatch_tool(other, args).await,
@@ -122,7 +124,9 @@ impl GithubHarness {
             "pr_list_merge_ready" => pr::pr_list_merge_ready(&self.exec, &args).await,
             "pr_list_merge_blocked" => pr::pr_list_merge_blocked(&self.exec, &args).await,
             "pr_list_large" => pr::pr_list_large(&self.exec, &args).await,
-            "pr_list_backport_candidates" => pr::pr_list_backport_candidates(&self.exec, &args).await,
+            "pr_list_backport_candidates" => {
+                pr::pr_list_backport_candidates(&self.exec, &args).await
+            }
             "pr_is_docs_only" => pr::pr_is_docs_only(&self.exec, &args).await,
             "pr_get_review_state" => pr::pr_get_review_state(&self.exec, &args).await,
             "pr_diff_risk_scan" => pr::pr_diff_risk_scan(&self.exec, &args).await,
@@ -138,9 +142,13 @@ impl GithubHarness {
             "ci_list_runs" => ci::ci_list_runs(&self.exec, &args).await,
             "ci_rerun_workflow" => ci::ci_rerun_workflow(&self.exec, &args).await,
             "ci_get_failure_digest" => ci_digest::ci_get_failure_digest(&self.exec, &args).await,
-            "ci_failure_fingerprint" => ci_fingerprint::ci_failure_fingerprint(&self.exec, &args).await,
+            "ci_failure_fingerprint" => {
+                ci_fingerprint::ci_failure_fingerprint(&self.exec, &args).await
+            }
             "ci_compare_runs" => ci_fingerprint::ci_compare_runs(&self.exec, &args).await,
-            "ci_list_external_checks" => ci_fingerprint::ci_list_external_checks(&self.exec, &args).await,
+            "ci_list_external_checks" => {
+                ci_fingerprint::ci_list_external_checks(&self.exec, &args).await
+            }
             "ci_get_job_logs" => ci_tier2::ci_get_job_logs(&self.exec, &args).await,
             "ci_correlate_prs" => ci_tier2::ci_correlate_prs(&self.exec, &args).await,
             "ci_list_workflows" => ci_tier2::ci_list_workflows(&self.exec, &args).await,
@@ -160,8 +168,12 @@ impl GithubHarness {
             "release_list_tags" => release::release_list_tags(&self.exec, &args).await,
             "release_notes_draft" => release::release_notes_draft(&self.exec, &args).await,
             "pr_create_backport" => backport::pr_create_backport(&self.exec, &args).await,
-            "backport_get_conflict_files" => backport::backport_get_conflict_files(&self.exec, &args).await,
-            "backport_suggest_resolution" => backport::backport_suggest_resolution(&self.exec, &args).await,
+            "backport_get_conflict_files" => {
+                backport::backport_get_conflict_files(&self.exec, &args).await
+            }
+            "backport_suggest_resolution" => {
+                backport::backport_suggest_resolution(&self.exec, &args).await
+            }
             "notify_post_slack" => notify::notify_post_slack(&self.exec, &args).await,
             "event_list_recent" => events::event_list_recent(&self.exec, &args).await,
             other => Err(not_implemented_yet(other)),
@@ -169,7 +181,8 @@ impl GithubHarness {
     }
 
     pub async fn read_resource(&self, uri: &str) -> Result<String> {
-        resources::read_resource_via_dispatch(uri, |tool, args| self.dispatch_tool(tool, args)).await
+        resources::read_resource_via_dispatch(uri, |tool, args| self.dispatch_tool(tool, args))
+            .await
     }
 }
 

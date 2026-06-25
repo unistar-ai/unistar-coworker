@@ -1,7 +1,7 @@
 //! Engine → UI state updates (shared by TUI and WebUI).
 
-use crate::agent::chat_loop::{ChatActivityFlow, ChatProgress};
 use super::{AppEvent, AppState, ChatPendingApproval, SharedState};
+use crate::agent::chat_loop::{ChatActivityFlow, ChatProgress};
 
 pub fn parse_triage_workflow_target(rest: &str) -> Option<(String, u32)> {
     let (repo, num) = rest.rsplit_once('#')?;
@@ -97,7 +97,6 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                 }
                 ChatProgress::AssistantPartial { text } => {
                     s.set_chat_tool_pending(None);
-                    s.set_chat_reasoning(None);
                     if !crate::agent::context::is_tool_result_transcript(text) {
                         s.set_chat_streaming(Some(text.clone()));
                     }
@@ -122,7 +121,11 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                 {
                     s.set_chat_tool_running_detail(Some(detail.clone()));
                 }
-                ChatProgress::ToolDone { name, output_preview, .. } => {
+                ChatProgress::ToolDone {
+                    name,
+                    output_preview,
+                    ..
+                } => {
                     s.set_chat_tool_pending(None);
                     s.set_chat_reasoning(None);
                     s.set_chat_reasoning_compressing(false);
@@ -161,6 +164,7 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                             *approval_id,
                             tool_name.clone(),
                             description.clone(),
+                            Some(tool_args_json.clone()),
                         );
                     }
                 }

@@ -100,6 +100,24 @@ Open PRs with **passing CI** that still need review (not draft).
 | `repo` | yes | |
 | `limit` | no | Max PRs (default **20**) |
 
+### `pr_list_merge_ready`
+Open PRs that are **merge-ready**: CI green, approved, mergeable (not draft).
+
+| Param | Required | Notes |
+|-------|----------|-------|
+| `repo` | yes | |
+| `limit` | no | Max open PRs scanned (default **30**, max **50**) |
+
+### `pr_list_merge_blocked`
+Open PRs with **green CI** but not merge-ready (draft, conflicts, review pending, etc.).
+
+| Param | Required | Notes |
+|-------|----------|-------|
+| `repo` | yes | |
+| `limit` | no | Max open PRs scanned (default **30**, max **50**) |
+
+Next: `pr_get_merge_blockers` on top rows.
+
 ### `pr_list_stale`
 Open PRs with no updates for at least N days.
 
@@ -254,6 +272,18 @@ Branch CI rollup: failure rate, streak, last failing run. **In default chat whit
 | `branch` | no | Default branch when omitted |
 | `limit` | no | Runs to analyze (default **15**) |
 
+### `ci_workflow_stats`
+Per-workflow CI rollup on a branch: run count, failure rate, avg/max duration. Find noisy workflows.
+
+| Param | Required | Notes |
+|-------|----------|-------|
+| `repo` | yes | |
+| `branch` | no | Default branch when omitted |
+| `limit` | no | Runs sampled (default **30**) |
+| `top` | no | Workflows listed (default **10**, max **20**) |
+
+Next: `ci_branch_health` for streak; `ci_get_run_summary` on failing workflows.
+
 ### `ci_list_workflows`
 GitHub Actions workflow names and IDs for the repo.
 
@@ -287,6 +317,15 @@ Rule-based failure class: `test` / `infra` / `auth` / `timeout` / `external_ci`.
 |-------|----------|-------|
 | `repo` | yes | |
 | `run_id` | yes | |
+
+### `pr_draft_ci_comment`
+Draft markdown PR comment for a CI failure (policy verdict + fingerprint). Read-only — edit, then `pr_post_comment` (approval).
+
+| Param | Required | Notes |
+|-------|----------|-------|
+| `repo` | yes | |
+| `pr_number` | yes | |
+| `run_id` | yes | From `ci_analyze_pr_failures` |
 
 ### `ci_compare_runs`
 Compare two runs by fingerprint without full logs — use after rerun.
@@ -381,6 +420,7 @@ When MCP runs in `--lazy` mode:
 
 | Tool | Required `tool_args` | Optional |
 |------|----------------------|----------|
+| `skill_load` | `name` | Skill from **Available skills** in system prompt; warms `tools[]` schemas |
 | `tool_search` | `query` | `limit` |
 | `tool_list_category` | `category` | CI, PR, Repo, … |
 | `tool_list` | (none) | cached per chat session |

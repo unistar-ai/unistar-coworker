@@ -4,11 +4,11 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::agent::bash_tool;
+use crate::agent::bash_tool::BASH_RUN_TOOL;
 use crate::agent::file_tools;
 use crate::agent::python_tool;
-use crate::config::{BashToolConfig, PythonToolConfig};
-use crate::agent::bash_tool::BASH_RUN_TOOL;
 use crate::app::append_audit;
+use crate::config::{BashToolConfig, PythonToolConfig};
 use crate::error::{CoworkerError, Result};
 use crate::github::helpers::{gh_tool, mcp_text_indicates_failure};
 use crate::github::GithubHarness;
@@ -167,9 +167,10 @@ async fn execute_issue_add_label(
     let issue_number = item.issue_number.ok_or_else(|| {
         CoworkerError::Workflow("issue label approval missing issue_number".into())
     })?;
-    let label = item.label.as_deref().ok_or_else(|| {
-        CoworkerError::Workflow("issue label approval missing label".into())
-    })?;
+    let label = item
+        .label
+        .as_deref()
+        .ok_or_else(|| CoworkerError::Workflow("issue label approval missing label".into()))?;
     let output = gh_tool(
         mcp,
         "issue_add_label",
@@ -192,9 +193,10 @@ async fn execute_issue_add_label(
 }
 
 async fn execute_mcp_tool(mcp: &McpPool, item: &crate::store::Approval) -> Result<String> {
-    let payload = item.comment_body.as_deref().ok_or_else(|| {
-        CoworkerError::Workflow("mcp tool approval missing args payload".into())
-    })?;
+    let payload = item
+        .comment_body
+        .as_deref()
+        .ok_or_else(|| CoworkerError::Workflow("mcp tool approval missing args payload".into()))?;
     let parsed: serde_json::Value = serde_json::from_str(payload).map_err(|e| {
         CoworkerError::Workflow(format!("mcp tool approval args invalid JSON: {e}"))
     })?;

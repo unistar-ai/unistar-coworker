@@ -67,7 +67,12 @@ pub fn ollama_native_base(base_url: &str) -> Option<String> {
 }
 
 pub fn apply_llm_auth(builder: RequestBuilder, cfg: &LlmConfig) -> RequestBuilder {
-    if let Some(key) = cfg.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+    if let Some(key) = cfg
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
         builder.bearer_auth(key)
     } else {
         builder

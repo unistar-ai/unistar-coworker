@@ -106,6 +106,10 @@ pub fn load_skill_with_base(path: impl AsRef<Path>) -> Result<SkillSpec> {
 }
 
 pub fn load_prompt(path: impl AsRef<Path>) -> Result<PromptSpec> {
+    let path = path.as_ref();
+    if super::embedded_prompts::is_bundled_chat_prompt(path) {
+        return parse_markdown_spec(super::embedded_prompts::CHAT_MD);
+    }
     load_markdown_spec(path)
 }
 
@@ -240,6 +244,13 @@ mod tests {
             resolve_skill_ref("ci-triage"),
             PathBuf::from("skills/ci-triage/SKILL.md")
         );
+    }
+
+    #[test]
+    fn load_bundled_chat_prompt_without_file_on_disk() {
+        let spec = load_prompt("prompts/chat.md").unwrap();
+        assert_eq!(spec.name, "chat");
+        assert!(spec.body.contains("Chat system prompt"));
     }
 
     #[test]

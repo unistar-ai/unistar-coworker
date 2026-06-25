@@ -23,11 +23,11 @@ pub fn is_cancelled_error(err: &CoworkerError) -> bool {
 }
 
 pub async fn wait_until_cancelled(cancel: &McpCancel) {
-    let Some(flag) = cancel else {
+    let Some(_) = cancel else {
         std::future::pending::<()>().await;
         return;
     };
-    while !flag.load(Ordering::Relaxed) {
+    while !is_cancelled(cancel) {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }

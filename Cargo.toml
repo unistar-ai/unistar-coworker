@@ -9,6 +9,10 @@ license = "MIT"
 name = "unistar-coworker"
 path = "src/main.rs"
 
+[features]
+default = ["web-browser"]
+web-browser = ["dep:chromiumoxide"]
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
@@ -33,11 +37,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2"
 uuid = { version = "1", features = ["serde", "v4"] }
 fs2 = "0.4"
-chromiumoxide = { version = "0.9", default-features = true }
+chromiumoxide = { version = "0.9", default-features = true, optional = true }
 rusqlite = { version = "0.34", features = ["bundled"] }
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 [dev-dependencies]
+http-body-util = "0.1"
 tempfile = "3"
+tokio-tungstenite = "0.26"
+tower = { version = "0.5", features = ["util"] }
+
+# Vendor CDP parse-error patch; used only when `web-browser` pulls in chromiumoxide.
+[patch.crates-io]
+chromiumoxide = { path = "vendor/chromiumoxide" }

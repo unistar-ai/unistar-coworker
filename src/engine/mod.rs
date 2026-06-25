@@ -7,13 +7,14 @@ use crate::agent::AgentLoop;
 use crate::app::{hydrate_from_store, AppEvent, SharedState};
 use crate::config::Config;
 use crate::error::Result;
-use crate::llm::LlmClient;
 use crate::github::{spawn_github, GithubHarness};
+use crate::llm::LlmClient;
 use crate::mcp::{spawn_mcp_pool, McpPool};
 use crate::store::{LogLine, Store};
 
 pub mod approvals;
 pub mod chat;
+pub mod embedded_prompts;
 pub mod playbook;
 pub mod prompt;
 pub mod rules;
@@ -107,10 +108,6 @@ impl Engine {
             }
         }
         engine
-    }
-
-    pub fn mcp(&self) -> Arc<McpPool> {
-        Arc::clone(&self.mcp)
     }
 
     /// Internal log line for TUI Logs tab (+ stderr when not in TUI mode).
@@ -210,10 +207,9 @@ impl Engine {
             s.pr_overview_fetching = None;
             s.pr_overview_cache.insert(key, body);
         }
-        let _ = self.events.send(AppEvent::PrOverviewReady {
-            repo,
-            pr_number,
-        });
+        let _ = self
+            .events
+            .send(AppEvent::PrOverviewReady { repo, pr_number });
     }
 
     /// Background CI triage for one PR (PRs tab `t`).
@@ -242,7 +238,11 @@ impl Engine {
         });
     }
 
-    async fn triage_pr_for_number(&self, repo: &str, pr_number: u32) -> Result<crate::agent::triage::TriageOutcome> {
+    async fn triage_pr_for_number(
+        &self,
+        repo: &str,
+        pr_number: u32,
+    ) -> Result<crate::agent::triage::TriageOutcome> {
         use crate::agent::parse::ParsedPrLine;
         use crate::agent::triage::triage_pr;
         use crate::github::helpers::gh_tool;

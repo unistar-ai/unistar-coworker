@@ -63,19 +63,20 @@ impl StdioMcpClient {
         };
 
         let init_timeout = Duration::from_secs(timeout_secs.max(1));
-        timeout(init_timeout, client.initialize(None)).await.map_err(|_| {
-            CoworkerError::Other(anyhow::anyhow!(
-                "mcp server {:?} initialize timed out after {timeout_secs}s",
-                server.id
-            ))
-        })??;
+        timeout(init_timeout, client.initialize(None))
+            .await
+            .map_err(|_| {
+                CoworkerError::Other(anyhow::anyhow!(
+                    "mcp server {:?} initialize timed out after {timeout_secs}s",
+                    server.id
+                ))
+            })??;
         Ok(client)
     }
 
     /// Kill the stdio child and invalidate the transport (chat cancel / drop).
     pub fn abort_in_flight(&mut self) {
         let _ = self.child.start_kill();
-        let _ = self.child.kill();
     }
 
     async fn request_cancellable(
@@ -84,11 +85,7 @@ impl StdioMcpClient {
         params: Value,
         cancel: McpCancel,
     ) -> Result<Value> {
-        match self
-            .transport
-            .request(method, params, &cancel)
-            .await
-        {
+        match self.transport.request(method, params, &cancel).await {
             Err(e) if is_cancelled_error(&e) => {
                 self.abort_in_flight();
                 Err(e)
@@ -182,12 +179,7 @@ impl StdioMcpClient {
 }
 
 impl JsonRpcTransport {
-    async fn request(
-        &mut self,
-        method: &str,
-        params: Value,
-        cancel: &McpCancel,
-    ) -> Result<Value> {
+    async fn request(&mut self, method: &str, params: Value, cancel: &McpCancel) -> Result<Value> {
         self.next_id += 1;
         let id = self.next_id;
         let msg = json!({
@@ -247,9 +239,10 @@ impl JsonRpcTransport {
 
     async fn read_line(&mut self) -> Result<String> {
         let mut line = String::new();
-        self.reader.read_line(&mut line).await.map_err(|e| {
-            CoworkerError::Other(anyhow::anyhow!("mcp read failed: {e}"))
-        })?;
+        self.reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("mcp read failed: {e}")))?;
         if line.trim().is_empty() {
             return Err(CoworkerError::Other(anyhow::anyhow!(
                 "mcp server closed stdout"

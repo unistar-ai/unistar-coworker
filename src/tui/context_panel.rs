@@ -76,8 +76,7 @@ pub fn context_status_spans(th: ThemePalette, state: &AppState) -> Vec<Span<'sta
         return Vec::new();
     }
     let surface = Style::default().bg(th.surface);
-    let input_budget =
-        TokenBudget::from_config(state.config.llm.context_limit).input_budget();
+    let input_budget = TokenBudget::from_config(state.config.llm.context_limit).input_budget();
     let (used, budget) = if let Some(snap) = &state.chat_context {
         context_snapshot_usage(snap)
     } else {
@@ -265,12 +264,7 @@ fn push_context_section(
             Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
         ),
     ]));
-    lines.extend(render_message_content(
-        th,
-        role,
-        body,
-        content_max_width,
-    ));
+    lines.extend(render_message_content(th, role, body, content_max_width));
 }
 
 pub fn build_message_lines(
@@ -353,8 +347,7 @@ fn context_viewport_lines(
     if stale {
         let raw_lines = build_message_lines(th, state.chat_context.as_ref(), content_max_width);
         let pad_style = Style::default().bg(th.panel);
-        cache.lines =
-            markdown::finalize_panel_lines(raw_lines, panel_width, pad_style, false);
+        cache.lines = markdown::finalize_panel_lines(raw_lines, panel_width, pad_style, false);
         cache.revision = revision;
         cache.width = panel_width;
     }
@@ -412,10 +405,7 @@ fn draw_context_header(
         th.text
     });
 
-    let bar_w = inner
-        .width
-        .saturating_sub(4)
-        .max(8) as usize;
+    let bar_w = inner.width.saturating_sub(4).max(8) as usize;
     let mut header = vec![
         Line::from(vec![
             Span::styled("input ", Style::default().fg(th.muted)),
@@ -431,7 +421,10 @@ fn draw_context_header(
     ];
     let mut meta = vec![
         Span::styled("msgs ", Style::default().fg(th.muted)),
-        Span::styled(format_tokens(snap.message_tokens), Style::default().fg(th.text)),
+        Span::styled(
+            format_tokens(snap.message_tokens),
+            Style::default().fg(th.text),
+        ),
         Span::styled("  ·  tools ", Style::default().fg(th.muted)),
         Span::styled(
             format!(
@@ -460,7 +453,10 @@ fn draw_context_header(
     ];
     if let Some(rev) = snap.runtime_context_revision {
         meta.push(Span::styled("  ·  ctx rev ", Style::default().fg(th.muted)));
-        meta.push(Span::styled(format!("{rev}"), Style::default().fg(th.muted)));
+        meta.push(Span::styled(
+            format!("{rev}"),
+            Style::default().fg(th.muted),
+        ));
     }
     meta.push(Span::styled("  ·  win ", Style::default().fg(th.muted)));
     meta.push(Span::styled(
@@ -478,10 +474,7 @@ fn draw_context_header(
         header.truncate(inner.height as usize);
     }
     frame.render_widget(Clear, inner);
-    frame.render_widget(
-        Paragraph::new(Text::from(header)).style(header_bg),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(Text::from(header)).style(header_bg), inner);
 }
 
 pub fn draw_context_panel(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -693,11 +686,7 @@ repos: [acme/widget]
             }],
             ..Default::default()
         };
-        let lines = build_message_lines(
-            th,
-            Some(&snap),
-            theme::context_content_max_width(72),
-        );
+        let lines = build_message_lines(th, Some(&snap), theme::context_content_max_width(72));
         let joined = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -744,20 +733,15 @@ repos: [acme/widget]
         let width = 48u16;
         let content_w = theme::context_content_max_width(width);
         let raw = build_message_lines(th, Some(&snap), content_w);
-        let lines = markdown::finalize_panel_lines(
-            raw,
-            width,
-            Style::default(),
-            false,
-        );
+        let lines = markdown::finalize_panel_lines(raw, width, Style::default(), false);
         assert!(
             lines.len() > 1,
             "non-table context body should wrap in the panel"
         );
         assert!(
-            lines.iter().all(|l| {
-                markdown::line_display_width_for_test(l) == width as usize
-            }),
+            lines
+                .iter()
+                .all(|l| { markdown::line_display_width_for_test(l) == width as usize }),
             "each context row must be exactly panel width after padding"
         );
     }
@@ -893,11 +877,7 @@ repos: [acme/widget]
             }],
             ..Default::default()
         };
-        let lines = build_message_lines(
-            th,
-            Some(&snap),
-            theme::context_content_max_width(72),
-        );
+        let lines = build_message_lines(th, Some(&snap), theme::context_content_max_width(72));
         let joined = lines
             .iter()
             .flat_map(|l| l.spans.iter())

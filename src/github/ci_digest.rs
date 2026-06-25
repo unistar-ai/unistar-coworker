@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::args::{optional_bool, optional_u32, require_str, require_u64, require_u32};
+use super::args::{optional_bool, optional_u32, require_str, require_u32, require_u64};
 use super::ci;
 use super::ci_common;
 use super::ci_fingerprint::{self, RunFailureAnalysis};
@@ -77,7 +77,10 @@ pub async fn build_failure_digest_text(
     let excerpt = body.trim();
     if !excerpt.is_empty() {
         out.push_str("\nExcerpt:\n");
-        out.push_str(&ci_common::tail_bytes(excerpt, FAILURE_DIGEST_EXCERPT_BUDGET));
+        out.push_str(&ci_common::tail_bytes(
+            excerpt,
+            FAILURE_DIGEST_EXCERPT_BUDGET,
+        ));
     } else if !failed_jobs.is_empty() {
         out.push_str("\n(no log excerpt yet — job may still be running)\n");
     }
@@ -87,10 +90,7 @@ pub async fn build_failure_digest_text(
 pub async fn ci_get_failure_digest(exec: &GhExec, args: &Value) -> Result<String> {
     let repo = require_str(args, "repo")?;
     let run_id = require_u64(args, "run_id")?;
-    let job_id = args
-        .get("job_id")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let job_id = args.get("job_id").and_then(|v| v.as_u64()).unwrap_or(0);
 
     let mut text = build_failure_digest_text(exec, &repo, run_id, job_id).await?;
     text.push_str("\nNext: ci_get_failed_logs for full excerpts; ci_rerun_workflow if flaky.");

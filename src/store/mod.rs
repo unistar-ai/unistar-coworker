@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::config::{Config, StorageBackend};
 use crate::error::Result;
 
+pub mod compact;
 pub mod json;
 pub mod migrate;
 pub mod model;
@@ -11,6 +12,7 @@ pub mod sqlite;
 
 pub use model::*;
 
+pub use compact::{compact, format_compact_summary, CompactOptions};
 pub use migrate::{format_migrate_summary, migrate};
 
 use json::JsonStore;
@@ -29,6 +31,7 @@ pub trait Store: Send + Sync {
     async fn get_pending_approval(&self, id: &Uuid) -> Result<Approval>;
     async fn decide_approval(&self, id: &Uuid, approve: bool) -> Result<()>;
     async fn list_pending_approvals(&self) -> Result<Vec<Approval>>;
+    async fn list_approval_history(&self, limit: usize) -> Result<Vec<Approval>>;
 
     async fn upsert_backport_queue(&self, item: &BackportQueueItem) -> Result<()>;
     async fn list_backport_queue(&self, repo: Option<&str>) -> Result<Vec<BackportQueueItem>>;

@@ -84,10 +84,7 @@ async fn format_store_latest_digest(store: &dyn Store) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-async fn format_store_list_pending_approvals(
-    store: &dyn Store,
-    args: &Value,
-) -> Result<String> {
+async fn format_store_list_pending_approvals(store: &dyn Store, args: &Value) -> Result<String> {
     let limit = parse_limit_arg(args, "limit", DEFAULT_APPROVAL_LIMIT, MAX_APPROVAL_LIMIT);
     let pending = store.list_pending_approvals().await?;
     if pending.is_empty() {

@@ -177,7 +177,8 @@ async fn run_bash_command(
     cwd: Option<&str>,
     review_reason: &str,
 ) -> Result<String> {
-    let workdir = resolve_cwd_in_workspace(workspace, cwd).map_err(|e| validation_err(e, Some(command)))?;
+    let workdir =
+        resolve_cwd_in_workspace(workspace, cwd).map_err(|e| validation_err(e, Some(command)))?;
     let script_body = normalize_command_text(command);
 
     let started = std::time::Instant::now();
@@ -377,10 +378,9 @@ async fn run_command_with_timeout(
 
         if is_multiline {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(command.as_bytes())
-                    .await
-                    .map_err(|e| CoworkerError::Workflow(format!("bash_run stdin write failed: {e}")))?;
+                stdin.write_all(command.as_bytes()).await.map_err(|e| {
+                    CoworkerError::Workflow(format!("bash_run stdin write failed: {e}"))
+                })?;
             }
         }
 
@@ -411,17 +411,15 @@ async fn run_command_with_timeout(
             stderr: err,
         })
     };
-    time::timeout(timeout, fut)
-        .await
-        .map_err(|_| {
-            CoworkerError::Workflow(
-                bash_validation_envelope(
-                    &format!("bash_run timed out after {timeout_secs}s"),
-                    Some(&command_for_errors),
-                )
-                .format_tool_error_body(),
+    time::timeout(timeout, fut).await.map_err(|_| {
+        CoworkerError::Workflow(
+            bash_validation_envelope(
+                &format!("bash_run timed out after {timeout_secs}s"),
+                Some(&command_for_errors),
             )
-        })?
+            .format_tool_error_body(),
+        )
+    })?
 }
 
 fn format_command_header(command: &str) -> String {
@@ -480,8 +478,12 @@ mod tests {
 
     #[test]
     fn output_indicates_failure_reads_exit_code() {
-        assert!(!output_indicates_failure("bash_run: `echo hi`\nexit: 0 (1ms)\n"));
-        assert!(output_indicates_failure("bash_run: `false`\nexit: 1 (1ms)\n"));
+        assert!(!output_indicates_failure(
+            "bash_run: `echo hi`\nexit: 0 (1ms)\n"
+        ));
+        assert!(output_indicates_failure(
+            "bash_run: `false`\nexit: 1 (1ms)\n"
+        ));
     }
 
     #[test]

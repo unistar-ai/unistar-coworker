@@ -8,12 +8,8 @@ use crate::agent::bash_tool::{
     bash_review_response_schema, parse_bash_review_response, BashCommandReview,
 };
 use crate::agent::context::truncate_chars;
-use crate::agent::file_tools::{
-    self, EDIT_FILE, WRITE_FILE,
-};
-use crate::agent::harness_errors::{
-    file_edit_preflight_envelope, file_edit_validation_envelope,
-};
+use crate::agent::file_tools::{self, EDIT_FILE, WRITE_FILE};
+use crate::agent::harness_errors::{file_edit_preflight_envelope, file_edit_validation_envelope};
 use crate::agent::review_gate::ReviewGateOutcome;
 use crate::error::{CoworkerError, Result};
 use crate::llm::LlmClient;
@@ -40,10 +36,7 @@ pub async fn execute_mutating_file_tool_with_review(
 
     let mut out = file_tools::execute_mutating_file_tool(workspace, name, args)?;
     if !out.starts_with("review:") {
-        out = format!(
-            "review: APPROVE ({})\n{out}",
-            review.reason_code
-        );
+        out = format!("review: APPROVE ({})\n{out}", review.reason_code);
     }
     Ok(ReviewGateOutcome::Executed(out))
 }
@@ -56,8 +49,7 @@ fn build_review_payload(name: &str, args: &Value) -> Result<String> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             CoworkerError::Workflow(
-                file_edit_validation_envelope(name, "missing path", args)
-                    .format_tool_error_body(),
+                file_edit_validation_envelope(name, "missing path", args).format_tool_error_body(),
             )
         })?;
 
@@ -131,8 +123,7 @@ async fn review_file_edit(llm: &LlmClient, payload: &str) -> Result<BashCommandR
         .await?;
     parse_bash_review_response(&raw).map_err(|e| match e {
         CoworkerError::Workflow(msg) => CoworkerError::Workflow(
-            file_edit_validation_envelope("file_edit", &msg, &Value::Null)
-                .format_tool_error_body(),
+            file_edit_validation_envelope("file_edit", &msg, &Value::Null).format_tool_error_body(),
         ),
         other => other,
     })

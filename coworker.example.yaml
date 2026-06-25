@@ -16,10 +16,15 @@ repos:
   - owner/repo
 
 workflows:
+  # mcp_readonly: false   # global default — batch workflows do not call third-party MCP
   daily-work: {}
+  # review-radar:
+  #   mcp_readonly: true  # opt-in readonly MCP for this workflow only (chat may always use MCP)
 
 chat:
   workspace: .
+  # llm_step_timeout_secs: 180   # wall clock per LLM step (0 = unlimited)
+  # reasoning_only_warn_secs: 30 # stop stream when only reasoning grows (0 = off)
   # prompt: prompts/chat.md   # system prompt; skills: from frontmatter or chat.skills
   # tool_mode: auto   # auto | lazy | native — see README
   # bash: { timeout_secs: 30, max_output_chars: 16000 }  # optional tuning
@@ -52,6 +57,7 @@ chat:
 #       approval:
 #         mutating: required
 #         tools: [post_message]
+#       skills: [slack-ops]
 #     - id: ops
 #       enabled: false
 #       transport: http
@@ -60,8 +66,10 @@ chat:
 #         Authorization: Bearer ${OPS_MCP_TOKEN}
 
 # Web UI: unistar-coworker serve  (default http://127.0.0.1:8787)
+# For trusted local use only — keep bind on 127.0.0.1 unless you set auth_token.
 web:
   bind: 127.0.0.1:8787
+  # auth_token: your-secret   # LAN bind: require Authorization: Bearer on /api/* and /ws
 
 # UI theme for TUI and Web (`dark` | `light` | `none` — Web treats `none` as `dark`)
 theme: dark

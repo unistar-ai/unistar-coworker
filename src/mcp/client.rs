@@ -15,16 +15,12 @@ pub enum McpClient {
 impl McpClient {
     pub async fn connect(server: &McpServerConfig, timeout_secs: u64) -> Result<Self> {
         match server.transport {
-            McpTransport::Stdio => {
-                StdioMcpClient::connect(server, timeout_secs)
-                    .await
-                    .map(McpClient::Stdio)
-            }
-            McpTransport::Http => {
-                HttpMcpClient::connect(server, timeout_secs)
-                    .await
-                    .map(McpClient::Http)
-            }
+            McpTransport::Stdio => StdioMcpClient::connect(server, timeout_secs)
+                .await
+                .map(McpClient::Stdio),
+            McpTransport::Http => HttpMcpClient::connect(server, timeout_secs)
+                .await
+                .map(McpClient::Http),
         }
     }
 

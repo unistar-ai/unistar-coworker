@@ -112,8 +112,6 @@ fn build_workflow_stats_text(repo: &str, branch: &str, runs: &[BranchRun], top: 
             st.runs, st.failures
         ));
     }
-    lines.push(
-        "Next: ci_branch_health for streak; ci_get_run_summary on failing workflow.".into(),
-    );
+    lines.push("Next: ci_branch_health for streak; ci_get_run_summary on failing workflow.".into());
     lines.join("\n")
 }

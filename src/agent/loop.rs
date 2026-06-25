@@ -8,7 +8,7 @@ use crate::agent::review_radar::run_review_radar;
 use crate::agent::triage::triage_pr;
 use crate::app::{append_audit, AppEvent, SharedState};
 use crate::config::Config;
-use crate::engine::workflows::WorkflowRunner;
+use crate::engine::workflows::{workflow_mcp_scope, WorkflowRunner};
 use crate::engine::{load_workflow_spec, WorkflowSpec};
 use crate::error::{CoworkerError, Result};
 use crate::github::helpers::gh_tool;
@@ -87,6 +87,14 @@ impl AgentLoop {
         }
         self.log(
             "info",
+            if wf.mcp_readonly {
+                "workflow MCP: readonly third-party tools allowed"
+            } else {
+                "workflow MCP: third-party MCP blocked (use chat or enable workflows.<id>.mcp_readonly)"
+            },
+        );
+        self.log(
+            "info",
             format!(
                 "llm: {} ({})",
                 self.config.llm.model,
@@ -115,13 +123,17 @@ impl AgentLoop {
             );
         }
 
-        let result = match workflow_id {
-            "daily-work" => self.run_daily_work(&spec).await,
-            "review-radar" => self.run_review_radar(workflow_id).await,
-            other => Err(CoworkerError::Workflow(format!(
-                "unknown workflow: {other} (built-in: daily-work, review-radar)"
-            ))),
-        };
+        let mcp_readonly = runner.mcp_readonly_enabled(workflow_id);
+        let result = workflow_mcp_scope(mcp_readonly, async {
+            match workflow_id {
+                "daily-work" => self.run_daily_work(&spec).await,
+                "review-radar" => self.run_review_radar(workflow_id).await,
+                other => Err(CoworkerError::Workflow(format!(
+                    "unknown workflow: {other} (built-in: daily-work, review-radar)"
+                ))),
+            }
+        })
+        .await;
 
         match &result {
             Ok(summary) => {

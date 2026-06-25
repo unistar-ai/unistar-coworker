@@ -33,15 +33,16 @@ pub async fn gh_tool(harness: &GithubHarness, name: &str, args: Value) -> Result
         harness.call_tool(name, args).await
     } else {
         harness
-            .call_tool(
-                "tool_call",
-                json!({ "name": name, "args": args }),
-            )
+            .call_tool("tool_call", json!({ "name": name, "args": args }))
             .await
     }
 }
 
-pub async fn gh_tool_with_retry(harness: &GithubHarness, name: &str, args: Value) -> Result<String> {
+pub async fn gh_tool_with_retry(
+    harness: &GithubHarness,
+    name: &str,
+    args: Value,
+) -> Result<String> {
     match gh_tool(harness, name, args.clone()).await {
         Ok(text) => Ok(text),
         Err(e) if is_transient_error(&e) => gh_tool(harness, name, args).await,

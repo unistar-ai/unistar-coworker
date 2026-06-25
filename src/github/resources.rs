@@ -78,24 +78,19 @@ where
     F: FnOnce(&'static str, serde_json::Value) -> Fut,
     Fut: std::future::Future<Output = Result<String>>,
 {
-    let parsed = parse_github_resource_uri(uri).ok_or_else(|| {
-        CoworkerError::Workflow(format!("unsupported resource URI: {uri}"))
-    })?;
+    let parsed = parse_github_resource_uri(uri)
+        .ok_or_else(|| CoworkerError::Workflow(format!("unsupported resource URI: {uri}")))?;
     dispatch(parsed.tool, parsed.args).await
 }
 
 fn pr_overview_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^github://pull/([^/]+)/([^/]+)/(\d+)/overview$").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"^github://pull/([^/]+)/([^/]+)/(\d+)/overview$").unwrap())
 }
 
 fn pr_blockers_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^github://pull/([^/]+)/([^/]+)/(\d+)/blockers$").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"^github://pull/([^/]+)/([^/]+)/(\d+)/blockers$").unwrap())
 }
 
 fn pr_ci_re() -> &'static Regex {
@@ -105,16 +100,12 @@ fn pr_ci_re() -> &'static Regex {
 
 fn pr_ci_snapshot_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^github://pull/([^/]+)/([^/]+)/(\d+)/ci-snapshot$").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"^github://pull/([^/]+)/([^/]+)/(\d+)/ci-snapshot$").unwrap())
 }
 
 fn pr_review_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^github://pull/([^/]+)/([^/]+)/(\d+)/review$").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"^github://pull/([^/]+)/([^/]+)/(\d+)/review$").unwrap())
 }
 
 fn branch_health_re() -> &'static Regex {

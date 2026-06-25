@@ -502,7 +502,9 @@ fn truncate_to_display_width(s: &str, max: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        let cw = unicode_width::UnicodeWidthChar::width(ch)
+            .unwrap_or(1)
+            .max(1);
         if used + cw > max.saturating_sub(1) {
             out.push('…');
             return out;
@@ -667,16 +669,8 @@ pub(crate) fn wrap_content_lines(
 }
 
 fn truncate_line_to_width(line: Line<'static>, max_width: usize) -> Line<'static> {
-    let text: String = line
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
-    let style = line
-        .spans
-        .first()
-        .map(|s| s.style)
-        .unwrap_or_default();
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let style = line.spans.first().map(|s| s.style).unwrap_or_default();
     Line::from(Span::styled(
         truncate_to_display_width(&text, max_width),
         style,
@@ -1100,7 +1094,9 @@ fn rust_code_line(th: ThemePalette, line: &str, base: Style) -> Line<'static> {
             ),
         ]);
     }
-    for kw in ["fn ", "func ", "type ", "struct ", "impl ", "use ", "mod ", "pub "] {
+    for kw in [
+        "fn ", "func ", "type ", "struct ", "impl ", "use ", "mod ", "pub ",
+    ] {
         if let Some(rest) = trimmed.strip_prefix(kw) {
             let indent = line.len().saturating_sub(trimmed.len());
             return Line::from(vec![
@@ -1362,10 +1358,7 @@ impl MarkdownRenderer {
                     }
                     CodeBlockKind::Indented => None,
                 };
-                let label = self
-                    .code_block_lang
-                    .as_deref()
-                    .unwrap_or("code");
+                let label = self.code_block_lang.as_deref().unwrap_or("code");
                 self.lines.push(Line::from(Span::styled(
                     format!("  ┌─ {label} "),
                     Style::default().fg(self.th.muted),
@@ -1420,11 +1413,8 @@ impl MarkdownRenderer {
             TagEnd::Link => {
                 if let Some(url) = self.link_url.take() {
                     if self.th.osc8_links && !self.current.is_empty() {
-                        let label: String = self
-                            .current
-                            .iter()
-                            .map(|s| s.content.as_ref())
-                            .collect();
+                        let label: String =
+                            self.current.iter().map(|s| s.content.as_ref()).collect();
                         let style = self
                             .current
                             .last()
@@ -1509,10 +1499,7 @@ impl MarkdownRenderer {
                 if self.code_block_lang.as_deref() == Some("json") {
                     self.lines
                         .push(json_code_line(self.th, part, self.current_style()));
-                } else if matches!(
-                    self.code_block_lang.as_deref(),
-                    Some("yaml") | Some("yml")
-                ) {
+                } else if matches!(self.code_block_lang.as_deref(), Some("yaml") | Some("yml")) {
                     self.lines
                         .push(yaml_code_line(self.th, part, self.current_style()));
                 } else if matches!(
@@ -1625,7 +1612,9 @@ fn enrich_pr_refs(th: ThemePalette, mut line: Line<'static>) -> Line<'static> {
                     new_spans.push(Span::styled(text[i..start].to_string(), style));
                 }
                 let hi = match kind {
-                    InlineHighlight::Pr => Style::default().fg(th.pr_ref).add_modifier(Modifier::BOLD),
+                    InlineHighlight::Pr => {
+                        Style::default().fg(th.pr_ref).add_modifier(Modifier::BOLD)
+                    }
                     InlineHighlight::Run => {
                         Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
                     }
@@ -1837,11 +1826,17 @@ mod tests {
             .collect();
         assert!(joined.contains("\"repo\""));
         assert!(
-            lines.iter().flat_map(|l| &l.spans).any(|s| s.style.fg == Some(th.accent)),
+            lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .any(|s| s.style.fg == Some(th.accent)),
             "expected accent key color"
         );
         assert!(
-            lines.iter().flat_map(|l| &l.spans).any(|s| s.style.fg == Some(th.ok)),
+            lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .any(|s| s.style.fg == Some(th.ok)),
             "expected string value color"
         );
     }
@@ -1852,7 +1847,10 @@ mod tests {
         let md = "```yaml\nrepos:\n  - acme/widget\n```";
         let lines = markdown_to_lines_in_width(th, md, Style::default().fg(th.text), None);
         assert!(
-            lines.iter().flat_map(|l| &l.spans).any(|s| s.style.fg == Some(th.accent)),
+            lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .any(|s| s.style.fg == Some(th.accent)),
             "expected yaml key accent"
         );
     }
@@ -2294,10 +2292,7 @@ open PR(s) in acme/widget (3):\n\
             .skip_while(|l| !l.contains('▸') || !l.starts_with("  "))
             .take_while(|l| l.starts_with(' ') || l.contains('▸'))
             .collect();
-        assert!(
-            nested.len() >= 2,
-            "nested item should wrap: {joined:?}"
-        );
+        assert!(nested.len() >= 2, "nested item should wrap: {joined:?}");
         assert!(
             nested[1].starts_with("    "),
             "continuation should hang under nested marker (4 cols), got {:?} in {:?}",
@@ -2330,7 +2325,11 @@ open PR(s) in acme/widget (3):\n\
             .spans
             .iter()
             .any(|s| s.content.as_ref().contains("PR #42") && s.style.fg == Some(th.pr_ref));
-        assert!(pr_bold, "PR label should be highlighted: {:?}", lines[0].spans);
+        assert!(
+            pr_bold,
+            "PR label should be highlighted: {:?}",
+            lines[0].spans
+        );
     }
 
     #[test]
@@ -2342,11 +2341,7 @@ open PR(s) in acme/widget (3):\n\
             Style::default().fg(th.text),
             None,
         );
-        let joined: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             joined.contains("[PR #42]"),
             "expected short PR label, got {joined:?}"
@@ -2381,11 +2376,7 @@ open PR(s) in acme/widget (3):\n\
             Style::default().fg(th.text),
             None,
         );
-        let joined: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             joined.contains("\x1b]8;;https://github.com/acme/widget/actions/runs/1\x1b\\"),
             "expected OSC 8 link wrapper: {joined:?}"

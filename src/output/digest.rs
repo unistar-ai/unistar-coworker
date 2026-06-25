@@ -41,23 +41,22 @@ enum SummaryMode {
 impl IncrementalDigest {
     pub fn begin(workflow_id: &str) -> Self {
         let agent_name = workflow_id.to_string();
-        let (title, attention_header, ok_header, policy_header, summary_mode) =
-            match workflow_id {
-                "review-radar" => (
-                    "Review Radar",
-                    "Needs attention",
-                    "Waiting for review",
-                    "Policy gates",
-                    SummaryMode::Waiting,
-                ),
-                _ => (
-                    "Daily Digest",
-                    "Needs attention",
-                    "OK / ignorable",
-                    "Policy gates",
-                    SummaryMode::Daily,
-                ),
-            };
+        let (title, attention_header, ok_header, policy_header, summary_mode) = match workflow_id {
+            "review-radar" => (
+                "Review Radar",
+                "Needs attention",
+                "Waiting for review",
+                "Policy gates",
+                SummaryMode::Waiting,
+            ),
+            _ => (
+                "Daily Digest",
+                "Needs attention",
+                "OK / ignorable",
+                "Policy gates",
+                SummaryMode::Daily,
+            ),
+        };
         Self {
             id: Uuid::new_v4(),
             date: Utc::now().date_naive(),

@@ -4,57 +4,61 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use futures_util::future::join_all;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
-use tokio::time::{self, MissedTickBehavior};
 use uuid::Uuid;
 
 use crate::agent::bash_tool;
-use crate::agent::file_edit_tool;
-use crate::agent::python_tool;
-use crate::agent::review_gate::{format_review_rejection_description, ReviewGateOutcome};
-use crate::agent::harness_errors::agent_validation_error;
-use crate::agent::web_fetch_tool;
 use crate::agent::budget::TokenBudget;
 use crate::agent::chat_discovery::ChatDiscoveryState;
+use crate::agent::chat_duplicate::{
+    duplicate_tool_block_reason, fulfill_duplicate_readonly_tool, harness_retry_or_stop,
+    maybe_block_duplicate_tool_call, push_harness_nudge, prune_stale_missing_arg_nudges,
+    DuplicateToolBlock, MAX_HARNESS_CORRECTIONS,
+};
+use crate::agent::chat_stream::persist_interim_assistant_message;
+
 use crate::agent::context::{
     estimate_message_tokens, estimate_tools_tokens, format_system_for_context_panel,
     format_tool_approval_pending_message, format_tool_context_message,
-    format_tools_for_context_panel, harness_nudge_base, history_token_budget,
+    format_tools_for_context_panel, history_token_budget,
     message_budget_for_tools, pack_session_history_with_llm, skill_body_for_context_panel,
     tool_names_from_definitions, trim_llm_messages_with_llm, trim_system_content, truncate_chars,
 };
-use crate::engine::SkillSpec;
 use crate::agent::file_tools;
-use crate::agent::harness_tools;
 use crate::agent::hooks::{HookRunner, TurnContext};
-use crate::agent::workflow_harness::{self, WorkflowHarnessCtx};
 use crate::agent::parse::parse_failing_runs;
+use crate::agent::python_tool;
 use crate::agent::runtime_context::{
     build_message_focus_lines, build_workspace_git_summary, load_workspace_agents_md,
-    plan_runtime_context,
-    RuntimeContextInput,
+    plan_runtime_context, RuntimeContextInput,
 };
 use crate::agent::tool_catalog;
-use crate::app::{append_audit, AppEvent};
-use crate::config::{BashToolConfig, ChatToolMode, Config, PythonToolConfig};
+use crate::app::AppEvent;
+use crate::config::{ChatToolMode, Config};
+use crate::engine::SkillSpec;
 use crate::engine::{
-    approvals, compose_chat_system_prompt, format_session_context_message,
+    compose_chat_system_prompt, format_session_context_message,
     load_chat_prompt_bundle_for_session,
-    SkillRegistry,
 };
 use crate::error::{CoworkerError, Result};
+use crate::github::{effective_chat_tool_mode, GithubHarness};
 use crate::llm::chat::{
-    reply_premature_for_task, reply_premature_nudge, ChatAgentStep, LlmToolCall,
-    ResolvedToolCall,
+    reply_premature_for_task, reply_premature_nudge, ChatAgentStep, LlmToolCall, ResolvedToolCall,
 };
 use crate::llm::{ChatAgentAction, ChatStepOptions, LlmClient, LlmTurnMessage};
-use crate::github::helpers::{gh_tool, gh_tool_with_retry, read_resource};
-use crate::github::{effective_chat_tool_mode, GithubHarness};
 use crate::mcp::McpPool;
+use crate::store::{ChatMessage, ChatRole, Store};
 use tokio::sync::Mutex;
-use crate::store::{Approval, ApprovalKind, ApprovalStatus, ChatMessage, ChatRole, Store};
+
+use crate::agent::chat_mutating::{
+    handle_mutating_tool_call, maybe_auto_approve_mutations, queue_review_fallback_approval,
+    MutatingToolContext, MutatingToolOutcome,
+};
+use crate::agent::chat_readonly::{
+    execute_readonly_tools_parallel, record_tool_outcome, ReadonlyToolContext,
+    ReadonlyToolHarness, ReadonlyToolOutcome,
+};
 
 const MUTATING_TOOLS: &[&str] = &[
     "ci_rerun_workflow",
@@ -100,6 +104,10 @@ pub struct ContextSnapshot {
     pub message_count: usize,
     pub messages: Vec<ContextLine>,
     pub runtime_context_revision: Option<u64>,
+    /// Count from `[N earlier message(s) omitted …]` markers in the LLM list.
+    pub context_trimmed_turns: u32,
+    /// Human-readable trim/summary note for the context panel.
+    pub context_summary_note: Option<String>,
 }
 
 impl ContextSnapshot {
@@ -214,7 +222,7 @@ pub fn is_flow_activity_tool(name: &str) -> bool {
     )
 }
 
-fn activity_flow_kind_for_tool(name: &str) -> ActivityFlowKind {
+pub(crate) fn activity_flow_kind_for_tool(name: &str) -> ActivityFlowKind {
     if matches!(name, "skill_load") {
         ActivityFlowKind::Skill
     } else {
@@ -222,7 +230,7 @@ fn activity_flow_kind_for_tool(name: &str) -> ActivityFlowKind {
     }
 }
 
-fn emit_activity_flow(
+pub(crate) fn emit_activity_flow(
     progress: &Option<broadcast::Sender<AppEvent>>,
     kind: ActivityFlowKind,
     text: impl Into<String>,
@@ -231,16 +239,10 @@ fn emit_activity_flow(
     if body.trim().is_empty() {
         return;
     }
-    emit_progress(
-        progress,
-        ChatProgress::ActivityFlow {
-            kind,
-            text: body,
-        },
-    );
+    emit_progress(progress, ChatProgress::ActivityFlow { kind, text: body });
 }
 
-fn emit_activity_flow_clear(progress: &Option<broadcast::Sender<AppEvent>>) {
+pub(crate) fn emit_activity_flow_clear(progress: &Option<broadcast::Sender<AppEvent>>) {
     emit_progress(progress, ChatProgress::ActivityFlowClear);
 }
 
@@ -263,14 +265,11 @@ pub fn format_skill_bootstrap_flow(skills: &[crate::engine::SkillSpec]) -> Strin
     lines.join("\n")
 }
 
-fn format_flow_tool_start(name: &str, args: &Value) -> String {
+pub(crate) fn format_flow_tool_start(name: &str, args: &Value) -> String {
     let args_short = format_tool_args_short(args);
     let header = match name {
         "tool_call" => {
-            let inner = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let inner = args.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             format!("tool_call → {inner}")
         }
         "skill_load" => {
@@ -287,7 +286,7 @@ fn format_flow_tool_start(name: &str, args: &Value) -> String {
     }
 }
 
-fn format_flow_tool_done(name: &str, args: &Value, ok: bool, preview: &str) -> String {
+pub(crate) fn format_flow_tool_done(name: &str, args: &Value, ok: bool, preview: &str) -> String {
     let mut text = format_flow_tool_start(name, args);
     let mark = if ok { "ok" } else { "failed" };
     text.push_str(&format!("\n  → {mark}"));
@@ -301,9 +300,6 @@ fn format_flow_tool_done(name: &str, args: &Value, ok: bool, preview: &str) -> S
     }
     text
 }
-
-/// Max harness-only LLM retries per user turn (missing args, malformed JSON, etc.).
-const MAX_HARNESS_CORRECTIONS: u32 = 10;
 
 impl ChatProgress {
     pub fn show_in_log(&self) -> bool {
@@ -455,7 +451,7 @@ fn format_arg_value(value: &Value) -> String {
     }
 }
 
-fn emit_progress(progress: &Option<broadcast::Sender<AppEvent>>, event: ChatProgress) {
+pub(crate) fn emit_progress(progress: &Option<broadcast::Sender<AppEvent>>, event: ChatProgress) {
     if let Some(tx) = progress {
         let _ = tx.send(AppEvent::ChatProgress(event));
     }
@@ -493,7 +489,9 @@ pub fn build_context_snapshot(
             let content = if m.role == "system" {
                 format_system_for_context_panel(&raw)
             } else if m.role == "user"
-                && raw.trim_start().starts_with(crate::engine::SESSION_CONTEXT_PREFIX)
+                && raw
+                    .trim_start()
+                    .starts_with(crate::engine::SESSION_CONTEXT_PREFIX)
             {
                 if let Some((full, _)) = runtime_panel {
                     crate::engine::format_session_context_message(full)
@@ -510,6 +508,8 @@ pub fn build_context_snapshot(
             }
         })
         .collect();
+    let (context_trimmed_turns, context_summary_note) =
+        crate::agent::context::analyze_context_trim_metadata(messages);
     ContextSnapshot {
         turn,
         message_tokens,
@@ -523,6 +523,8 @@ pub fn build_context_snapshot(
         message_count: messages.len(),
         messages: lines,
         runtime_context_revision: runtime_panel.map(|(_, rev)| rev),
+        context_trimmed_turns,
+        context_summary_note,
     }
 }
 
@@ -585,7 +587,7 @@ async fn native_tools_for_session(
         .native_tool_definitions_for_session(tool_mode, &state.warmed_tools)
 }
 
-async fn emit_context_snapshot(
+pub(crate) async fn emit_context_snapshot(
     progress: &Option<broadcast::Sender<AppEvent>>,
     messages: &[LlmTurnMessage],
     turn: u32,
@@ -668,7 +670,7 @@ fn chat_cancel_requested(cancel: &Option<Arc<AtomicBool>>) -> bool {
         .is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
-fn ensure_chat_not_cancelled(cancel: &Option<Arc<AtomicBool>>) -> Result<()> {
+pub(crate) fn ensure_chat_not_cancelled(cancel: &Option<Arc<AtomicBool>>) -> Result<()> {
     if chat_cancel_requested(cancel) {
         Err(chat_cancelled_error())
     } else {
@@ -682,7 +684,7 @@ async fn wait_chat_cancel(cancel: Arc<AtomicBool>) {
     }
 }
 
-async fn race_chat_cancel<T, F>(cancel: Option<Arc<AtomicBool>>, fut: F) -> Result<T>
+pub(crate) async fn race_chat_cancel<T, F>(cancel: Option<Arc<AtomicBool>>, fut: F) -> Result<T>
 where
     F: std::future::Future<Output = T>,
 {
@@ -832,15 +834,13 @@ pub async fn run_chat_turn(
         .iter()
         .map(|s| s.name.clone())
         .collect();
-    let focus_lines =
-        build_message_focus_lines(store.as_ref(), user_task, &config.repos).await?;
-    let prev_state = if session.runtime_state.revision > 0
-        || !session.runtime_state.workspace_path.is_empty()
-    {
-        Some(&session.runtime_state)
-    } else {
-        None
-    };
+    let focus_lines = build_message_focus_lines(store.as_ref(), user_task, &config.repos).await?;
+    let prev_state =
+        if session.runtime_state.revision > 0 || !session.runtime_state.workspace_path.is_empty() {
+            Some(&session.runtime_state)
+        } else {
+            None
+        };
     let recent_edits = session.runtime_state.recent_edits.clone();
     let project_agents = load_workspace_agents_md(&workspace);
     let runtime_plan = plan_runtime_context(RuntimeContextInput {
@@ -856,11 +856,8 @@ pub async fn run_chat_turn(
     store.update_chat_session(&session).await?;
     let runtime_panel = (runtime_plan.full_body.clone(), runtime_plan.revision);
     let tool_catalog = tool_catalog::ToolCatalog::new();
-    let mut discovery_state = ChatDiscoveryState::with_bootstrap(
-        user_task,
-        skill_registry,
-        &prompt_bundle.skills,
-    );
+    let mut discovery_state =
+        ChatDiscoveryState::with_bootstrap(user_task, skill_registry, &prompt_bundle.skills);
     discovery_state.rehydrate_from_tool_history(&history);
     for tool in crate::engine::SkillRegistry::collect_tool_refs(&prompt_bundle.skills) {
         discovery_state
@@ -1009,6 +1006,7 @@ pub async fn run_chat_turn(
         let stream_opts = ChatStepOptions {
             compress_reasoning: config.chat.compress_reasoning,
             cancel: cancel.clone(),
+            reasoning_only_warn_secs: config.chat.reasoning_only_warn_secs,
         };
         let outcome = match chat_llm_step_timeout(config.chat.llm_step_timeout_secs) {
             Some(timeout) => {
@@ -1319,13 +1317,8 @@ from tool results already in context.";
                     let auto_fulfill = block == DuplicateToolBlock::AlreadySucceeded
                         && (call.name == "skill_load" || prepared.len() == 1);
                     if auto_fulfill
-                        && fulfill_duplicate_readonly_tool(
-                            &mut round,
-                            &step,
-                            &call,
-                            &prepared,
-                        )
-                        .await?
+                        && fulfill_duplicate_readonly_tool(&mut round, &step, &call, &prepared)
+                            .await?
                     {
                         continue;
                     }
@@ -1349,12 +1342,14 @@ from tool results already in context.";
                 if !readonly.is_empty() {
                     tools_used += readonly.len() as u32;
                     let outcomes = execute_readonly_tools_parallel(
-                        store.clone(),
-                        github.clone(),
-                        mcp.clone(),
-                        discovery.clone(),
-                        cancel.clone(),
-                        progress.clone(),
+                        ReadonlyToolHarness {
+                            store: store.clone(),
+                            github: github.clone(),
+                            mcp: mcp.clone(),
+                            discovery: discovery.clone(),
+                            cancel: cancel.clone(),
+                            progress: progress.clone(),
+                        },
                         ReadonlyToolContext {
                             configured_repos: &config.repos,
                             user_task,
@@ -1372,12 +1367,7 @@ from tool results already in context.";
                     let mut turn_awaiting_approval = false;
                     for outcome in outcomes {
                         if let Some(review) = outcome.llm_review_rejected.clone() {
-                            let PreparedToolCall {
-                                id,
-                                name,
-                                args,
-                                ..
-                            } = &outcome.call;
+                            let PreparedToolCall { id, name, args, .. } = &outcome.call;
                             match handle_llm_review_rejection(
                                 store.as_ref(),
                                 &session_id,
@@ -1398,12 +1388,7 @@ from tool results already in context.";
                             {
                                 LlmReviewRejectionOutcome::AutoApproved { detail } => {
                                     if file_tools::is_mutating_file_tool(name) {
-                                        record_session_file_edit(
-                                            &mut session,
-                                            name,
-                                            args,
-                                            &detail,
-                                        );
+                                        record_session_file_edit(&mut session, name, args, &detail);
                                         store_update_session_runtime(store.as_ref(), &session)
                                             .await?;
                                     }
@@ -1415,7 +1400,8 @@ from tool results already in context.";
                                         llm_messages: &mut llm_messages,
                                         duplicate_tool_nudges: &mut duplicate_tool_nudges,
                                         duplicate_ui_shown: &mut duplicate_ui_shown,
-                                        duplicate_forced_reply_nudged: &mut duplicate_forced_reply_nudged,
+                                        duplicate_forced_reply_nudged:
+                                            &mut duplicate_forced_reply_nudged,
                                         tool_calls: &mut tool_calls,
                                         tool_exec_records: &mut tool_exec_records,
                                         tool_catalog: &tool_catalog,
@@ -1431,6 +1417,7 @@ from tool results already in context.";
                                             ok: true,
                                             llm_review_rejected: None,
                                         },
+                                        Some(&mcp),
                                     )
                                     .await?;
                                 }
@@ -1472,7 +1459,7 @@ from tool results already in context.";
                             user_task,
                             discovery: discovery.clone(),
                         };
-                        record_tool_outcome(&mut round, outcome).await?;
+                        record_tool_outcome(&mut round, outcome, Some(&mcp)).await?;
                     }
                     if turn_awaiting_approval {
                         return Ok(ChatTurnResult {
@@ -1583,7 +1570,7 @@ from tool results already in context.";
     })
 }
 
-async fn append_message(
+pub(crate) async fn append_message(
     store: &dyn Store,
     session_id: &Uuid,
     role: ChatRole,
@@ -1604,7 +1591,7 @@ async fn append_message(
         .await
 }
 
-async fn persist_native_assistant_tool_call(
+pub(crate) async fn persist_native_assistant_tool_call(
     store: &dyn Store,
     session_id: &Uuid,
     step: &ChatAgentStep,
@@ -1701,35 +1688,7 @@ async fn apply_approval_resolution(
     Ok(())
 }
 
-fn interim_assistant_message(step: &ChatAgentStep) -> Option<String> {
-    if step.action != ChatAgentAction::Tool {
-        return None;
-    }
-    let message = step.message.trim();
-    if message.is_empty()
-        || message.starts_with('{')
-        || crate::agent::context::is_tool_result_transcript(message)
-    {
-        return None;
-    }
-    if message.len() > 800 {
-        return None;
-    }
-    Some(message.to_string())
-}
-
-async fn persist_interim_assistant_message(
-    store: &dyn Store,
-    session_id: &Uuid,
-    step: &ChatAgentStep,
-) -> Result<()> {
-    let Some(message) = interim_assistant_message(step) else {
-        return Ok(());
-    };
-    append_message(store, session_id, ChatRole::Assistant, &message, None, None).await
-}
-
-fn is_mutating_tool(name: &str) -> bool {
+pub(crate) fn is_mutating_tool(name: &str) -> bool {
     MUTATING_TOOLS.contains(&name)
 }
 
@@ -1785,7 +1744,7 @@ fn autofill_pr_from_task(user_task: &str, tool_name: &str, tool_args: &mut Value
 }
 
 /// Normalize/coerce business tool args (direct call or nested under `tool_call`).
-fn finalize_tool_args(
+pub(crate) fn finalize_tool_args(
     tool_name: &str,
     tool_args: &mut Value,
     configured_repos: &[String],
@@ -1899,7 +1858,10 @@ fn coerce_numeric_tool_args(tool_name: &str, tool_args: &mut Value) {
     }
     if matches!(
         tool_name,
-        "ci_get_run_summary" | "ci_get_failed_logs" | "ci_rerun_workflow" | "ci_failure_fingerprint"
+        "ci_get_run_summary"
+            | "ci_get_failed_logs"
+            | "ci_rerun_workflow"
+            | "ci_failure_fingerprint"
     ) {
         if let Some(v) = tool_args.get("run_id") {
             if let Some(n) = v.as_i64() {
@@ -2074,33 +2036,16 @@ fn synthesize_turn_exhausted_reply(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ToolExecRecord {
-    succeeded: bool,
-    fail_count: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DuplicateToolBlock {
-    AlreadySucceeded,
-    FailedTooMany,
-}
-
-fn duplicate_tool_block_reason(record: Option<&ToolExecRecord>) -> Option<DuplicateToolBlock> {
-    let record = record?;
-    if record.succeeded {
-        return Some(DuplicateToolBlock::AlreadySucceeded);
-    }
-    if record.fail_count >= 2 {
-        return Some(DuplicateToolBlock::FailedTooMany);
-    }
-    None
+pub(crate) struct ToolExecRecord {
+    pub(crate) succeeded: bool,
+    pub(crate) fail_count: u32,
 }
 
 /// MCP may return tool errors as plain text; treat them as failures for dedup / retry.
 ///
 /// Only inspects the header / first line. Large payloads such as `pr_get_diff` often
 /// contain error-like substrings inside added lines in the unified diff.
-fn tool_output_indicates_failure(tool_name: &str, output: &str) -> bool {
+pub(crate) fn tool_output_indicates_failure(tool_name: &str, output: &str) -> bool {
     if tool_name == "pr_get_diff"
         && crate::agent::context::pr_get_diff_raw_output_is_success(output)
     {
@@ -2136,7 +2081,7 @@ fn tool_call_names(tool_calls: &[ToolCallSummary]) -> Vec<&str> {
     tool_calls.iter().map(|tc| tc.tool_name.as_str()).collect()
 }
 
-fn tool_call_fingerprint(tool_name: &str, tool_args: &Value) -> String {
+pub(crate) fn tool_call_fingerprint(tool_name: &str, tool_args: &Value) -> String {
     if let Some(semantic) = semantic_tool_fingerprint(tool_name, tool_args) {
         return semantic;
     }
@@ -2182,13 +2127,15 @@ fn semantic_tool_fingerprint(tool_name: &str, tool_args: &Value) -> Option<Strin
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            return Some(format!("{tool_name}:repo={repo},pr_number={pr},path={path}"));
+            return Some(format!(
+                "{tool_name}:repo={repo},pr_number={pr},path={path}"
+            ));
         }
     }
     Some(format!("{tool_name}:repo={repo},pr_number={pr}"))
 }
 
-fn canonical_tool_args(value: &Value) -> String {
+pub(crate) fn canonical_tool_args(value: &Value) -> String {
     let Some(map) = value.as_object() else {
         return value.to_string();
     };
@@ -2309,36 +2256,7 @@ fn rehydrate_tool_exec_records_from_messages(
     records
 }
 
-fn forced_reply_after_duplicate_tools_nudge(
-    user_message: &str,
-    tool_calls: &[ToolCallSummary],
-) -> String {
-    if !tool_calls.is_empty() {
-        return format!(
-            "Same tool call repeated several times. User asked: \"{user_message}\"\n\
-             Reply with an answer from tool results already in context."
-        );
-    }
-    format!(
-        "Same tool call repeated several times. User asked: \"{user_message}\"\n\
-         Reply with what you have, or explain what is still missing."
-    )
-}
-
-fn duplicate_tool_nudge(tool_name: &str, block: DuplicateToolBlock) -> String {
-    match block {
-        DuplicateToolBlock::AlreadySucceeded => format!(
-            "Identical `{tool_name}` with the same args was already fetched in this turn. \
-             Use those results, call a different tool, or reply."
-        ),
-        DuplicateToolBlock::FailedTooMany => format!(
-            "`{tool_name}` with the same args failed twice in this turn. \
-             Reply with what you have, or try different args."
-        ),
-    }
-}
-
-fn ci_analyze_lacks_runs(output: &str) -> bool {
+pub(crate) fn ci_analyze_lacks_runs(output: &str) -> bool {
     let lower = output.to_ascii_lowercase();
     if lower.contains("no failing") {
         return true;
@@ -2349,164 +2267,6 @@ fn ci_analyze_lacks_runs(output: &str) -> bool {
         return true;
     }
     false
-}
-
-fn maybe_push_tool_failure_harness_nudge(
-    catalog: &tool_catalog::ToolCatalog,
-    tool_name: &str,
-    tool_args: &Value,
-    body: &str,
-    configured_repos: &[String],
-    messages: &mut Vec<LlmTurnMessage>,
-) -> String {
-    let (effective_name, effective_args) = effective_tool_for_nudge(tool_name, tool_args);
-    let parsed_missing: Vec<String> = missing_params_from_tool_error(body)
-        .into_iter()
-        .filter(|field| {
-            !tool_catalog::ToolCatalog::tool_arg_field_satisfied(effective_args, field)
-        })
-        .collect();
-    let schema_missing = catalog.missing_required_fields(effective_name, effective_args);
-    let example_repo = configured_repos.first().map(String::as_str);
-    let nudge = if tool_name == "tool_call" && body.contains("JSON object") {
-        format!(
-            "Tool `tool_call` requires `args` as a JSON object, not a string. \
-Example: {{\"name\":\"pr_get_overview\",\"args\":{{\"repo\":\"{}\",\"pr_number\":1}}}}",
-            example_repo.unwrap_or("owner/repo")
-        )
-    } else if let Some(field) = parsed_missing.first() {
-        catalog.format_tool_args_nudge(effective_name, field, None, example_repo)
-    } else if let Some(field) = schema_missing.first() {
-        catalog.format_tool_args_nudge(effective_name, field, None, example_repo)
-    } else {
-        catalog.format_tool_failure_nudge(effective_name, effective_args, body, configured_repos)
-    };
-    push_harness_nudge(messages, nudge)
-}
-
-fn effective_tool_for_nudge<'a>(tool_name: &'a str, tool_args: &'a Value) -> (&'a str, &'a Value) {
-    if tool_name == "tool_call" {
-        if let Some(inner) = tool_args.get("name").and_then(|v| v.as_str()) {
-            let args = tool_args.get("args").unwrap_or(tool_args);
-            return (inner, args);
-        }
-    }
-    (tool_name, tool_args)
-}
-
-fn missing_params_from_tool_error(body: &str) -> Vec<String> {
-    let marker = "missing required parameter(s):";
-    let Some(idx) = body.find(marker) else {
-        return Vec::new();
-    };
-    let rest = body[idx + marker.len()..].trim();
-    let end = rest.find('.').unwrap_or(rest.len());
-    rest[..end]
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn push_harness_nudge(messages: &mut Vec<LlmTurnMessage>, content: String) -> String {
-    let base = content.clone();
-    let mut retry = 1u32;
-    let mut existing_idx = None;
-    for (idx, m) in messages.iter().enumerate() {
-        if m.role == "user"
-            && crate::agent::context::is_harness_nudge_content(&m.content)
-            && harness_nudge_base(&m.content) == base
-        {
-            retry += 1;
-            existing_idx = Some(idx);
-        }
-    }
-    let body = if retry > 1 {
-        format!(
-            "{content}\n\n\
-             (Harness retry {retry} — call the tool above via the native tool API; no further reasoning.)"
-        )
-    } else {
-        content
-    };
-    if let Some(idx) = existing_idx {
-        messages[idx].content = body.clone();
-    } else {
-        messages.push(LlmTurnMessage::new("user", body.clone()));
-    }
-    body
-}
-
-fn missing_arg_nudge_tool_and_field(content: &str) -> Option<(&str, &str)> {
-    let base = harness_nudge_base(content).trim_start();
-    let rest = base.strip_prefix("Tool `")?;
-    let (tool_name, rest) = rest.split_once("` is missing required `")?;
-    let (field, _) = rest.split_once('`')?;
-    Some((tool_name, field))
-}
-
-fn tool_args_satisfy_missing_field(tool_args: &Value, field: &str) -> bool {
-    tool_catalog::ToolCatalog::tool_arg_field_satisfied(tool_args, field)
-}
-
-fn remove_satisfied_missing_arg_nudges(
-    messages: &mut Vec<LlmTurnMessage>,
-    tool_name: &str,
-    tool_args: &Value,
-) {
-    messages.retain(|m| {
-        if m.role != "user" {
-            return true;
-        }
-        let Some((nudge_tool, field)) = missing_arg_nudge_tool_and_field(&m.content) else {
-            return true;
-        };
-        nudge_tool != tool_name || !tool_args_satisfy_missing_field(tool_args, field)
-    });
-}
-
-fn is_successful_tool_result_for_message(m: &LlmTurnMessage, tool_name: &str) -> bool {
-    if m.role == "tool" {
-        return m.tool_name.as_deref() == Some(tool_name)
-            && !m.content.trim_start().starts_with("tool_error(");
-    }
-    is_successful_tool_result_for(&m.content, tool_name)
-}
-
-fn is_successful_tool_result_for(content: &str, tool_name: &str) -> bool {
-    let trimmed = content.trim_start();
-    trimmed.starts_with(&format!("tool_result({tool_name}"))
-        || trimmed.starts_with(&format!("[tool_result {tool_name}]"))
-        || trimmed.starts_with(&format!("[summarized tool_result {tool_name}]"))
-}
-
-fn prune_stale_missing_arg_nudges(messages: &mut Vec<LlmTurnMessage>) {
-    let mut stale = HashSet::new();
-    for (idx, msg) in messages.iter().enumerate() {
-        if msg.role != "user" {
-            continue;
-        }
-        let Some((tool_name, _)) = missing_arg_nudge_tool_and_field(&msg.content) else {
-            continue;
-        };
-        if messages
-            .iter()
-            .skip(idx + 1)
-            .any(|later| is_successful_tool_result_for_message(later, tool_name))
-        {
-            stale.insert(idx);
-        }
-    }
-    if stale.is_empty() {
-        return;
-    }
-    let mut idx = 0usize;
-    messages.retain(|_| {
-        let keep = !stale.contains(&idx);
-        idx += 1;
-        keep
-    });
 }
 
 async fn persist_reasoning_summary(
@@ -2531,76 +2291,29 @@ async fn persist_reasoning_summary(
     Ok(())
 }
 
-async fn persist_harness_nudge(
-    store: &dyn Store,
-    session_id: &Uuid,
-    llm_messages: &mut Vec<LlmTurnMessage>,
-    nudge: &str,
-) -> Result<()> {
-    let body = push_harness_nudge(llm_messages, nudge.to_string());
-    append_message(store, session_id, ChatRole::Harness, &body, None, None).await
-}
-
-/// Push a harness correction to LLM context + session store; return true when the turn should stop.
-async fn harness_retry_or_stop(
-    harness_corrections: &mut u32,
-    progress: &Option<broadcast::Sender<AppEvent>>,
-    store: &dyn Store,
-    session_id: &Uuid,
-    nudge: &str,
-    llm_messages: &mut Vec<LlmTurnMessage>,
-) -> Result<bool> {
-    persist_harness_nudge(store, session_id, llm_messages, nudge).await?;
-    *harness_corrections += 1;
-    emit_progress(
-        progress,
-        ChatProgress::HarnessNudge {
-            retry: *harness_corrections,
-            preview: crate::agent::context::truncate_chars(
-                nudge.lines().next().unwrap_or(nudge),
-                120,
-            ),
-        },
-    );
-    Ok(*harness_corrections > MAX_HARNESS_CORRECTIONS)
-}
-
 #[derive(Debug, Clone)]
-struct PreparedToolCall {
-    id: String,
-    name: String,
-    args: Value,
-    fingerprint: String,
+pub(crate) struct PreparedToolCall {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) args: Value,
+    pub(crate) fingerprint: String,
 }
 
-struct ToolRoundState<'a> {
-    harness_corrections: &'a mut u32,
-    progress: &'a Option<broadcast::Sender<AppEvent>>,
-    store: &'a dyn Store,
-    session_id: &'a Uuid,
-    llm_messages: &'a mut Vec<LlmTurnMessage>,
-    duplicate_tool_nudges: &'a mut HashMap<String, u32>,
-    duplicate_ui_shown: &'a mut HashSet<String>,
-    duplicate_forced_reply_nudged: &'a mut bool,
-    tool_calls: &'a mut Vec<ToolCallSummary>,
-    tool_exec_records: &'a mut HashMap<String, ToolExecRecord>,
-    tool_catalog: &'a crate::agent::tool_catalog::ToolCatalog,
-    configured_repos: &'a [String],
-    user_task: &'a str,
-    discovery: Arc<Mutex<ChatDiscoveryState>>,
-}
-
-#[derive(Debug, Clone)]
-struct ReadonlyToolOutcome {
-    call: PreparedToolCall,
-    output: String,
-    ok: bool,
-    llm_review_rejected: Option<crate::agent::bash_tool::BashCommandReview>,
-}
-
-enum MutatingToolOutcome {
-    Continue,
-    AwaitingApproval,
+pub(crate) struct ToolRoundState<'a> {
+    pub(crate) harness_corrections: &'a mut u32,
+    pub(crate) progress: &'a Option<broadcast::Sender<AppEvent>>,
+    pub(crate) store: &'a dyn Store,
+    pub(crate) session_id: &'a Uuid,
+    pub(crate) llm_messages: &'a mut Vec<LlmTurnMessage>,
+    pub(crate) duplicate_tool_nudges: &'a mut HashMap<String, u32>,
+    pub(crate) duplicate_ui_shown: &'a mut HashSet<String>,
+    pub(crate) duplicate_forced_reply_nudged: &'a mut bool,
+    pub(crate) tool_calls: &'a mut Vec<ToolCallSummary>,
+    pub(crate) tool_exec_records: &'a mut HashMap<String, ToolExecRecord>,
+    pub(crate) tool_catalog: &'a crate::agent::tool_catalog::ToolCatalog,
+    pub(crate) configured_repos: &'a [String],
+    pub(crate) user_task: &'a str,
+    pub(crate) discovery: Arc<Mutex<ChatDiscoveryState>>,
 }
 
 fn prepare_tool_call(
@@ -2635,183 +2348,7 @@ fn validate_prepared_tool_calls(
     None
 }
 
-/// Idempotent readonly tools: replay cached output instead of harness-nudging the model.
-async fn fulfill_duplicate_readonly_tool(
-    round: &mut ToolRoundState<'_>,
-    step: &ChatAgentStep,
-    call: &PreparedToolCall,
-    all_calls: &[PreparedToolCall],
-) -> Result<bool> {
-    if is_mutating_tool(&call.name) {
-        return Ok(false);
-    }
-    let cached = match cached_duplicate_readonly_body(round, call).await {
-        Some(cached) => cached,
-        None => return Ok(false),
-    };
-    push_native_assistant_tool_calls(round.llm_messages, step);
-    for prep in all_calls {
-        if prep.id != call.id {
-            continue;
-        }
-        let ctx = match &cached {
-            CachedToolOutput::Transcript(t) => t.clone(),
-            CachedToolOutput::Body(body) => {
-                format_tool_context_message(&prep.name, &prep.args, true, body)
-            }
-        };
-        round.tool_calls.push(ToolCallSummary {
-            tool_name: prep.name.clone(),
-            output: ctx.clone(),
-        });
-        append_message(
-            round.store,
-            round.session_id,
-            ChatRole::Tool,
-            &ctx,
-            Some(&prep.name),
-            Some(prep.args.to_string()),
-        )
-        .await?;
-        round.llm_messages.push(LlmTurnMessage::tool_result_with_id(
-            Some(prep.id.clone()),
-            prep.name.clone(),
-            ctx,
-        ));
-    }
-    tracing::info!(
-        "duplicate {}({}) — replayed cached output (no harness nudge)",
-        call.name,
-        format_tool_args_short(&call.args)
-    );
-    Ok(true)
-}
-
-#[derive(Debug, Clone)]
-enum CachedToolOutput {
-    /// Already formatted `tool_result(...)` transcript from session context.
-    Transcript(String),
-    /// Raw tool body to wrap in a new transcript.
-    Body(String),
-}
-
-async fn cached_duplicate_readonly_body(
-    round: &ToolRoundState<'_>,
-    call: &PreparedToolCall,
-) -> Option<CachedToolOutput> {
-    if let Some(prior) = find_prior_tool_result_body(round.llm_messages, &call.name, &call.args) {
-        return Some(CachedToolOutput::Transcript(prior));
-    }
-    if call.name == "skill_load" {
-        let name = call.args.get("name").and_then(|v| v.as_str())?;
-        let state = round.discovery.lock().await;
-        let skill = state.skill_registry.get(name)?.clone();
-        return Some(CachedToolOutput::Body(format!(
-            "(already loaded — proceed with the skill workflow)\n\n{}",
-            SkillRegistry::format_skill_load(&skill)
-        )));
-    }
-    None
-}
-
-fn find_prior_tool_result_body(
-    messages: &[LlmTurnMessage],
-    tool_name: &str,
-    args: &Value,
-) -> Option<String> {
-    let want = canonical_tool_args(args);
-    for msg in messages.iter().rev() {
-        if msg.role != "tool" || msg.tool_name.as_deref() != Some(tool_name) {
-            continue;
-        }
-        if tool_transcript_matches_args(&msg.content, args, &want) {
-            return Some(msg.content.clone());
-        }
-    }
-    None
-}
-
-fn tool_transcript_matches_args(content: &str, args: &Value, want_fp: &str) -> bool {
-    if let Some(args_line) = content
-        .lines()
-        .find(|line| line.trim_start().starts_with("args:"))
-    {
-        let json_part = args_line.trim_start().strip_prefix("args:").unwrap_or("").trim();
-        if let Ok(parsed) = serde_json::from_str::<Value>(json_part) {
-            if canonical_tool_args(&parsed) == want_fp {
-                return true;
-            }
-        }
-    }
-    content.contains(&args.to_string()) || canonical_tool_args(args) == want_fp
-}
-
-async fn maybe_block_duplicate_tool_call(
-    round: &mut ToolRoundState<'_>,
-    call: &PreparedToolCall,
-    block: DuplicateToolBlock,
-) -> Result<bool> {
-    if block == DuplicateToolBlock::AlreadySucceeded
-        && crate::agent::review_gate::is_review_gated_tool(&call.name)
-    {
-        if !*round.duplicate_forced_reply_nudged {
-            *round.duplicate_forced_reply_nudged = true;
-        }
-        let nudge = forced_reply_after_duplicate_tools_nudge(round.user_task, round.tool_calls);
-        return harness_retry_or_stop(
-            round.harness_corrections,
-            round.progress,
-            round.store,
-            round.session_id,
-            &nudge,
-            round.llm_messages,
-        )
-        .await;
-    }
-    let nudge_count = round
-        .duplicate_tool_nudges
-        .entry(call.fingerprint.clone())
-        .or_insert(0);
-    *nudge_count += 1;
-    if round.duplicate_ui_shown.insert(call.fingerprint.clone()) {
-        emit_progress(
-            round.progress,
-            ChatProgress::DuplicateToolBlocked {
-                tool_name: call.name.clone(),
-                args_short: format_tool_args_short(&call.args),
-                attempt: *nudge_count,
-            },
-        );
-    }
-    if *nudge_count >= 2 {
-        if !*round.duplicate_forced_reply_nudged {
-            *round.duplicate_forced_reply_nudged = true;
-            round.duplicate_tool_nudges.remove(&call.fingerprint);
-        }
-        let nudge = forced_reply_after_duplicate_tools_nudge(round.user_task, round.tool_calls);
-        return harness_retry_or_stop(
-            round.harness_corrections,
-            round.progress,
-            round.store,
-            round.session_id,
-            &nudge,
-            round.llm_messages,
-        )
-        .await;
-    }
-    let nudge = duplicate_tool_nudge(&call.name, block);
-    harness_retry_or_stop(
-        round.harness_corrections,
-        round.progress,
-        round.store,
-        round.session_id,
-        &nudge,
-        round.llm_messages,
-    )
-    .await
-}
-
-fn push_native_assistant_tool_calls(messages: &mut Vec<LlmTurnMessage>, step: &ChatAgentStep) {
+pub(crate) fn push_native_assistant_tool_calls(messages: &mut Vec<LlmTurnMessage>, step: &ChatAgentStep) {
     let calls: Vec<LlmToolCall> = step
         .tool_calls
         .iter()
@@ -2827,331 +2364,7 @@ fn push_native_assistant_tool_calls(messages: &mut Vec<LlmTurnMessage>, step: &C
     ));
 }
 
-struct ReadonlyToolContext<'a> {
-    configured_repos: &'a [String],
-    user_task: &'a str,
-    bash: &'a BashToolConfig,
-    python: &'a PythonToolConfig,
-    workspace: &'a std::path::Path,
-    llm: Arc<LlmClient>,
-    config: Arc<Config>,
-    progress: Option<broadcast::Sender<AppEvent>>,
-    cancel: Option<Arc<AtomicBool>>,
-}
-
-async fn execute_readonly_tools_parallel(
-    store: Arc<dyn Store>,
-    github: Arc<GithubHarness>,
-    mcp: Arc<McpPool>,
-    discovery: Arc<Mutex<ChatDiscoveryState>>,
-    cancel: Option<Arc<AtomicBool>>,
-    progress: Option<broadcast::Sender<AppEvent>>,
-    ctx: ReadonlyToolContext<'_>,
-    calls: Vec<PreparedToolCall>,
-) -> Result<Vec<ReadonlyToolOutcome>> {
-    let futures = calls.into_iter().map(|call| {
-        let store = Arc::clone(&store);
-        let github = Arc::clone(&github);
-        let mcp = Arc::clone(&mcp);
-        let discovery = Arc::clone(&discovery);
-        let cancel = cancel.clone();
-        let progress = progress.clone();
-        let configured_repos = ctx.configured_repos.to_vec();
-        let user_task = ctx.user_task.to_string();
-        let bash = ctx.bash.clone();
-        let python = ctx.python.clone();
-        let workspace = ctx.workspace.to_path_buf();
-        let llm = Arc::clone(&ctx.llm);
-        let config = Arc::clone(&ctx.config);
-        let progress_ctx = ctx.progress.clone();
-        async move {
-            ensure_chat_not_cancelled(&cancel)?;
-            let args_short = format_tool_args_short(&call.args);
-            let flow_tool = is_flow_activity_tool(&call.name);
-            if flow_tool {
-                emit_activity_flow(
-                    &progress,
-                    activity_flow_kind_for_tool(&call.name),
-                    format_flow_tool_start(&call.name, &call.args),
-                );
-            } else {
-                emit_progress(
-                    &progress,
-                    ChatProgress::ToolStart {
-                        name: call.name.clone(),
-                        args_short,
-                    },
-                );
-            }
-            let tool_start = Instant::now();
-            let result = match race_chat_cancel(
-                cancel.clone(),
-                execute_readonly_tool_with_heartbeat(
-                    store,
-                    github,
-                    mcp,
-                    &discovery,
-                    &progress,
-                    ReadonlyToolContext {
-                        configured_repos: &configured_repos,
-                        user_task: &user_task,
-                        bash: &bash,
-                        python: &python,
-                        workspace: &workspace,
-                        llm,
-                        config,
-                        progress: progress_ctx,
-                        cancel: cancel.clone(),
-                    },
-                    &call.name,
-                    call.args.clone(),
-                ),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => return Err(e),
-            };
-            let (output, ok, llm_review_rejected) = match result {
-                Ok(ReadonlyToolExecuteResult::Output(o))
-                    if tool_output_indicates_failure(&call.name, &o) =>
-                {
-                    (o, false, None)
-                }
-                Ok(ReadonlyToolExecuteResult::Output(o)) => (o, true, None),
-                Ok(ReadonlyToolExecuteResult::LlmReviewRejected(review)) => {
-                    (String::new(), false, Some(review))
-                }
-                Err(e) => (format!("tool error: {e}"), false, None),
-            };
-            let elapsed_ms = tool_start.elapsed().as_millis();
-            let ctx = format_tool_context_message(&call.name, &call.args, ok, &output);
-            if flow_tool {
-                emit_activity_flow(
-                    &progress,
-                    activity_flow_kind_for_tool(&call.name),
-                    format_flow_tool_done(&call.name, &call.args, ok, &ctx),
-                );
-                emit_activity_flow_clear(&progress);
-            } else {
-                emit_progress(
-                    &progress,
-                    ChatProgress::ToolDone {
-                        name: call.name.clone(),
-                        args_short: format_tool_args_short(&call.args),
-                        ok,
-                        elapsed_ms,
-                        output_preview: crate::agent::context::truncate_chars(&ctx, 6_000),
-                    },
-                );
-            }
-            Ok(ReadonlyToolOutcome {
-                call,
-                output,
-                ok,
-                llm_review_rejected,
-            })
-        }
-    });
-    join_all(futures).await.into_iter().collect()
-}
-
-async fn record_tool_outcome(
-    round: &mut ToolRoundState<'_>,
-    outcome: ReadonlyToolOutcome,
-) -> Result<()> {
-    let PreparedToolCall {
-        id,
-        name,
-        args,
-        fingerprint,
-    } = outcome.call;
-    let output = outcome.output;
-    let ok = outcome.ok;
-    let ctx = format_tool_context_message(&name, &args, ok, &output);
-    round.tool_calls.push(ToolCallSummary {
-        tool_name: name.clone(),
-        output: ctx.clone(),
-    });
-    let record = round
-        .tool_exec_records
-        .entry(fingerprint.clone())
-        .or_insert(ToolExecRecord {
-            succeeded: false,
-            fail_count: 0,
-        });
-    if ok {
-        record.succeeded = true;
-        round.duplicate_tool_nudges.remove(&fingerprint);
-        round.duplicate_ui_shown.remove(&fingerprint);
-        let mut state = round.discovery.lock().await;
-        state.warm_from_tool_call_args(&name, &args);
-    } else {
-        record.fail_count += 1;
-    }
-    append_message(
-        round.store,
-        round.session_id,
-        ChatRole::Tool,
-        &ctx,
-        Some(&name),
-        Some(args.to_string()),
-    )
-    .await?;
-    round.llm_messages.push(LlmTurnMessage::tool_result_with_id(
-        Some(id),
-        name.clone(),
-        ctx.clone(),
-    ));
-    if ok {
-        remove_satisfied_missing_arg_nudges(round.llm_messages, &name, &args);
-        prune_stale_missing_arg_nudges(round.llm_messages);
-    } else {
-        let nudge = maybe_push_tool_failure_harness_nudge(
-            round.tool_catalog,
-            &name,
-            &args,
-            &output,
-            round.configured_repos,
-            round.llm_messages,
-        );
-        append_message(
-            round.store,
-            round.session_id,
-            ChatRole::Harness,
-            &nudge,
-            None,
-            None,
-        )
-        .await?;
-    }
-    if ok && name == "ci_analyze_pr_failures" && ci_analyze_lacks_runs(&output) {
-        round.llm_messages.push(LlmTurnMessage::new(
-            "user",
-            "ci_analyze returned no actionable run IDs in this response \
-(pending checks or empty output).",
-        ));
-    }
-    Ok(())
-}
-
-struct MutatingToolContext<'a> {
-    store: &'a dyn Store,
-    session_id: &'a Uuid,
-    session: &'a mut crate::store::ChatSession,
-    workspace: &'a std::path::Path,
-    step: &'a ChatAgentStep,
-    config: &'a Config,
-    store_arc: &'a Arc<dyn Store>,
-    github: &'a Arc<GithubHarness>,
-    mcp: &'a Arc<McpPool>,
-    progress: &'a Option<broadcast::Sender<AppEvent>>,
-    llm_messages: &'a mut Vec<LlmTurnMessage>,
-    tool_calls: &'a mut Vec<ToolCallSummary>,
-    llm_rounds: u32,
-    token_budget: &'a TokenBudget,
-    discovery: Arc<Mutex<ChatDiscoveryState>>,
-    tool_mode: ChatToolMode,
-    runtime_panel: (String, u64),
-}
-
-async fn handle_mutating_tool_call(
-    ctx: MutatingToolContext<'_>,
-    call: &PreparedToolCall,
-) -> Result<MutatingToolOutcome> {
-    let tool_name = call.name.as_str();
-    let tool_args = &call.args;
-    let queued =
-        queue_mutating_approval(ctx.store, ctx.workspace, ctx.mcp, tool_name, tool_args).await?;
-    if let Some(detail) = maybe_auto_approve_mutations(
-        ctx.config,
-        ctx.store_arc,
-        ctx.github,
-        ctx.mcp,
-        tool_name,
-        &queued,
-    )
-    .await?
-    {
-        if file_tools::is_mutating_file_tool(tool_name) {
-            record_session_file_edit(ctx.session, tool_name, tool_args, &detail);
-            store_update_session_runtime(ctx.store, ctx.session).await?;
-        }
-        emit_progress(
-            ctx.progress,
-            ChatProgress::ApprovalResolved {
-                approval_id: queued.id,
-                tool_name: queued.tool_name.clone(),
-                approved: true,
-                detail: detail.clone(),
-            },
-        );
-        ctx.tool_calls.push(ToolCallSummary {
-            tool_name: format!("approval:{}", queued.tool_name),
-            output: detail.clone(),
-        });
-        let body = format_tool_context_message(
-            tool_name,
-            tool_args,
-            true,
-            &format!("Auto-approved: {detail}"),
-        );
-        ctx.llm_messages.push(LlmTurnMessage::tool_result_with_id(
-            Some(call.id.clone()),
-            tool_name,
-            body.clone(),
-        ));
-        append_message(
-            ctx.store,
-            ctx.session_id,
-            ChatRole::Tool,
-            &body,
-            Some(tool_name),
-            Some(tool_args.to_string()),
-        )
-        .await?;
-        return Ok(MutatingToolOutcome::Continue);
-    }
-    persist_native_assistant_tool_call(ctx.store, ctx.session_id, ctx.step).await?;
-    emit_progress(
-        ctx.progress,
-        ChatProgress::ApprovalQueued {
-            approval_id: queued.id,
-            session_id: *ctx.session_id,
-            tool_name: queued.tool_name.clone(),
-            tool_args_json: tool_args.to_string(),
-            description: queued.description.clone(),
-        },
-    );
-    ctx.tool_calls.push(ToolCallSummary {
-        tool_name: format!("approval:{}", queued.tool_name),
-        output: queued.summary.clone(),
-    });
-    let pending_body = format!("Mutating tool awaiting approval. {}", queued.summary);
-    let body = format_tool_approval_pending_message(tool_name, tool_args, queued.id, &pending_body);
-    append_message(
-        ctx.store,
-        ctx.session_id,
-        ChatRole::Tool,
-        &body,
-        Some(tool_name),
-        Some(tool_args.to_string()),
-    )
-    .await?;
-    emit_context_snapshot(
-        ctx.progress,
-        ctx.llm_messages,
-        ctx.llm_rounds,
-        ctx.token_budget,
-        &ctx.discovery,
-        ctx.tool_mode,
-        Some((ctx.runtime_panel.0.as_str(), ctx.runtime_panel.1)),
-    )
-    .await;
-    Ok(MutatingToolOutcome::AwaitingApproval)
-}
-
-fn record_session_file_edit(
+pub(crate) fn record_session_file_edit(
     session: &mut crate::store::ChatSession,
     tool_name: &str,
     tool_args: &Value,
@@ -3179,65 +2392,11 @@ fn record_session_file_edit(
     }
 }
 
-async fn store_update_session_runtime(
+pub(crate) async fn store_update_session_runtime(
     store: &dyn Store,
     session: &crate::store::ChatSession,
 ) -> Result<()> {
     store.update_chat_session(session).await
-}
-
-async fn queue_review_fallback_approval(
-    store: &dyn Store,
-    workspace: &std::path::Path,
-    tool_name: &str,
-    args: &Value,
-    review: &crate::agent::bash_tool::BashCommandReview,
-) -> Result<QueuedApproval> {
-    use crate::agent::review_gate::approval_kind_for_review_gated_tool;
-
-    let workspace_key = workspace.to_string_lossy().to_string();
-    let args_json = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
-    let kind = approval_kind_for_review_gated_tool(tool_name).ok_or_else(|| {
-        CoworkerError::Workflow(format!("no approval kind for review-gated tool: {tool_name}"))
-    })?;
-    let description = format_review_rejection_description(tool_name, review);
-
-    let approval = Approval {
-        id: Uuid::new_v4(),
-        kind,
-        repo: workspace_key,
-        pr_number: None,
-        run_id: None,
-        target_branch: None,
-        incident_id: None,
-        description: description.clone(),
-        status: ApprovalStatus::Pending,
-        created_at: Utc::now(),
-        decided_at: None,
-        comment_body: Some(args_json),
-        issue_number: None,
-        label: None,
-    };
-    store.push_approval(&approval).await?;
-    append_audit(
-        store,
-        "info",
-        "chat",
-        &format!(
-            "queued LLM-review fallback approval {} ({:?})",
-            approval.id, approval.kind
-        ),
-    )
-    .await;
-    Ok(QueuedApproval {
-        id: approval.id,
-        tool_name: tool_name.to_string(),
-        description: approval.description.clone(),
-        summary: format!(
-            "LLM safety review rejected `{tool_name}` — approval {} queued (confirm in Approvals UI).",
-            approval.id
-        ),
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3264,15 +2423,8 @@ async fn handle_llm_review_rejection(
     }
     let queued =
         queue_review_fallback_approval(store, workspace, tool_name, tool_args, review).await?;
-    if let Some(detail) = maybe_auto_approve_mutations(
-        config,
-        store_arc,
-        github,
-        mcp,
-        tool_name,
-        &queued,
-    )
-    .await?
+    if let Some(detail) =
+        maybe_auto_approve_mutations(config, store_arc, github, mcp, tool_name, &queued).await?
     {
         emit_progress(
             progress,
@@ -3388,626 +2540,9 @@ fn llm_review_reject_detail(
     }
 }
 
-enum ReadonlyToolExecuteResult {
-    Output(String),
-    LlmReviewRejected(crate::agent::bash_tool::BashCommandReview),
-}
-
-fn wrap_review_gate(outcome: ReviewGateOutcome) -> ReadonlyToolExecuteResult {
-    match outcome {
-        ReviewGateOutcome::Executed(s) => ReadonlyToolExecuteResult::Output(s),
-        ReviewGateOutcome::LlmRejected(r) => ReadonlyToolExecuteResult::LlmReviewRejected(r),
-    }
-}
-
 enum LlmReviewRejectionOutcome {
     AutoApproved { detail: String },
     AwaitingApproval,
-}
-
-async fn execute_readonly_tool_with_heartbeat(
-    store: Arc<dyn Store>,
-    github: Arc<GithubHarness>,
-    mcp: Arc<McpPool>,
-    discovery: &Arc<Mutex<ChatDiscoveryState>>,
-    progress: &Option<broadcast::Sender<AppEvent>>,
-    ctx: ReadonlyToolContext<'_>,
-    tool_name: &str,
-    tool_args: Value,
-) -> Result<ReadonlyToolExecuteResult> {
-    let name = tool_name.to_string();
-    let args = tool_args.clone();
-    let progress = progress.clone();
-    let discovery = Arc::clone(discovery);
-    let mut tool_fut = Box::pin(execute_readonly_tool(
-        store,
-        github,
-        mcp,
-        &discovery,
-        ctx,
-        tool_name,
-        tool_args,
-    ));
-    let started = Instant::now();
-    let mut tick = time::interval(Duration::from_millis(500));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    tick.tick().await;
-
-    loop {
-        tokio::select! {
-            result = &mut tool_fut => return result,
-            _ = tick.tick() => {
-                let detail = format_tool_progress_detail(tool_name, &args, started.elapsed());
-                emit_progress(
-                    &progress,
-                    ChatProgress::ToolProgress {
-                        name: name.clone(),
-                        detail,
-                    },
-                );
-            }
-        }
-    }
-}
-
-/// Elapsed / paging hint for the TUI while a readonly tool is in flight.
-pub(crate) fn format_tool_progress_detail(
-    tool_name: &str,
-    args: &Value,
-    elapsed: Duration,
-) -> String {
-    let secs = elapsed.as_secs();
-    match tool_name {
-        "ci_get_failed_logs" => {
-            let offset = args
-                .get("offset_lines")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let max_lines = args
-                .get("max_lines")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            if max_lines > 0 {
-                let page = offset
-                    .checked_div(max_lines)
-                    .unwrap_or(0)
-                    .saturating_add(1);
-                format!("page {page}, {secs}s")
-            } else {
-                format!("fetching logs, {secs}s")
-            }
-        }
-        "ci_get_run_summary" | "ci_analyze_pr_failures" | "pr_get_overview" | "pr_get_diff" => {
-            format!("{secs}s")
-        }
-        "bash_run" => {
-            let cmd = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            format!("{cmd}, {secs}s")
-        }
-        "python_run" => {
-            let lines = args
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?")
-                .lines()
-                .next()
-                .unwrap_or("?");
-            format!("{lines}, {secs}s")
-        }
-        "web_fetch" | "web_browser" => {
-            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("{url}, {secs}s")
-        }
-        _ => format!("{secs}s"),
-    }
-}
-
-async fn execute_readonly_tool(
-    store: Arc<dyn Store>,
-    github: Arc<GithubHarness>,
-    mcp: Arc<McpPool>,
-    discovery: &Arc<Mutex<ChatDiscoveryState>>,
-    ctx: ReadonlyToolContext<'_>,
-    tool_name: &str,
-    mut tool_args: Value,
-) -> Result<ReadonlyToolExecuteResult> {
-    finalize_tool_args(
-        tool_name,
-        &mut tool_args,
-        ctx.configured_repos,
-        ctx.user_task,
-    );
-    if workflow_harness::is_workflow_harness_tool(tool_name) {
-        return Ok(ReadonlyToolExecuteResult::Output(
-            workflow_harness::execute_workflow_harness(
-                WorkflowHarnessCtx {
-                    config: ctx.config.clone(),
-                    store,
-                    github,
-                    llm: ctx.llm.clone(),
-                },
-                tool_name,
-                tool_args,
-            )
-            .await?,
-        ));
-    }
-    if harness_tools::is_harness_tool(tool_name) {
-        return Ok(ReadonlyToolExecuteResult::Output(
-            harness_tools::execute_harness_tool(store.as_ref(), tool_name, tool_args).await?,
-        ));
-    }
-    if bash_tool::is_bash_tool(tool_name) {
-        return Ok(wrap_review_gate(
-            bash_tool::execute_bash_tool(ctx.bash, ctx.llm.as_ref(), ctx.workspace, &tool_args)
-                .await?,
-        ));
-    }
-    if python_tool::is_python_tool(tool_name) {
-        return Ok(wrap_review_gate(
-            python_tool::execute_python_tool(ctx.python, ctx.llm.as_ref(), ctx.workspace, &tool_args)
-                .await?,
-        ));
-    }
-    if file_tools::is_mutating_file_tool(tool_name) {
-        return Ok(wrap_review_gate(
-            file_edit_tool::execute_mutating_file_tool_with_review(
-                ctx.workspace,
-                ctx.llm.as_ref(),
-                tool_name,
-                &tool_args,
-            )
-            .await?,
-        ));
-    }
-    if web_fetch_tool::is_web_fetch_tool(tool_name) {
-        return Ok(ReadonlyToolExecuteResult::Output(
-            web_fetch_tool::execute_web_fetch_tool(
-                &ctx.config.chat.web_fetch,
-                ctx.workspace,
-                &tool_args,
-            )
-            .await?,
-        ));
-    }
-    if file_tools::is_file_tool(tool_name) {
-        return Ok(ReadonlyToolExecuteResult::Output(file_tools::execute_file_tool(
-            ctx.workspace,
-            tool_name,
-            &tool_args,
-        )?));
-    }
-    if tool_name == "tool_list" {
-        if let Some(cached) =
-            crate::agent::hooks::tool_list_cached_response(&*discovery.lock().await)
-        {
-            return Ok(ReadonlyToolExecuteResult::Output(cached));
-        }
-        let text = if mcp.has_servers() {
-            crate::mcp::federated_tool_list(mcp.as_ref()).await
-        } else {
-            gh_tool(github.as_ref(), "tool_list", json!({})).await?
-        };
-        discovery.lock().await.store_tool_list(text.clone());
-        return Ok(ReadonlyToolExecuteResult::Output(text));
-    }
-    if tool_name == "tool_search" {
-        let query = tool_args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                agent_validation_error(
-                    "tool_search",
-                    "TOOL_MISSING_ARG",
-                    "tool_search needs query",
-                    "Pass a short tool name keyword",
-                )
-            })?;
-        let limit = tool_args
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5) as usize;
-        let text = if mcp.has_servers() {
-            crate::mcp::federated_tool_search(mcp.as_ref(), query, limit).await?
-        } else {
-            let mut args = json!({ "query": query });
-            if let Some(limit) = tool_args.get("limit") {
-                args["limit"] = limit.clone();
-            }
-            gh_tool(github.as_ref(), "tool_search", args).await?
-        };
-        return Ok(ReadonlyToolExecuteResult::Output(text));
-    }
-    if tool_name == "tool_describe" {
-        let name = tool_args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                agent_validation_error(
-                    "tool_describe",
-                    "TOOL_MISSING_ARG",
-                    "tool_describe needs name",
-                    "Pass exact tool name from tool_search",
-                )
-            })?;
-        let text = if mcp.has_servers() {
-            crate::mcp::federated_tool_describe(mcp.as_ref(), name).await?
-        } else {
-            gh_tool(github.as_ref(), "tool_describe", json!({ "name": name })).await?
-        };
-        return Ok(ReadonlyToolExecuteResult::Output(text));
-    }
-    if mcp.is_mcp_tool_async(tool_name).await {
-        return Ok(ReadonlyToolExecuteResult::Output(
-            mcp.call_global_tool(tool_name, tool_args, ctx.cancel.clone())
-                .await?,
-        ));
-    }
-    Ok(ReadonlyToolExecuteResult::Output(match tool_name {
-        "tool_list_category" => {
-            let category = tool_args
-                .get("category")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    agent_validation_error(
-                        "tool_list_category",
-                        "TOOL_MISSING_ARG",
-                        "tool_list_category needs category",
-                        "Pass category from tool_list",
-                    )
-                })?;
-            gh_tool(github.as_ref(), "tool_list_category", json!({ "category": category })).await?
-        }
-        "resource_read" => {
-            let uri = tool_args
-                .get("uri")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    agent_validation_error(
-                        "resource_read",
-                        "TOOL_MISSING_ARG",
-                        "resource_read needs uri",
-                        "Use github://, pr://, or mcp+{server}:// URI from tool_describe",
-                    )
-                })?;
-            if uri.starts_with("mcp+") {
-                mcp.read_federated_resource(uri, ctx.cancel.clone())
-                    .await?
-            } else {
-                read_resource(github.as_ref(), uri).await?
-            }
-        }
-        "skill_load" => {
-            let name = tool_args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    agent_validation_error(
-                        "skill_load",
-                        "TOOL_MISSING_ARG",
-                        "skill_load needs name",
-                        "Pass skill name from **Available skills** in the system prompt",
-                    )
-                })?;
-            let mut state = discovery.lock().await;
-            let skill = state
-                .skill_registry
-                .get(name)
-                .cloned()
-                .ok_or_else(|| {
-                    agent_validation_error(
-                        "skill_load",
-                        "TOOL_NOT_FOUND",
-                        format!("unknown skill {name:?}"),
-                        "Pick a name from **Available skills** in the system prompt",
-                    )
-                })?;
-            state.warm_skill_tools(&skill);
-            for tool in &skill.tool_refs {
-                state
-                    .warm_tool_from_registry(tool, mcp.as_ref())
-                    .await;
-            }
-            SkillRegistry::format_skill_load(&skill)
-        }
-        "tool_call" => {
-            let name = tool_args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    agent_validation_error(
-                        "tool_call",
-                        "TOOL_MISSING_ARG",
-                        "tool_call needs name",
-                        "Pass { \"name\": \"...\", \"args\": { ... } }",
-                    )
-                })?;
-            let args = tool_args.get("args").cloned().unwrap_or_else(|| json!({}));
-            if is_mutating_tool(name) {
-                return Err(CoworkerError::Workflow(format!(
-                    "{name} is mutating — use approval action"
-                )));
-            }
-            if mcp.is_mcp_tool_async(name).await {
-                mcp.call_global_tool(name, args, ctx.cancel.clone())
-                    .await?
-            } else {
-                gh_tool(github.as_ref(), "tool_call", json!({ "name": name, "args": args })).await?
-            }
-        }
-        other if is_mutating_tool(other) => {
-            return Err(CoworkerError::Workflow(format!(
-                "{other} is mutating — use approval action"
-            )));
-        }
-        other => gh_tool_with_retry(github.as_ref(), other, tool_args).await?,
-    }))
-}
-
-async fn queue_mutating_approval(
-    store: &dyn Store,
-    workspace: &std::path::Path,
-    mcp: &Arc<McpPool>,
-    tool_name: &str,
-    args: &Value,
-) -> Result<QueuedApproval> {
-    if mcp.is_mcp_mutating(tool_name).await {
-        let entry = mcp
-            .resolve_entry(tool_name)
-            .await
-            .ok_or_else(|| CoworkerError::Workflow(format!("unknown MCP tool {tool_name:?}")))?;
-        let payload = serde_json::to_string(&json!({
-            "tool_name": tool_name,
-            "args": args,
-        }))
-        .map_err(|e| CoworkerError::Workflow(format!("mcp approval payload: {e}")))?;
-        let workspace_repo = workspace.to_string_lossy().into_owned();
-        let description = format!(
-            "Chat: MCP {} on mcp[{}]",
-            entry.remote_name, entry.server_id
-        );
-        let approval = Approval {
-            id: Uuid::new_v4(),
-            kind: ApprovalKind::McpTool,
-            repo: workspace_repo,
-            pr_number: None,
-            run_id: None,
-            target_branch: None,
-            incident_id: None,
-            description,
-            status: ApprovalStatus::Pending,
-            created_at: Utc::now(),
-            decided_at: None,
-            comment_body: Some(payload),
-            issue_number: None,
-            label: None,
-        };
-        store.push_approval(&approval).await?;
-        append_audit(
-            store,
-            "info",
-            "chat",
-            &format!("queued approval {} ({:?})", approval.id, approval.kind),
-        )
-        .await;
-        return Ok(QueuedApproval {
-            id: approval.id,
-            tool_name: tool_name.to_string(),
-            description: approval.description.clone(),
-            summary: format!(
-                "Approval {} queued for `{tool_name}` — confirm in the approval popup.",
-                approval.id
-            ),
-        });
-    }
-
-    let comment_body = args
-        .get("body")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let (kind, description, repo, pr_number, run_id, target_branch, issue_number, label, payload) =
-        match tool_name {
-        "ci_rerun_workflow" => {
-            let run_id = args
-                .get("run_id")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| CoworkerError::Workflow("ci_rerun_workflow needs run_id".into()))?;
-            let repo = args
-                .get("repo")
-                .and_then(|v| v.as_str())
-                .map(sanitize_repo_string)
-                .unwrap_or_else(|| "unknown/repo".to_string());
-            (
-                ApprovalKind::RerunFlaky,
-                format!("Chat: rerun workflow run {run_id} on {repo}"),
-                repo,
-                None,
-                Some(run_id),
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        "pr_create_backport" => {
-            let repo = args
-                .get("repo")
-                .and_then(|v| v.as_str())
-                .map(sanitize_repo_string)
-                .unwrap_or_else(|| "unknown/repo".to_string());
-            let pr_number = args
-                .get("pr_number")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as u32)
-                .ok_or_else(|| {
-                    CoworkerError::Workflow("pr_create_backport needs pr_number".into())
-                })?;
-            let target_branch = args
-                .get("target_branch")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    CoworkerError::Workflow("pr_create_backport needs target_branch".into())
-                })?
-                .to_string();
-            (
-                ApprovalKind::Backport,
-                format!("Chat: backport #{pr_number} → {target_branch} on {repo}"),
-                repo,
-                Some(pr_number),
-                None,
-                Some(target_branch),
-                None,
-                None,
-                None,
-            )
-        }
-        "pr_post_comment" => {
-            let repo = args
-                .get("repo")
-                .and_then(|v| v.as_str())
-                .map(sanitize_repo_string)
-                .unwrap_or_else(|| "unknown/repo".to_string());
-            let pr_number = args
-                .get("pr_number")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as u32)
-                .ok_or_else(|| CoworkerError::Workflow("pr_post_comment needs pr_number".into()))?;
-            if comment_body.is_none() {
-                return Err(CoworkerError::Workflow("pr_post_comment needs body".into()));
-            }
-            (
-                ApprovalKind::PostComment,
-                format!("Chat: post comment on #{pr_number} ({repo})"),
-                repo,
-                Some(pr_number),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        "issue_add_label" => {
-            let repo = args
-                .get("repo")
-                .and_then(|v| v.as_str())
-                .map(sanitize_repo_string)
-                .unwrap_or_else(|| "unknown/repo".to_string());
-            let issue_number = args
-                .get("issue_number")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as u32)
-                .ok_or_else(|| {
-                    CoworkerError::Workflow("issue_add_label needs issue_number".into())
-                })?;
-            let label = args
-                .get("label")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .ok_or_else(|| CoworkerError::Workflow("issue_add_label needs label".into()))?;
-            (
-                ApprovalKind::IssueAddLabel,
-                format!("Chat: add label `{label}` to issue #{issue_number} ({repo})"),
-                repo,
-                None,
-                None,
-                None,
-                Some(issue_number),
-                Some(label),
-                None,
-            )
-        }
-        other => {
-            return Err(CoworkerError::Workflow(format!(
-                "unknown mutating tool: {other}"
-            )));
-        }
-    };
-
-    let approval = Approval {
-        id: Uuid::new_v4(),
-        kind,
-        repo,
-        pr_number,
-        run_id,
-        target_branch,
-        incident_id: None,
-        description,
-        status: ApprovalStatus::Pending,
-        created_at: Utc::now(),
-        decided_at: None,
-        comment_body: payload.or(comment_body),
-        issue_number,
-        label,
-    };
-    store.push_approval(&approval).await?;
-    append_audit(
-        store,
-        "info",
-        "chat",
-        &format!("queued approval {} ({:?})", approval.id, approval.kind),
-    )
-    .await;
-    Ok(QueuedApproval {
-        id: approval.id,
-        tool_name: tool_name.to_string(),
-        description: approval.description.clone(),
-        summary: format!(
-            "Approval {} queued for `{tool_name}` — confirm in the approval popup.",
-            approval.id
-        ),
-    })
-}
-
-/// When `chat.auto_approve_mutations` is enabled, run the queued mutation immediately.
-async fn maybe_auto_approve_mutations(
-    config: &Config,
-    store: &Arc<dyn Store>,
-    github: &Arc<GithubHarness>,
-    mcp: &Arc<McpPool>,
-    tool_name: &str,
-    queued: &QueuedApproval,
-) -> Result<Option<String>> {
-    let auto = if config.chat.auto_approve_mutations {
-        true
-    } else if mcp.is_mcp_mutating(tool_name).await {
-        matches!(
-            mcp.server_mutating_policy(tool_name).await,
-            Some(crate::config::McpMutatingPolicy::Auto)
-        )
-    } else {
-        false
-    };
-    if !auto {
-        return Ok(None);
-    }
-    match approvals::process_decision(
-        Arc::clone(store),
-        Arc::clone(github),
-        Arc::clone(mcp),
-        &queued.id,
-        true,
-    )
-    .await
-    {
-        Ok(detail) => Ok(Some(detail)),
-        Err(e) => Err(e),
-    }
-}
-
-/// Result of queueing a mutating tool for human approval.
-#[derive(Debug, Clone)]
-pub struct QueuedApproval {
-    pub id: Uuid,
-    pub tool_name: String,
-    pub description: String,
-    pub summary: String,
 }
 
 #[cfg(test)]
@@ -4045,102 +2580,6 @@ mod tests {
     }
 
     #[test]
-    fn push_harness_nudge_replaces_instead_of_stacking() {
-        let mut msgs = Vec::new();
-        push_harness_nudge(
-            &mut msgs,
-            "Tool `pr_get_overview` is missing required `repo`.".into(),
-        );
-        push_harness_nudge(
-            &mut msgs,
-            "Tool `pr_get_overview` is missing required `repo`.".into(),
-        );
-        assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.contains("Harness retry 2"));
-    }
-
-    #[test]
-    fn harness_nudge_stays_in_chronological_order() {
-        let mut msgs = vec![
-            LlmTurnMessage::new("user", "Rerun failed CIs."),
-            LlmTurnMessage::assistant_tool_call(
-                String::new(),
-                vec![crate::llm::chat::LlmToolCall {
-                    id: "call_1".into(),
-                    name: "ci_get_failed_logs".into(),
-                    arguments: json!({"repo": "acme/widget", "run_id": 1}),
-                }],
-            ),
-            LlmTurnMessage::tool_result("ci_get_failed_logs", "log output"),
-        ];
-        push_harness_nudge(
-            &mut msgs,
-            "Identical `ci_get_failed_logs` with the same args was already fetched in this turn."
-                .into(),
-        );
-        msgs.push(LlmTurnMessage::assistant_tool_call(
-            String::new(),
-            vec![crate::llm::chat::LlmToolCall {
-                id: "call_2".into(),
-                name: "ci_rerun_workflow".into(),
-                arguments: json!({"repo": "acme/widget", "run_id": 1}),
-            }],
-        ));
-        assert_eq!(msgs.len(), 5);
-        assert!(matches!(msgs[3].role, "user"));
-        assert!(msgs[3].content.contains("Identical `ci_get_failed_logs`"));
-        assert!(msgs[4].tool_calls.is_some());
-    }
-
-    #[test]
-    fn satisfied_missing_arg_nudge_is_removed_after_success() {
-        let mut msgs = vec![LlmTurnMessage::new(
-            "user",
-            "Tool `pr_get_overview` is missing required `repo`.\n\n(Harness retry 2 — call the tool above via the native tool API; no further reasoning.)",
-        )];
-        remove_satisfied_missing_arg_nudges(
-            &mut msgs,
-            "pr_get_overview",
-            &json!({"repo": "acme/widget", "pr_number": 19263}),
-        );
-        assert!(msgs.is_empty());
-    }
-
-    #[test]
-    fn stale_missing_arg_nudge_is_pruned_from_history_context() {
-        let mut msgs = vec![
-            LlmTurnMessage::new("user", "Tool `pr_get_overview` is missing required `repo`."),
-            LlmTurnMessage::tool_result("pr_get_overview", "PR #19263 in acme/widget"),
-        ];
-        prune_stale_missing_arg_nudges(&mut msgs);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, "tool");
-        assert!(msgs[0].content.contains("PR #19263"));
-    }
-
-    #[test]
-    fn tool_failure_nudge_includes_error_and_contract() {
-        let catalog = tool_catalog::ToolCatalog::new();
-        let args = json!({ "repo": "wrong/repo", "pr_number": 1 });
-        let mut msgs = Vec::new();
-        maybe_push_tool_failure_harness_nudge(
-            &catalog,
-            "pr_get_overview",
-            &args,
-            "failed to get pull request: HTTP 404: Not Found",
-            &["acme/widget".into()],
-            &mut msgs,
-        );
-        assert_eq!(msgs.len(), 1);
-        let body = &msgs[0].content;
-        assert!(body.contains("404"));
-        assert!(body.contains("wrong/repo"));
-        assert!(body.contains("[Harness]"));
-        assert!(body.contains("Try:"));
-        assert!(!body.contains("is missing required `repo`"));
-    }
-
-    #[test]
     fn tool_failure_nudge_uses_schema_when_args_incomplete() {
         let catalog = tool_catalog::ToolCatalog::new();
         let args = json!({ "repo": "acme/widget" });
@@ -4150,47 +2589,8 @@ mod tests {
             "failed to get pull request",
             &["acme/widget".into()],
         );
-        assert!(msg.contains("Call `pr_get_overview`"));
-    }
-
-    #[test]
-    fn duplicate_tool_nudge_is_generic() {
-        let nudge = duplicate_tool_nudge(
-            "pr_list_changed_files",
-            DuplicateToolBlock::AlreadySucceeded,
-        );
-        assert!(nudge.contains("already fetched"));
-        assert!(!nudge.contains("19258"));
-    }
-
-    #[test]
-    fn tool_transcript_matches_prior_args() {
-        let args = json!({"name": "pr-review"});
-        let content = format_tool_context_message(
-            "skill_load",
-            &args,
-            true,
-            "### pr-review\nbody",
-        );
-        assert!(tool_transcript_matches_args(
-            &content,
-            &args,
-            &canonical_tool_args(&args),
-        ));
-    }
-
-    #[test]
-    fn find_prior_tool_result_body_from_messages() {
-        let args = json!({"repo": "acme/widget", "pr_number": 42});
-        let body = format_tool_context_message("pr_get_overview", &args, true, "PR ok");
-        let msgs = vec![LlmTurnMessage::tool_result_with_id(
-            Some("call_1".into()),
-            "pr_get_overview",
-            body,
-        )];
-        let found = find_prior_tool_result_body(&msgs, "pr_get_overview", &args);
-        assert!(found.is_some());
-        assert!(found.unwrap().contains("PR ok"));
+        assert!(msg.contains("pr_number"));
+        assert!(msg.contains("[Harness]"));
     }
 
     #[test]
@@ -4264,24 +2664,6 @@ mod tests {
         );
         assert_eq!(args["args"]["repo"], json!("acme/widget"));
         assert_eq!(args["args"]["pr_number"], json!(19264));
-    }
-
-    #[test]
-    fn tool_call_json_object_nudge() {
-        let catalog = tool_catalog::ToolCatalog::new();
-        let args = json!({ "name": "pr_get_overview", "args": "not-an-object" });
-        let mut msgs = Vec::new();
-        maybe_push_tool_failure_harness_nudge(
-            &catalog,
-            "tool_call",
-            &args,
-            "args must be a JSON object",
-            &["acme/widget".into()],
-            &mut msgs,
-        );
-        assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.contains("JSON object"));
-        assert!(msgs[0].content.contains("pr_get_overview"));
     }
 
     #[test]
@@ -4441,6 +2823,23 @@ mod tests {
     }
 
     #[test]
+    fn build_context_snapshot_includes_trim_metadata() {
+        use crate::llm::LlmTurnMessage;
+        let budget = TokenBudget::from_config(64_000);
+        let msgs = vec![
+            LlmTurnMessage::new("system", "sys"),
+            LlmTurnMessage::new("user", "[earlier context summary]\n- user asked about CI"),
+            LlmTurnMessage::new("user", "latest question"),
+        ];
+        let snap = build_context_snapshot(&msgs, 2, &budget, &[], &[], None);
+        assert_eq!(snap.context_trimmed_turns, 0);
+        assert_eq!(
+            snap.context_summary_note.as_deref(),
+            Some("earlier turns summarized")
+        );
+    }
+
+    #[test]
     fn build_context_snapshot_panel_shows_full_runtime_not_llm_delta() {
         use crate::engine::format_session_context_message;
         use crate::llm::LlmTurnMessage;
@@ -4474,17 +2873,6 @@ mod tests {
             "context"
         );
         assert_eq!(context_display_role("user", "list open PRs"), "user");
-    }
-
-    #[test]
-    fn format_tool_progress_detail_for_paged_logs() {
-        let args = json!({"offset_lines": 160, "max_lines": 80});
-        let detail = format_tool_progress_detail("ci_get_failed_logs", &args, Duration::from_secs(12));
-        assert_eq!(detail, "page 3, 12s");
-
-        let args = json!({});
-        let detail = format_tool_progress_detail("ci_get_failed_logs", &args, Duration::from_secs(4));
-        assert_eq!(detail, "fetching logs, 4s");
     }
 
     #[test]

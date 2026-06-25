@@ -35,9 +35,7 @@ pub async fn migrate(
                 "source and destination are both {a:?}; pick json→sqlite or sqlite→json"
             )))
         }
-        _ => Err(CoworkerError::Store(
-            "unsupported migrate direction".into(),
-        )),
+        _ => Err(CoworkerError::Store("unsupported migrate direction".into())),
     }
 }
 

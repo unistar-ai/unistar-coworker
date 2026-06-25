@@ -145,8 +145,23 @@ impl ChatDiscoveryState {
     /// Warm federated MCP tool names when present in the registry.
     pub async fn warm_tool_from_registry(&mut self, name: &str, mcp: &crate::mcp::McpPool) {
         self.warm_tool(name);
-        if !self.warmed_tools.contains(name) && mcp.is_mcp_tool_async(name).await {
+        let server_id = mcp.server_id_for_tool(name).await;
+        let is_mcp =
+            server_id.is_some() || mcp.is_mcp_tool_async(name).await;
+        if !self.warmed_tools.contains(name) && is_mcp {
             self.warmed_tools.insert(name.to_string());
+        }
+        if let Some(server_id) = server_id {
+            self.load_configured_server_skills(mcp, &server_id);
+        }
+    }
+
+    /// Load `mcp.servers[].skills` into session discovery when an MCP server is warmed.
+    fn load_configured_server_skills(&mut self, mcp: &crate::mcp::McpPool, server_id: &str) {
+        for skill_name in mcp.server_skills(server_id) {
+            if let Some(skill) = self.skill_registry.get(&skill_name).cloned() {
+                self.warm_skill_tools(&skill);
+            }
         }
     }
 
@@ -286,14 +301,14 @@ mod tests {
     fn bootstrap_warms_skill_tools() {
         use crate::engine::SkillRegistry;
         let registry = SkillRegistry::from_skills(vec![SkillSpec {
-                name: "ci-triage".into(),
-                description: String::new(),
-                body: String::new(),
-                skill_refs: vec![],
-                tool_refs: vec!["ci_get_failure_digest".into()],
-                always_load: false,
-                ..Default::default()
-            }]);
+            name: "ci-triage".into(),
+            description: String::new(),
+            body: String::new(),
+            skill_refs: vec![],
+            tool_refs: vec!["ci_get_failure_digest".into()],
+            always_load: false,
+            ..Default::default()
+        }]);
         let skills = vec![SkillSpec {
             name: "ci-triage".into(),
             description: String::new(),
@@ -303,11 +318,8 @@ mod tests {
             always_load: false,
             ..Default::default()
         }];
-        let state = ChatDiscoveryState::with_bootstrap(
-            "Why is CI failing on PR #42?",
-            registry,
-            &skills,
-        );
+        let state =
+            ChatDiscoveryState::with_bootstrap("Why is CI failing on PR #42?", registry, &skills);
         assert!(state.warmed_tools.contains("ci_get_failure_digest"));
         assert!(!state.warmed_tools.contains("read_file"));
     }
@@ -315,11 +327,8 @@ mod tests {
     #[test]
     fn bootstrap_lazy_cold_start_warms_nothing() {
         use crate::engine::SkillRegistry;
-        let state = ChatDiscoveryState::with_bootstrap(
-            "hello",
-            SkillRegistry::from_skills(vec![]),
-            &[],
-        );
+        let state =
+            ChatDiscoveryState::with_bootstrap("hello", SkillRegistry::from_skills(vec![]), &[]);
         assert!(state.warmed_tools.is_empty());
         assert!(state.loaded_skills.is_empty());
     }
@@ -376,7 +385,9 @@ mod tests {
         assert!(message_looks_like_pr_task(
             "分析这个 PR: https://github.com/acme/widget/pull/42"
         ));
-        assert!(!message_looks_like_pr_task("fix the login bug in src/auth.rs"));
+        assert!(!message_looks_like_pr_task(
+            "fix the login bug in src/auth.rs"
+        ));
     }
 
     #[test]
@@ -428,7 +439,8 @@ mod tests {
             id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             role: ChatRole::Tool,
-            content: "tool_result(skill_load):\nargs: {\"name\":\"pr-review\"}\n\n### pr-review".into(),
+            content: "tool_result(skill_load):\nargs: {\"name\":\"pr-review\"}\n\n### pr-review"
+                .into(),
             ts: Utc::now(),
             tool_name: Some("skill_load".into()),
             tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),
@@ -436,5 +448,51 @@ mod tests {
         state.rehydrate_from_tool_history(&history);
         assert!(state.loaded_skills.contains("pr-review"));
         assert!(state.warmed_tools.contains("pr_get_overview"));
+    }
+
+    #[tokio::test]
+    async fn warm_mcp_tool_loads_configured_server_skills() {
+        use crate::config::{McpConfig, McpExposeConfig, McpServerConfig, McpTransport};
+        use crate::engine::SkillRegistry;
+        use crate::mcp::McpPool;
+        use std::collections::HashMap;
+
+        let registry = SkillRegistry::from_skills(vec![SkillSpec {
+            name: "slack-ops".into(),
+            description: String::new(),
+            body: String::new(),
+            skill_refs: vec![],
+            tool_refs: vec!["slack_post_message".into()],
+            always_load: false,
+            ..Default::default()
+        }]);
+        let mut state = ChatDiscoveryState::with_bootstrap("post to slack", registry, &[]);
+        let pool = McpPool::new(McpConfig {
+            defaults: Default::default(),
+            servers: vec![McpServerConfig {
+                id: "slack".into(),
+                enabled: true,
+                transport: McpTransport::Stdio,
+                command: None,
+                args: vec![],
+                env: HashMap::new(),
+                url: None,
+                headers: HashMap::new(),
+                expose: McpExposeConfig {
+                    prefix: Some("slack_".into()),
+                    allowlist: vec![],
+                    denylist: vec![],
+                },
+                approval: Default::default(),
+                startup: None,
+                timeout_secs: None,
+                skills: vec!["slack-ops".into()],
+            }],
+        });
+        state
+            .warm_tool_from_registry("slack_post_message", &pool)
+            .await;
+        assert!(state.loaded_skills.contains("slack-ops"));
+        assert!(state.warmed_tools.contains("slack_post_message"));
     }
 }

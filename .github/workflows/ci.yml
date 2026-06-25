@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+  # Slim build without headless Chromium (chromiumoxide); default features stay on in release builds.
+  rust-no-default-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check --no-default-features
+        run: cargo check --no-default-features
+
+      - name: cargo test --no-default-features
+        run: cargo test --no-default-features
+
+  # Optional: Playwright smoke tests (Rust build + Chromium). Does not block merge.
+  web-e2e:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web-e2e/package.json
+
+      - name: npm install
+        working-directory: web-e2e
+        run: npm install
+
+      - name: Install Playwright Chromium
+        working-directory: web-e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright smoke tests
+        working-directory: web-e2e
+        run: npm test
+        env:
+          CI: true
+          UNISTAR_BIN: ${{ github.workspace }}/target/debug/unistar-coworker

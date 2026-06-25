@@ -88,9 +88,7 @@ pub fn optional_bool(args: &Value, key: &str, default: bool) -> bool {
         None => default,
         Some(v) if v.is_null() => default,
         Some(v) if let Some(b) = v.as_bool() => b,
-        Some(v) if let Some(s) = v.as_str() => {
-            !s.eq_ignore_ascii_case("false") && s != "0"
-        }
+        Some(v) if let Some(s) = v.as_str() => !s.eq_ignore_ascii_case("false") && s != "0",
         _ => default,
     }
 }

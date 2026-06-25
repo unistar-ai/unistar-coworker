@@ -69,7 +69,24 @@ let ui = {
   sessionList: null,
   sessionListLoading: false,
   sessionMenuBound: false,
+  approvalsSubTab: "pending",
+  approvalHistory: null,
+  approvalHistoryLoading: false,
 };
+
+async function exportChatTranscript() {
+  const res = await apiFetch("/api/chat/export");
+  if (!res) return;
+  const text = await res.text();
+  const sid = state.chat_session_id || "draft";
+  const blob = new Blob([text], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `chat-${sid}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 async function apiFetch(url, options = {}) {
   try {
@@ -289,7 +306,9 @@ function escapeHtml(s) {
 function linkifyPlainText(text) {
   if (!text) return "";
   const escaped = escapeHtml(text);
-  return escaped.replace(
+  return escaped
+    .replace(/\n/g, "<br>")
+    .replace(
     /(https?:\/\/[^\s<]+[^\s<.,;:!?)\]"'])/g,
     '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>',
   );
@@ -323,231 +342,6 @@ function phaseMeta(phase) {
   return PHASE_META[phase] || { label: phase || "Working", cls: "phase-model" };
 }
 
-function inlineMarkdown(s) {
-  if (!s) return "";
-  return s
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, "<em>$1</em>")
-    .replace(/(?<![\w])_([^_]+)_(?![\w])/g, "<em>$1</em>")
-    .replace(/~~(.+?)~~/g, "<del>$1</del>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(
-      /\[([^\]]+)\]\(([^)]+)\)/g,
-      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
-    );
-}
-
-function highlightCode(code, lang) {
-  const L = (lang || "").toLowerCase();
-  const str = (s) => `<span class="tok-string">${s}</span>`;
-  const kw = (s) => `<span class="tok-kw">${s}</span>`;
-  const cm = (s) => `<span class="tok-comment">${s}</span>`;
-  const ky = (s) => `<span class="tok-key">${s}</span>`;
-
-  if (L === "bash" || L === "sh" || L === "shell" || L === "zsh") {
-    return code
-      .replace(/(^|\n)(\s*#.*)/g, (_, prefix, comment) => `${prefix}${cm(comment)}`)
-      .replace(/(&quot;[^&]*&quot;|'[^']*')/g, (m) => str(m))
-      .replace(
-        /\b(if|then|else|elif|fi|for|do|done|echo|cd|exit|export|source|sudo|curl|wget|grep)\b/g,
-        (m) => kw(m),
-      );
-  }
-  if (L === "json") {
-    return code
-      .replace(/(&quot;[^&]*&quot;)(\s*:)/g, (_, k, colon) => `${ky(k)}${colon}`)
-      .replace(/:\s*(&quot;[^&]*&quot;)/g, (_, v) => `: ${str(v)}`)
-      .replace(/\b(true|false|null)\b/g, (m) => kw(m));
-  }
-  if (L === "rust" || L === "rs") {
-    const kws =
-      "fn|let|mut|pub|use|struct|enum|impl|match|if|else|return|async|await|true|false|Some|None|Ok|Err";
-    return code
-      .replace(/(\/\/.*)/g, (m) => cm(m))
-      .replace(/(&quot;[^&]*&quot;)/g, (m) => str(m))
-      .replace(new RegExp(`\\b(${kws})\\b`, "g"), (m) => kw(m));
-  }
-  if (L === "javascript" || L === "js" || L === "typescript" || L === "ts") {
-    const kws =
-      "function|const|let|var|return|if|else|async|await|import|export|from|true|false|null|undefined|class|new";
-    return code
-      .replace(/(\/\/.*)/g, (m) => cm(m))
-      .replace(/(&quot;[^&]*&quot;|`[^`]*`|'[^']*')/g, (m) => str(m))
-      .replace(new RegExp(`\\b(${kws})\\b`, "g"), (m) => kw(m));
-  }
-  return code;
-}
-
-function parseTableBlock(lines, start) {
-  const rows = [];
-  let i = start;
-  while (i < lines.length && lines[i].includes("|")) {
-    rows.push(lines[i]);
-    i++;
-  }
-  if (rows.length < 2) return null;
-  const parseRow = (r) => {
-    const parts = r.trim().split("|").map((c) => c.trim());
-    if (parts[0] === "") parts.shift();
-    if (parts[parts.length - 1] === "") parts.pop();
-    return parts;
-  };
-  if (!/^[\|\s\-:]+$/.test(rows[1])) return null;
-  const header = parseRow(rows[0]).map(inlineMarkdown);
-  const bodyRows = rows.slice(2).map(parseRow);
-  let html =
-    "<div class=\"md-table-wrap\"><table><thead><tr>" +
-    header.map((h) => `<th>${h}</th>`).join("") +
-    "</tr></thead><tbody>";
-  for (const row of bodyRows) {
-    html += "<tr>" + row.map((c) => `<td>${inlineMarkdown(c)}</td>`).join("") + "</tr>";
-  }
-  return { html: html + "</tbody></table></div>", next: i };
-}
-
-function isOrderedListLine(line) {
-  return /^\d+\.\s?/.test(line);
-}
-
-function isBulletListLine(line) {
-  return /^\s*[-*] /.test(line);
-}
-
-function bulletListItemText(line) {
-  const m = line.match(/^\s*[-*]\s+(.*)$/);
-  return m ? m[1] : line;
-}
-
-/** Headings / tables end an ordered-list region; fences and paragraphs may appear between items. */
-function endsOrderedListRegion(lines, i, isBlank) {
-  if (i >= lines.length) return true;
-  let j = i;
-  while (j < lines.length && isBlank(lines[j])) j += 1;
-  if (j >= lines.length) return true;
-  const line = lines[j];
-  if (/^#{1,6}\s/.test(line)) return true;
-  if (/^-{3,}$/.test(line.trim())) return true;
-  if (line.startsWith("&gt;")) return true;
-  if (
-    line.includes("|") &&
-    j + 1 < lines.length &&
-    lines[j + 1].includes("|")
-  ) {
-    return true;
-  }
-  return false;
-}
-
-/** Ordered list with sub-bullets, code fences, and lazy `1.` numbering (PR findings). */
-function parseOrderedListBlock(lines, start, isBlank, isFence) {
-  if (!isOrderedListLine(lines[start])) return null;
-
-  const items = [];
-  let i = start;
-
-  const nextSignificant = (from) => {
-    let j = from;
-    while (j < lines.length && isBlank(lines[j])) j += 1;
-    return j;
-  };
-
-  while (i < lines.length) {
-    if (endsOrderedListRegion(lines, i, isBlank)) break;
-
-    while (i < lines.length) {
-      if (endsOrderedListRegion(lines, i, isBlank)) break;
-      if (isBlank(lines[i])) {
-        i += 1;
-        continue;
-      }
-      if (isFence(lines[i])) {
-        if (items.length) items[items.length - 1] += lines[i].trim();
-        i += 1;
-        continue;
-      }
-      if (isOrderedListLine(lines[i])) break;
-      if (items.length) {
-        items[items.length - 1] += `<br>${inlineMarkdown(lines[i])}`;
-      }
-      i += 1;
-    }
-
-    if (i >= lines.length || !isOrderedListLine(lines[i])) break;
-
-    let itemHtml = inlineMarkdown(lines[i].replace(/^\d+\.\s?/, ""));
-    i += 1;
-    const subBullets = [];
-
-    while (i < lines.length) {
-      if (isBlank(lines[i])) {
-        const j = nextSignificant(i);
-        if (j >= lines.length) {
-          i = j;
-          break;
-        }
-        if (isOrderedListLine(lines[j])) {
-          i = j;
-          break;
-        }
-        if (endsOrderedListRegion(lines, i, isBlank)) break;
-        i += 1;
-        continue;
-      }
-      if (isOrderedListLine(lines[i])) break;
-      if (endsOrderedListRegion(lines, i, isBlank)) break;
-      if (isFence(lines[i])) {
-        itemHtml += lines[i].trim();
-        i += 1;
-        continue;
-      }
-      if (isBulletListLine(lines[i])) {
-        subBullets.push(bulletListItemText(lines[i]));
-        i += 1;
-        continue;
-      }
-      itemHtml += `<br>${inlineMarkdown(lines[i])}`;
-      i += 1;
-    }
-
-    if (subBullets.length) {
-      itemHtml +=
-        "<ul>" +
-        subBullets.map((b) => `<li>${inlineMarkdown(b)}</li>`).join("") +
-        "</ul>";
-    }
-    items.push(`<li>${itemHtml}</li>`);
-  }
-
-  if (!items.length) return null;
-  return { html: `<ol class="md-ol">${items.join("")}</ol>`, next: i };
-}
-
-/** Merge fragmented `<ol><li>…</li></ol>` runs (safety net after loose parsing). */
-function mergeAdjacentOrderedLists(html) {
-  const re = /<ol class="md-ol">(\s*<li>[\s\S]*?<\/li>\s*)<\/ol>/g;
-  let out = html;
-  let prev;
-  let guard = 0;
-  do {
-    prev = out;
-    out = out.replace(
-      /(<ol class="md-ol">\s*<li>[\s\S]*?<\/li>\s*<\/ol>\s*){2,}/g,
-      (chunk) => {
-        const lis = chunk.match(/<li>[\s\S]*?<\/li>/g) || [];
-        return `<ol class="md-ol">${lis.join("")}</ol>`;
-      },
-    );
-    guard += 1;
-  } while (out !== prev && guard < 24);
-  return out.replace(re, '<ol class="md-ol">$1</ol>');
-}
-
-/** Plain text for in-progress assistant stream (avoid full markdown each token). */
-function streamingPlainHtml(text) {
-  if (!text) return "";
-  return escapeHtml(text).replace(/\n/g, "<br>");
-}
-
 function scrollLiveBodyIfNeeded(body) {
   if (!body) return;
   const gap = body.scrollHeight - body.scrollTop - body.clientHeight;
@@ -568,9 +362,6 @@ function paintStreamingBody(body, text) {
   scrollLiveBodyIfNeeded(body);
 }
 
-const REASONING_COLLAPSE_LINES = 6;
-const REASONING_COLLAPSE_CHARS = 420;
-
 function normalizeReasoningText(text) {
   if (!text) return "";
   let s = String(text).trim();
@@ -589,23 +380,6 @@ function reasoningCharCount(text) {
   return normalizeReasoningText(text).length;
 }
 
-function isReasoningLong(text) {
-  const n = normalizeReasoningText(text);
-  if (!n) return false;
-  const lines = n.split("\n");
-  return lines.length > REASONING_COLLAPSE_LINES || n.length > REASONING_COLLAPSE_CHARS;
-}
-
-function reasoningPreviewHtml(text) {
-  const normalized = normalizeReasoningText(text);
-  if (!normalized) return "";
-  let clipped = normalized.split("\n").slice(0, REASONING_COLLAPSE_LINES).join("\n");
-  if (clipped.length > REASONING_COLLAPSE_CHARS) {
-    clipped = `${clipped.slice(0, REASONING_COLLAPSE_CHARS)}…`;
-  }
-  return `<div class="reasoning-plain preview">${escapeHtml(clipped)}</div>`;
-}
-
 function fillReasoningBody(bodyEl, text, { live = false, expanded = true } = {}) {
   const normalized = normalizeReasoningText(text);
   if (!normalized) {
@@ -615,11 +389,14 @@ function fillReasoningBody(bodyEl, text, { live = false, expanded = true } = {})
     bodyEl.classList.toggle("is-live", live);
     return;
   }
+  if (!live && !expanded) {
+    bodyEl.innerHTML = "";
+    bodyEl.classList.toggle("is-live", false);
+    return;
+  }
   let inner;
   if (live) {
     inner = `<div class="reasoning-plain is-live">${streamingPlainHtml(normalized)}</div>`;
-  } else if (!expanded && isReasoningLong(text)) {
-    inner = reasoningPreviewHtml(text);
   } else {
     inner = `<div class="reasoning-md md">${renderMarkdown(normalized)}</div>`;
   }
@@ -651,13 +428,13 @@ function updateReasoningMeta(card, text, { live = false } = {}) {
 }
 
 function buildReasoningCard(text, { live = false, expanded, onToggle } = {}) {
-  const long = isReasoningLong(text);
-  const isExpanded = expanded ?? (!long || live);
+  const isExpanded = expanded ?? live;
+  const hasContent = Boolean(normalizeReasoningText(text));
   const card = el(
     "div",
     "activity-reasoning" +
       (live ? " is-live" : " history-reasoning") +
-      (long && !isExpanded ? " collapsed" : ""),
+      (!live && !isExpanded ? " is-collapsed" : ""),
   );
 
   const head = el("div", "activity-reasoning-head");
@@ -671,11 +448,11 @@ function buildReasoningCard(text, { live = false, expanded, onToggle } = {}) {
   titleWrap.appendChild(meta);
   head.appendChild(titleWrap);
 
-  if (long) {
+  if (!live && hasContent) {
     const btn = el(
       "button",
       "activity-toggle",
-      isExpanded ? "Collapse" : live ? "Expand" : "Show all",
+      isExpanded ? "Collapse" : "Show reasoning",
     );
     btn.type = "button";
     btn.onclick = (e) => {
@@ -705,137 +482,43 @@ function resolveReasoningFullText(block) {
   return parts.filter(Boolean).join("\n\n");
 }
 
-/** Lightweight markdown → HTML (assistant / digest / overview). */
-const MARKDOWN_MAX_CHARS = 24_000;
+function isToolTranscriptLine(line) {
+  return (
+    line.startsWith("  → ") ||
+    line.startsWith("  ✓ ") ||
+    line.startsWith("  ✗ ") ||
+    line.startsWith("  ⚠ ") ||
+    line.startsWith("  ⏳ ") ||
+    line.startsWith("  … ")
+  );
+}
 
-function renderMarkdown(text) {
-  if (!text) return "";
-  if (text.length > MARKDOWN_MAX_CHARS) {
-    const cut = text.slice(0, MARKDOWN_MAX_CHARS);
-    return `<pre class="md-plain">${escapeHtml(cut)}\n… [${text.length - MARKDOWN_MAX_CHARS} more chars]</pre>`;
+function peekSignificantLine(lines, fromIndex, direction) {
+  for (let i = fromIndex + direction; direction < 0 ? i >= 0 : i < lines.length; i += direction) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    return line;
   }
+  return null;
+}
 
-  const fences = [];
-  let src = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-    const i = fences.length;
-    const trimmed = code.trimEnd();
-    const safeLang = escapeHtml(lang || "text");
-    const highlighted = highlightCode(escapeHtml(trimmed), lang);
-    const langBadge = lang ? `<span class="md-code-lang">${safeLang}</span>` : "";
-    fences.push(
-      `<div class="md-code-block">${langBadge}<pre><code class="lang-${safeLang}">${highlighted}</code></pre></div>`,
-    );
-    return `\x00FENCE${i}\x00`;
-  });
-
-  src = escapeHtml(src);
-  const lines = src.split("\n");
-  const out = [];
-  let i = 0;
-
-  const isBlank = (l) => !l.trim();
-  const isFence = (l) => /^\x00FENCE\d+\x00$/.test(l.trim());
-
-  while (i < lines.length) {
-    if (isBlank(lines[i])) {
-      i++;
-      continue;
-    }
-
-    if (isFence(lines[i])) {
-      out.push(lines[i].trim());
-      i++;
-      continue;
-    }
-
-    if (/^-{3,}$/.test(lines[i].trim())) {
-      out.push("<hr>");
-      i++;
-      continue;
-    }
-
-    const hm = lines[i].match(/^(#{1,6})\s+(.+)$/);
-    if (hm) {
-      const level = hm[1].length;
-      out.push(`<h${level}>${inlineMarkdown(hm[2])}</h${level}>`);
-      i++;
-      continue;
-    }
-
-    if (lines[i].startsWith("&gt;")) {
-      const quoteLines = [];
-      while (i < lines.length && lines[i].startsWith("&gt;")) {
-        quoteLines.push(lines[i].replace(/^&gt; ?/, ""));
-        i++;
-      }
-      const inner = quoteLines.map((l) => inlineMarkdown(l)).join("<br>");
-      out.push(`<blockquote><p>${inner}</p></blockquote>`);
-      continue;
-    }
-
-    if (lines[i].includes("|") && i + 1 < lines.length && lines[i + 1].includes("|")) {
-      const table = parseTableBlock(lines, i);
-      if (table) {
-        out.push(table.html);
-        i = table.next;
-        continue;
-      }
-    }
-
-    if (isBulletListLine(lines[i])) {
-      const items = [];
-      while (i < lines.length && isBulletListLine(lines[i])) {
-        let item = bulletListItemText(lines[i]);
-        const taskM = item.match(/^\[([ xX])\]\s*(.*)$/);
-        if (taskM) {
-          const checked = taskM[1] !== " ";
-          items.push(
-            `<li class="task${checked ? " done" : ""}"><span class="md-task" aria-hidden="true">${checked ? "☑" : "☐"}</span> ${inlineMarkdown(taskM[2])}</li>`,
-          );
-        } else {
-          items.push(`<li>${inlineMarkdown(item)}</li>`);
-        }
-        i++;
-      }
-      out.push(`<ul>${items.join("")}</ul>`);
-      continue;
-    }
-
-    if (/^\d+\.\s?/.test(lines[i])) {
-      const block = parseOrderedListBlock(lines, i, isBlank, isFence);
-      if (block) {
-        out.push(block.html);
-        i = block.next;
-        continue;
-      }
-    }
-
-    const para = [];
-    while (
-      i < lines.length &&
-      !isBlank(lines[i]) &&
-      !isFence(lines[i]) &&
-      !/^#{1,6}\s/.test(lines[i]) &&
-      !/^-{3,}$/.test(lines[i].trim()) &&
-      !lines[i].startsWith("&gt;") &&
-      !isBulletListLine(lines[i]) &&
-      !/^\d+\.\s?/.test(lines[i]) &&
-      !(lines[i].includes("|") && i + 1 < lines.length && lines[i + 1].includes("|"))
-    ) {
-      para.push(lines[i]);
-      i++;
-    }
-    if (para.length) {
-      out.push(`<p>${inlineMarkdown(para.join("<br>"))}</p>`);
-    }
-  }
-
-  const html = out.join("\n").replace(/\x00FENCE(\d+)\x00/g, (_, idx) => fences[Number(idx)]);
-  return mergeAdjacentOrderedLists(html);
+/** Short assistant narration between tool calls in the same turn (not the final reply). */
+function isInterimAssistantInToolRun(lines, index) {
+  const line = lines[index];
+  if (!line.startsWith("assistant> ")) return false;
+  const body = line.slice(11).trim();
+  if (!body || body.length > 800 || body.startsWith("{")) return false;
+  if (/^tool_result\(/i.test(body)) return false;
+  const prev = peekSignificantLine(lines, index, -1);
+  if (!prev || !isToolTranscriptLine(prev)) return false;
+  const next = peekSignificantLine(lines, index, 1);
+  if (!next) return false;
+  if (next.startsWith("you> ") || next.startsWith("error> ")) return false;
+  return isToolTranscriptLine(next);
 }
 
 function parseMessage(line) {
-  if (line.startsWith("you> ")) return { role: "you", badge: "You", body: line.slice(5) };
+  if (line.startsWith("you> ")) return { role: "you", badge: "You", body: line.slice(5), md: true };
   if (line.startsWith("assistant> ")) return { role: "assistant", badge: "AI", body: line.slice(11), md: true };
   if (line.startsWith("system> ")) return { role: "system", badge: "system", body: line.slice(8) };
   if (line.startsWith("error> ")) return { role: "error", badge: "error", body: line.slice(7) };
@@ -954,6 +637,14 @@ function splitToolStepGroups(steps) {
       }
       continue;
     }
+    if (step.kind === "interim") {
+      if (pending.length) {
+        pending[pending.length - 1].steps.push(step);
+      } else if (groups.length) {
+        groups[groups.length - 1].push(step);
+      }
+      continue;
+    }
     if (step.kind === "approval") {
       const matchIdx = firstPendingStartIndex(splitToolCall(step.text).name);
       if (matchIdx >= 0) {
@@ -1048,7 +739,15 @@ function buildMessageBlocks(lines) {
         i++;
         continue;
       }
-      if (l.startsWith("you> ") || l.startsWith("assistant> ") || l.startsWith("error> ")) break;
+      if (l.startsWith("you> ") || l.startsWith("error> ")) break;
+      if (l.startsWith("assistant> ")) {
+        if (isInterimAssistantInToolRun(lines, i)) {
+          steps.push({ kind: "interim", text: l.slice(11).trim(), index: i });
+          i++;
+          continue;
+        }
+        break;
+      }
       if (l.startsWith("chat> ")) break;
       if (l.startsWith("system> ")) {
         if (steps.length) {
@@ -1168,6 +867,7 @@ const STEP_ICONS = {
   approval: "✋",
   warn: "⚠",
   reasoning: "💭",
+  interim: "💬",
   meta: "·",
 };
 
@@ -1178,6 +878,9 @@ function stepIcon(step) {
 }
 
 function formatStepText(step) {
+  if (step.kind === "interim") {
+    return truncateMiddle(step.text.replace(/\s+/g, " ").trim(), 96);
+  }
   if (step.kind === "start" && step.args) {
     return `${step.name}(${truncateMiddle(step.args, 72)})`;
   }
@@ -1321,16 +1024,16 @@ function renderToolReasoningNote(parent, domId, texts, stepIndices = []) {
     return stored ? normalizeReasoningText(stored) : normalizeReasoningText(t);
   });
   const full = parts.filter(Boolean).join("\n\n");
-  const long = isReasoningLong(full);
+  const hasContent = Boolean(normalizeReasoningText(full));
   const expanded = ui.expandedReasoningGroups.has(domId);
   const note = el(
     "div",
-    "tool-reasoning-note" + (long && !expanded ? " is-collapsed" : " is-expanded"),
+    "tool-reasoning-note" + (expanded ? " is-expanded" : " is-collapsed"),
   );
 
   const head = el("div", "tool-reasoning-head");
   head.appendChild(el("span", "tool-reasoning-label", "Reasoning"));
-  if (full && normalizeReasoningText(full)) {
+  if (hasContent) {
     head.appendChild(
       el(
         "span",
@@ -1339,11 +1042,11 @@ function renderToolReasoningNote(parent, domId, texts, stepIndices = []) {
       ),
     );
   }
-  if (long) {
+  if (hasContent) {
     const btn = el(
       "button",
       "tool-reasoning-toggle",
-      expanded ? "Collapse" : "Show all",
+      expanded ? "Collapse" : "Show reasoning",
     );
     btn.type = "button";
     btn.onclick = (e) => {
@@ -1360,7 +1063,7 @@ function renderToolReasoningNote(parent, domId, texts, stepIndices = []) {
   note.appendChild(head);
 
   const body = el("div", "tool-reasoning-body");
-  fillReasoningBody(body, full, { expanded: !long || expanded });
+  fillReasoningBody(body, full, { expanded });
   note.appendChild(body);
   parent.appendChild(note);
 }
@@ -1434,7 +1137,12 @@ function renderToolGroup(parent, block, blockId) {
 
   const body = el("div", "tool-card-body");
   const reasoning = block.steps.filter((s) => s.kind === "reasoning");
-  const actionSteps = block.steps.filter((s) => s.kind !== "reasoning" && !(s.kind === "done" && s.output));
+  const interims = block.steps.filter((s) => s.kind === "interim");
+  const actionSteps = block.steps.filter(
+    (s) =>
+      s.kind === "interim" ||
+      (s.kind !== "reasoning" && !(s.kind === "done" && s.output)),
+  );
   const showTimeline = actionSteps.length > 1;
 
   if (reasoning.length) {
@@ -1450,10 +1158,26 @@ function renderToolGroup(parent, block, blockId) {
     for (const step of actionSteps) {
       const row = el("div", `tool-step kind-${step.kind}`);
       row.appendChild(el("span", "tool-step-icon", stepIcon(step)));
-      row.appendChild(el("span", "tool-step-text", formatStepText(step)));
+      if (step.kind === "interim") {
+        const textWrap = el("span", "tool-step-text tool-interim-inline");
+        textWrap.appendChild(el("span", "tool-interim-tag", "Assistant"));
+        const md = el("span", "tool-interim-snippet md");
+        md.innerHTML = renderMarkdown(step.text);
+        textWrap.appendChild(md);
+        row.appendChild(textWrap);
+      } else {
+        row.appendChild(el("span", "tool-step-text", formatStepText(step)));
+      }
       timeline.appendChild(row);
     }
     body.appendChild(timeline);
+  } else if (interims.length === 1 && block.steps.length <= 3) {
+    const note = el("div", "tool-interim-note");
+    note.appendChild(el("span", "tool-interim-tag", "Assistant"));
+    const md = el("div", "tool-interim-body md");
+    md.innerHTML = renderMarkdown(interims[0].text);
+    note.appendChild(md);
+    body.appendChild(note);
   }
   for (const step of block.steps) {
     if (step.kind === "done" && step.output) {
@@ -1481,10 +1205,10 @@ function renderChatBubble(parent, block) {
   const bubble = el("div", "msg-bubble");
   if (block.md) {
     bubble.innerHTML = `<div class="md">${renderMarkdown(block.body)}</div>`;
-  } else if (block.type === "you") {
-    bubble.innerHTML = linkifyPlainText(block.body);
+  } else if (block.type === "you" || block.type === "assistant") {
+    bubble.innerHTML = `<div class="md">${renderMarkdown(block.body)}</div>`;
   } else {
-    bubble.textContent = block.body;
+    bubble.innerHTML = linkifyPlainText(block.body);
   }
   row.appendChild(bubble);
   parent.appendChild(row);
@@ -1598,8 +1322,8 @@ function liveStructureFingerprint() {
     activityFlowKind: flow?.kind || null,
     hasActivityFlow: Boolean(flow),
     tool: state.chat_tool_running || state.chat_tool_pending,
-    hasReasoning: Boolean(state.chat_reasoning),
-    hasStreaming: Boolean(state.chat_streaming),
+    // Stable across reasoning ↔ assistant handoff (avoid tearing down live cards).
+    hasModelOutput: Boolean(state.chat_reasoning || state.chat_streaming),
     thinking: Boolean(
       state.chat_busy &&
         !state.chat_streaming &&
@@ -1609,6 +1333,46 @@ function liveStructureFingerprint() {
         !state.chat_activity_flow,
     ),
   });
+}
+
+function syncLiveModelOutputVisibility(zone) {
+  if (!zone) return;
+  const reasoning = zone.querySelector(".live-model-reasoning");
+  const streaming = zone.querySelector(".live-model-streaming");
+  const showStreaming = Boolean(state.chat_streaming);
+  const showReasoning = Boolean(state.chat_reasoning) && !showStreaming;
+  reasoning?.classList.toggle("hidden", !showReasoning);
+  streaming?.classList.toggle("hidden", !showStreaming);
+}
+
+function patchLiveModelOutput(zone) {
+  if (!zone) return false;
+  syncLiveModelOutputVisibility(zone);
+  if (state.chat_reasoning) {
+    const card = zone.querySelector(".live-model-reasoning");
+    const body = card?.querySelector(".activity-reasoning-body");
+    if (body && card) {
+      paintReasoningBody(body, state.chat_reasoning, true);
+      updateReasoningMeta(card, state.chat_reasoning, { live: true });
+      card.classList.remove("collapsed");
+    }
+  }
+  if (state.chat_streaming) {
+    const body = zone.querySelector(".live-model-streaming .activity-streaming-body");
+    if (body) paintStreamingBody(body, state.chat_streaming);
+  }
+  return true;
+}
+
+function buildLiveModelOutputZone() {
+  const zone = el("div", "activity-model-output");
+  const reasoningCard = buildLiveReasoningCard(state.chat_reasoning || "");
+  reasoningCard.classList.add("live-model-slot", "live-model-reasoning");
+  const streamingCard = buildLiveStreamingCard(state.chat_streaming || "");
+  streamingCard.classList.add("live-model-slot", "live-model-streaming");
+  zone.append(reasoningCard, streamingCard);
+  syncLiveModelOutputVisibility(zone);
+  return zone;
 }
 
 function syncLiveZoneChrome(liveEl) {
@@ -1641,20 +1405,9 @@ function patchLiveToolDetail(liveEl) {
 }
 
 function patchLiveZoneContent(liveEl, activeTool) {
-  if (state.chat_streaming && !state.chat_reasoning && !activeTool) {
-    const body = liveEl.querySelector(".activity-streaming-body");
-    if (!body) return false;
-    paintStreamingBody(body, state.chat_streaming);
-    return true;
-  }
-  if (state.chat_reasoning && !state.chat_streaming && !activeTool) {
-    const card = liveEl.querySelector(".activity-reasoning");
-    const body = card?.querySelector(".activity-reasoning-body");
-    if (!body) return false;
-    paintReasoningBody(body, state.chat_reasoning, true);
-    updateReasoningMeta(card, state.chat_reasoning, { live: true });
-    card.classList.remove("collapsed");
-    return true;
+  const modelZone = liveEl.querySelector(".activity-model-output");
+  if ((state.chat_reasoning || state.chat_streaming) && !activeTool) {
+    if (modelZone) return patchLiveModelOutput(modelZone);
   }
   if (activeTool && !state.chat_reasoning && !state.chat_streaming) {
     return patchLiveToolDetail(liveEl);
@@ -1759,17 +1512,16 @@ function syncLiveZone(liveEl) {
       ),
     );
   }
-  if (state.chat_reasoning) {
-    stack.appendChild(buildLiveReasoningCard(state.chat_reasoning));
+  if (state.chat_reasoning || state.chat_streaming) {
+    const zone = buildLiveModelOutputZone();
+    patchLiveModelOutput(zone);
+    stack.appendChild(zone);
   }
   if (state.chat_reasoning_compressing) {
     stack.appendChild(buildLiveSummarizingCard());
   }
   if (state.chat_activity_flow) {
     stack.appendChild(buildLiveActivityFlowCard(state.chat_activity_flow));
-  }
-  if (state.chat_streaming) {
-    stack.appendChild(buildLiveStreamingCard(state.chat_streaming));
   }
   if (
     state.chat_busy &&
@@ -1822,11 +1574,26 @@ function ctxStatsFingerprint(c) {
     used,
     pct,
     rev: c.runtime_context_revision,
+    trimmed: c.context_trimmed_turns || 0,
+    summaryNote: c.context_summary_note || "",
     tool_names: c.tool_names,
     tools_body: (c.tools_body || "").slice(0, 96),
     skills: (c.skill_blocks || []).map((s) => `${s.name}:${s.tokens}:${(s.body || "").slice(0, 48)}`),
     expandedSkills: [...ui.expandedCtxSkills],
   });
+}
+
+function ctxTrimSummaryHtml(c) {
+  const note = (c.context_summary_note || "").trim();
+  if (note) {
+    return `<div class="ctx-trim-note" title="Context trimming / summarization">${escapeHtml(note)}</div>`;
+  }
+  const trimmed = c.context_trimmed_turns || 0;
+  if (trimmed > 0) {
+    const label = trimmed === 1 ? "1 earlier turn omitted" : `${trimmed} earlier turns omitted`;
+    return `<div class="ctx-trim-note" title="Context trimming / summarization">${escapeHtml(label)}</div>`;
+  }
+  return "";
 }
 
 function ctxStatsHtml(c) {
@@ -1835,6 +1602,7 @@ function ctxStatsHtml(c) {
   const limit = c.context_limit || budget;
   const pct = Math.min(100, Math.round((used / budget) * 100));
   const barCls = pct >= 95 ? "err" : pct >= 80 ? "warn" : "";
+  const trimHtml = ctxTrimSummaryHtml(c);
   return `
     <div class="ctx-stat-grid">
       <span class="ctx-chip"><span class="ctx-chip-k">Turn</span><strong>${c.turn}</strong></span>
@@ -1842,6 +1610,7 @@ function ctxStatsHtml(c) {
       <span class="ctx-chip"><span class="ctx-chip-k">Tools</span><strong>${formatTokens(c.tools_tokens)}</strong></span>
       <span class="ctx-chip"><span class="ctx-chip-k">Skills</span><strong>${formatTokens(c.skills_tokens)}</strong></span>
     </div>
+    ${trimHtml}
     <div class="ctx-budget-row">
       <div class="token-bar ctx-budget-bar ${barCls}"><span style="width:${pct}%"></span></div>
       <span class="ctx-budget-label">${formatTokens(used)} / ${formatTokens(budget)} <span class="ctx-budget-of">(${pct}%)</span></span>
@@ -2426,6 +2195,22 @@ function updateMessagesHeader(shell) {
   const header = shell.querySelector(".messages-header");
   if (!header) return;
 
+  let autoBadge = header.querySelector(".auto-approve-badge");
+  if (state.auto_approve_mutations) {
+    if (!autoBadge) {
+      autoBadge = el("span", "auto-approve-badge");
+      autoBadge.title = "Mutating GitHub and MCP tools run without confirmation";
+      autoBadge.setAttribute("aria-label", "Auto-approve enabled");
+      const title = header.querySelector(".messages-title");
+      header.insertBefore(autoBadge, title?.nextSibling || null);
+    }
+    const label = "Auto-approve ON — mutating tools run without confirmation";
+    if (autoBadge.textContent !== label) autoBadge.textContent = label;
+    autoBadge.classList.remove("hidden");
+  } else if (autoBadge) {
+    autoBadge.classList.add("hidden");
+  }
+
   updateSessionPicker(header);
   let actions = header.querySelector(".messages-header-actions");
   if (!actions) {
@@ -2442,6 +2227,15 @@ function updateMessagesHeader(shell) {
   }
   const hasHistory = (state.chat_lines || []).length > 0;
   clearBtn.classList.toggle("hidden", !hasHistory || state.chat_busy);
+
+  let exportBtn = actions.querySelector(".btn-header-export");
+  if (!exportBtn) {
+    exportBtn = el("button", "btn-header-action btn-header-export", "Export");
+    exportBtn.type = "button";
+    exportBtn.onclick = exportChatTranscript;
+    actions.insertBefore(exportBtn, clearBtn);
+  }
+  exportBtn.classList.toggle("hidden", !hasHistory);
 
   let ctxBtn = actions.querySelector(".btn-header-ctx");
   if (!ctxBtn) {
@@ -2476,7 +2270,7 @@ function updateChatInput(shell) {
   if (textarea.value !== ui.chatDraft) textarea.value = ui.chatDraft;
   const ph = state.chat_busy
     ? "Waiting for model…"
-    : "Message… (Enter send · Shift+Enter newline · /help · /clear · /new)";
+    : "Message… (Enter newline · Shift+Enter send · /help · /clear · /new)";
   if (textarea.placeholder !== ph) textarea.placeholder = ph;
   if (textarea.disabled !== state.chat_busy) textarea.disabled = state.chat_busy;
   if (document.activeElement === textarea && pos != null) {
@@ -2509,7 +2303,7 @@ function bindChatShell(shell) {
     autoResizeTextarea(textarea);
   };
   textarea.onkeydown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && e.shiftKey) {
       e.preventDefault();
       shell.querySelector(".chat-input .btn-primary")?.click();
     }
@@ -2631,9 +2425,13 @@ function updateStatus() {
     else parts.push("chat");
   }
   if (ui.statusError) parts.push(ui.statusError);
+  if (state.auto_approve_mutations) {
+    parts.push("auto-approve ON");
+  }
   const statusText = parts.join(" · ");
   s.title = statusText;
   s.classList.toggle("is-error", Boolean(ui.statusError));
+  s.classList.toggle("is-warn", Boolean(state.auto_approve_mutations) && !ui.statusError);
   if (s.textContent !== statusText) s.textContent = statusText;
 
   if (state.tab === "chat" && state.chat_context_visible) {
@@ -2920,36 +2718,101 @@ function renderPrs(main) {
 
 function renderApprovals(main) {
   const panel = el("div", "panel");
+  const subTab = ui.approvalsSubTab || "pending";
+  const toolbar = el("div", "toolbar approval-subtabs");
+  const pendingBtn = el(
+    "button",
+    `btn btn-ghost${subTab === "pending" ? " is-active" : ""}`,
+    "Pending",
+  );
+  pendingBtn.onclick = () => {
+    ui.approvalsSubTab = "pending";
+    scheduleRender(true);
+  };
+  const historyBtn = el(
+    "button",
+    `btn btn-ghost${subTab === "history" ? " is-active" : ""}`,
+    "History",
+  );
+  historyBtn.onclick = () => {
+    ui.approvalsSubTab = "history";
+    if (!ui.approvalHistory && !ui.approvalHistoryLoading) {
+      loadApprovalHistory();
+    } else {
+      scheduleRender(true);
+    }
+  };
+  toolbar.append(pendingBtn, historyBtn);
+  panel.appendChild(toolbar);
+
+  if (subTab === "history") {
+    renderApprovalHistory(panel);
+  } else {
+    renderApprovalPending(panel);
+  }
+  main.appendChild(panel);
+}
+
+function renderApprovalPending(panel) {
   const approvals = state.approvals || [];
   if (!approvals.length) {
     panel.appendChild(el("div", "empty", "No pending approvals"));
-  } else {
-    for (const a of approvals) {
-      const parsed = parseApprovalDescription(a.description, a.kind?.replace(/_/g, " "));
-      const card = el("div", "approval-card" + (parsed.verdict === "REJECT" ? " verdict-reject" : ""));
-      const header = el("div", "approval-card-header");
-      const metaParts = [];
-      if (a.repo) metaParts.push(escapeHtml(a.repo));
-      if (a.pr_number != null) metaParts.push(`#${a.pr_number}`);
-      if (a.status) metaParts.push(escapeHtml(a.status));
-      header.innerHTML = `<h4>${escapeHtml(a.kind.replace(/_/g, " "))}</h4>${
-        metaParts.length ? `<div class="approval-card-meta">${metaParts.join(" · ")}</div>` : ""
-      }`;
-      card.appendChild(header);
-      card.appendChild(buildApprovalDescription(parsed));
-      const actions = el("div", "approval-actions");
-      const row = el("div", "approval-btn-row");
-      const no = el("button", `btn ${parsed.verdict === "REJECT" ? "btn-primary" : "btn-danger"}`, "Deny");
-      const ok = el("button", `btn ${parsed.verdict === "REJECT" ? "btn-warn" : "btn-primary"}`, parsed.verdict === "REJECT" ? "Approve anyway" : "Approve");
-      ok.onclick = () => decide(a.id, true);
-      no.onclick = () => decide(a.id, false);
-      row.append(no, ok);
-      actions.appendChild(row);
-      card.appendChild(actions);
-      panel.appendChild(card);
-    }
+    return;
   }
-  main.appendChild(panel);
+  for (const a of approvals) {
+    const toolName = approvalKindToToolName(a.kind);
+    const parsed = parseApprovalDescription(a.description, toolName);
+    const card = el("div", "approval-card" + (parsed.verdict === "REJECT" ? " verdict-reject" : ""));
+    const header = el("div", "approval-card-header");
+    const metaParts = [];
+    if (a.repo) metaParts.push(escapeHtml(a.repo));
+    if (a.pr_number != null) metaParts.push(`#${a.pr_number}`);
+    if (a.status) metaParts.push(escapeHtml(a.status));
+    header.innerHTML = `<h4>${escapeHtml(toolName.replace(/_/g, " "))}</h4>${
+      metaParts.length ? `<div class="approval-card-meta">${metaParts.join(" · ")}</div>` : ""
+    }`;
+    card.appendChild(header);
+    card.appendChild(buildApprovalPayload(toolName, resolveApprovalToolArgs(a), a));
+    card.appendChild(buildApprovalDescription(parsed));
+    const actions = el("div", "approval-actions");
+    const row = el("div", "approval-btn-row");
+    const no = el("button", `btn ${parsed.verdict === "REJECT" ? "btn-primary" : "btn-danger"}`, "Deny");
+    const ok = el("button", `btn ${parsed.verdict === "REJECT" ? "btn-warn" : "btn-primary"}`, parsed.verdict === "REJECT" ? "Approve anyway" : "Approve");
+    ok.onclick = () => decide(a.id, true);
+    no.onclick = () => decide(a.id, false);
+    row.append(no, ok);
+    actions.appendChild(row);
+    card.appendChild(actions);
+    panel.appendChild(card);
+  }
+}
+
+function renderApprovalHistory(panel) {
+  if (ui.approvalHistoryLoading) {
+    panel.appendChild(el("div", "empty", "Loading history…"));
+    return;
+  }
+  const history = ui.approvalHistory || [];
+  if (!history.length) {
+    panel.appendChild(el("div", "empty", "No approval history"));
+    return;
+  }
+  const list = el("div", "approval-history-list");
+  for (const a of history) {
+    list.appendChild(buildApprovalHistorySummary(a));
+  }
+  panel.appendChild(list);
+}
+
+async function loadApprovalHistory() {
+  if (ui.approvalHistoryLoading) return;
+  ui.approvalHistoryLoading = true;
+  scheduleRender(true);
+  const res = await apiFetch("/api/approvals/history?limit=50");
+  ui.approvalHistoryLoading = false;
+  if (!res) return;
+  ui.approvalHistory = await res.json();
+  scheduleRender(true);
 }
 
 async function decide(id, approve) {
@@ -2958,6 +2821,7 @@ async function decide(id, approve) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ approve }),
   });
+  ui.approvalHistory = null;
 }
 
 function renderLogs(main) {
@@ -3010,19 +2874,33 @@ function renderConfig(main) {
   </dl>`;
   grid.appendChild(gh);
 
-  const mcpCard = el("div", "card");
-  const mcpRows = (state.mcp_servers || [])
-    .map((s) => {
-      const status = s.connected
-        ? `ok (${s.tool_count || 0} tools${s.last_rpc_ms != null ? `, ${s.last_rpc_ms}ms` : ""})`
-        : s.last_error
-          ? `err (${escapeHtml(s.last_error)})`
-          : "offline";
-      const cls = s.connected ? "status-ok" : s.last_error ? "status-err" : "";
-      return `<dt>mcp[${escapeHtml(s.id)}]</dt><dd class="${cls}">${escapeHtml(status)}</dd>`;
-    })
-    .join("");
-  mcpCard.innerHTML = `<h3>MCP</h3><dl>${mcpRows || "<dt>—</dt><dd>no servers configured</dd>"}</dl>`;
+  const mcpCard = el("div", "card mcp-config-card");
+  const servers = state.mcp_servers || [];
+  if (servers.length === 0) {
+    mcpCard.innerHTML = "<h3>MCP</h3><p class=\"muted\">no servers configured</p>";
+  } else {
+    const head = el("h3", "", "MCP");
+    const table = el("table", "config-table mcp-config-table");
+    const thead = el("thead");
+    thead.innerHTML = "<tr><th>Server</th><th>Status</th><th>Tools</th><th>RPC</th><th>Error</th></tr>";
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    for (const s of servers) {
+      const row = el("tr");
+      const statusCls = s.connected ? "status-ok" : s.last_error ? "status-err" : "";
+      const status = s.connected ? "connected" : s.last_error ? "error" : "offline";
+      const rpc =
+        s.last_rpc_ms != null ? `${s.last_rpc_ms}ms` : "—";
+      row.innerHTML = `<td>${escapeHtml(s.id)}</td>
+        <td class="${statusCls}">${escapeHtml(status)}</td>
+        <td>${escapeHtml(String(s.tool_count ?? 0))}</td>
+        <td>${escapeHtml(rpc)}</td>
+        <td>${s.last_error ? escapeHtml(s.last_error) : "—"}</td>`;
+      tbody.appendChild(row);
+    }
+    table.appendChild(tbody);
+    mcpCard.append(head, table);
+  }
   grid.appendChild(mcpCard);
 
   const actions = el("div", "card");
@@ -3035,248 +2913,6 @@ function renderConfig(main) {
   grid.appendChild(actions);
 
   main.appendChild(grid);
-}
-
-function clearApprovalArmTimer() {
-  if (ui.approvalArmTimer != null) {
-    clearTimeout(ui.approvalArmTimer);
-    ui.approvalArmTimer = null;
-  }
-}
-
-function approvalIsArmed(d) {
-  return Boolean(d.approve_armed || Date.now() >= ui.approvalArmAt);
-}
-
-function scheduleApprovalArmRefresh() {
-  clearApprovalArmTimer();
-  const wait = Math.max(0, ui.approvalArmAt - Date.now());
-  if (wait === 0) return;
-  ui.approvalArmTimer = setTimeout(() => {
-    ui.approvalArmTimer = null;
-    scheduleRender(true);
-  }, wait + 5);
-}
-
-function syncApprovalArmDeadline(d) {
-  if (d.id !== ui.approvalDialogId) {
-    ui.approvalDialogId = d.id;
-    const ms = Number(d.approve_arm_ms_remaining) || 0;
-    ui.approvalArmAt = Date.now() + ms;
-    scheduleApprovalArmRefresh();
-    return;
-  }
-  if (!approvalIsArmed(d) && ui.approvalArmTimer == null) {
-    scheduleApprovalArmRefresh();
-  }
-}
-
-function parseApprovalDescription(description, toolName) {
-  const raw = (description || "").trim();
-  let verdict = null;
-  let source = "human";
-  let issues = [];
-  let summary = raw;
-
-  const m = raw.match(/^Chat:\s*([\w.-]+)\s*[—–-]\s*LLM safety review\s+(APPROVE|REJECT)\s*\(([\s\S]+)\)\s*$/i);
-  if (m) {
-    source = "llm-review";
-    toolName = toolName || m[1];
-    verdict = m[2].toUpperCase();
-    const body = m[3].trim();
-    issues = body.split(/\s*;\s*/).map((s) => s.trim()).filter(Boolean);
-    if (issues.length <= 1 && body.length > 100) {
-      issues = body.split(/(?<=[。；!！?？])\s+/).map((s) => s.trim()).filter(Boolean);
-    }
-    summary = issues[0] || body;
-  } else if (/\bREJECT\b/i.test(raw)) {
-    verdict = "REJECT";
-    source = "llm-review";
-  } else if (/\bAPPROVE\b/i.test(raw)) {
-    verdict = "APPROVE";
-    source = "llm-review";
-  }
-
-  return { raw, source, verdict, summary, issues, toolName: toolName || "tool" };
-}
-
-function buildApprovalDescription(parsed) {
-  const wrap = el("div", "approval-detail");
-  if (parsed.source === "llm-review") {
-    const banner = el("div", `approval-verdict-banner verdict-${(parsed.verdict || "unknown").toLowerCase()}`);
-    const icon = parsed.verdict === "REJECT" ? "⛔" : parsed.verdict === "APPROVE" ? "✓" : "⚠";
-    banner.appendChild(el("span", "approval-verdict-icon", icon));
-    const text = el("div", "approval-verdict-text");
-    text.appendChild(el("strong", "", `LLM safety review · ${parsed.verdict || "REVIEW"}`));
-    text.appendChild(el("span", "", parsed.verdict === "REJECT"
-      ? "Automated review flagged risks — read before approving."
-      : "Review passed — confirm to proceed."));
-    banner.appendChild(text);
-    wrap.appendChild(banner);
-  }
-
-  if (parsed.issues.length > 1) {
-    const list = el("ul", "approval-issues");
-    for (const issue of parsed.issues) {
-      list.appendChild(el("li", "", issue));
-    }
-    wrap.appendChild(list);
-  } else if (parsed.summary) {
-    const body = el("div", "approval-summary", parsed.summary);
-    wrap.appendChild(body);
-  }
-
-  if (parsed.raw.length > 280 && parsed.issues.length <= 1) {
-    const more = el("details", "approval-more");
-    more.appendChild(el("summary", "", "Full review text"));
-    more.appendChild(el("pre", "approval-raw", parsed.raw));
-    wrap.appendChild(more);
-  }
-
-  return wrap;
-}
-
-function buildApprovalActions(d, armed, deciding, parsed) {
-  const actions = el("div", "approval-actions");
-  if (deciding) {
-    actions.appendChild(el("div", "approval-wait", "Sending decision…"));
-    return actions;
-  }
-
-  const rejectRecommended = parsed.verdict === "REJECT";
-  const hint = el("div", "approval-hint", rejectRecommended
-    ? "Deny is recommended when safety review rejected the action."
-    : "Mutating action — approve only if you trust this operation.");
-  actions.appendChild(hint);
-
-  const row = el("div", "approval-btn-row");
-  const no = el("button", `btn ${rejectRecommended ? "btn-primary" : "btn-danger"}`, rejectRecommended ? "Deny (recommended)" : "Deny");
-  no.onclick = () => decide(d.id, false);
-
-  const msLeft = Math.max(0, ui.approvalArmAt - Date.now());
-  const okLabel = armed
-    ? (rejectRecommended ? "Approve anyway" : "Approve")
-    : `Approve (${Math.max(1, Math.ceil(msLeft / 50) * 50)}ms)`;
-  const ok = el("button", `btn ${rejectRecommended ? "btn-warn" : "btn-primary"}`, okLabel);
-  ok.disabled = !armed;
-  ok.onclick = () => decide(d.id, true);
-
-  row.append(no, ok);
-  actions.appendChild(row);
-  return actions;
-}
-
-function buildApprovalBox(d, armed, deciding) {
-  const parsed = parseApprovalDescription(d.description, d.tool_name);
-  const rejectRecommended = parsed.verdict === "REJECT";
-  const box = el("div", "approval-box" + (rejectRecommended ? " verdict-reject" : ""));
-
-  const head = el("div", "approval-head");
-  head.appendChild(el("div", "approval-head-icon", "⚠"));
-  const titles = el("div", "approval-head-text");
-  titles.appendChild(el("h3", "", deciding ? "Processing…" : "Approval required"));
-  titles.appendChild(el("div", "approval-subtitle", "Mutating tool needs your confirmation"));
-  head.appendChild(titles);
-  box.appendChild(head);
-
-  const toolRow = el("div", "approval-tool-row");
-  toolRow.appendChild(el("span", "approval-tool-label", "Tool"));
-  toolRow.appendChild(el("code", "approval-tool-name", parsed.toolName));
-  box.appendChild(toolRow);
-
-  box.appendChild(buildApprovalDescription(parsed));
-  box.appendChild(buildApprovalActions(d, armed, deciding, parsed));
-  return box;
-}
-
-function patchApprovalArmButtons(box, armed, parsed) {
-  const row = box.querySelector(".approval-btn-row");
-  if (!row || row.children.length < 2) return false;
-  const no = row.children[0];
-  const ok = row.children[1];
-  const rejectRecommended = parsed.verdict === "REJECT";
-  const msLeft = Math.max(0, ui.approvalArmAt - Date.now());
-  const okLabel = armed
-    ? (rejectRecommended ? "Approve anyway" : "Approve")
-    : `Approve (${Math.max(1, Math.ceil(msLeft / 50) * 50)}ms)`;
-  ok.textContent = okLabel;
-  ok.disabled = !armed;
-  if (no && rejectRecommended) no.textContent = "Deny (recommended)";
-  return true;
-}
-
-function updateApprovalModal() {
-  const d = state?.approval_dialog;
-  if (!d) {
-    clearApprovalArmTimer();
-    ui.approvalDialogId = null;
-    ui.approvalArmAt = 0;
-    document.querySelectorAll(".approval-modal").forEach((n) => n.remove());
-    document.removeEventListener("keydown", onApprovalKeydown);
-    return;
-  }
-
-  syncApprovalArmDeadline(d);
-  const armed = approvalIsArmed(d);
-  const deciding = Boolean(d.deciding);
-  const parsed = parseApprovalDescription(d.description, d.tool_name);
-  const stableFp = JSON.stringify({
-    id: d.id,
-    deciding,
-    tool: d.tool_name,
-    desc: d.description,
-    verdict: parsed.verdict,
-  });
-  const armFp = JSON.stringify({ armed, ms: Math.max(0, ui.approvalArmAt - Date.now()) });
-
-  let modal = document.querySelector(".approval-modal");
-  if (modal?.dataset.stableFp === stableFp && !deciding) {
-    const box = modal.querySelector(".approval-box");
-    if (box && modal.dataset.armFp !== armFp) {
-      patchApprovalArmButtons(box, armed, parsed);
-      modal.dataset.armFp = armFp;
-    }
-    return;
-  }
-
-  const fp = stableFp + armFp;
-  if (modal?.dataset.fp === fp) return;
-
-  if (!modal) {
-    modal = el("div", "approval-modal");
-    modal.onclick = (e) => {
-      if (e.target === modal && !state.approval_dialog?.deciding) {
-        decide(state.approval_dialog.id, false);
-      }
-    };
-    document.body.appendChild(modal);
-    document.addEventListener("keydown", onApprovalKeydown);
-  }
-  modal.dataset.fp = fp;
-  modal.dataset.stableFp = stableFp;
-  modal.dataset.armFp = armFp;
-  modal.replaceChildren(buildApprovalBox(d, armed, deciding));
-}
-
-function onApprovalKeydown(e) {
-  if (!state?.approval_dialog || state.approval_dialog.deciding) return;
-  const d = state.approval_dialog;
-  if (e.key === "Escape") {
-    e.preventDefault();
-    decide(d.id, false);
-    return;
-  }
-  if (e.key === "y" || e.key === "Y") {
-    if (!approvalIsArmed(d)) return;
-    e.preventDefault();
-    decide(d.id, true);
-    return;
-  }
-  if (e.key === "Enter" && !e.shiftKey) {
-    if (!approvalIsArmed(d)) return;
-    e.preventDefault();
-    decide(d.id, true);
-  }
 }
 
 function syncSelectionFromState() {
@@ -3303,7 +2939,12 @@ function mainViewFingerprint() {
         sort: state.pr_sort,
       });
     case "approvals":
-      return JSON.stringify(state.approvals);
+      return JSON.stringify({
+        pending: state.approvals,
+        sub: ui.approvalsSubTab || "pending",
+        history: ui.approvalHistory,
+        loading: ui.approvalHistoryLoading,
+      });
     case "logs":
       return JSON.stringify({ logs: state.logs, filter: state.log_filter });
     case "config":
@@ -3313,6 +2954,7 @@ function mainViewFingerprint() {
         llm: state.llm_model,
         llm_ok: state.llm_ok,
         gh_ok: state.github_ok,
+        mcp_servers: state.mcp_servers,
       });
     default:
       return state.tab;

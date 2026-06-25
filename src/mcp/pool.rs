@@ -6,6 +6,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::config::{McpConfig, McpMutatingPolicy, McpServerConfig, McpStartup};
+use crate::engine::workflows::check_workflow_mcp_allowed;
 use crate::error::{CoworkerError, Result};
 use crate::mcp::cancel::{is_cancelled_error, McpCancel};
 use crate::mcp::cap::truncate_tool_output;
@@ -77,13 +78,37 @@ impl McpPool {
         out
     }
 
-    pub async fn registry_entries_async(&self) -> Vec<GlobalToolEntry> {
-        self.registry
+    /// Configured `skills:` for an MCP server (empty when unknown or unset).
+    pub fn server_skills(&self, server_id: &str) -> Vec<String> {
+        self.servers
             .read()
-            .await
-            .entries()
-            .cloned()
-            .collect()
+            .expect("mcp servers lock")
+            .iter()
+            .find(|s| s.id == server_id)
+            .map(|s| s.skills.clone())
+            .unwrap_or_default()
+    }
+
+    /// Resolve federated tool name → server id (registry, then expose prefix).
+    pub async fn server_id_for_tool(&self, global_name: &str) -> Option<String> {
+        if let Some(entry) = self.resolve_entry(global_name).await {
+            return Some(entry.server_id);
+        }
+        self.server_id_for_tool_by_prefix(global_name)
+    }
+
+    fn server_id_for_tool_by_prefix(&self, global_name: &str) -> Option<String> {
+        self.servers
+            .read()
+            .expect("mcp servers lock")
+            .iter()
+            .filter(|s| s.enabled)
+            .find(|s| global_name.starts_with(&expose_prefix(s)))
+            .map(|s| s.id.clone())
+    }
+
+    pub async fn registry_entries_async(&self) -> Vec<GlobalToolEntry> {
+        self.registry.read().await.entries().cloned().collect()
     }
 
     pub async fn is_mcp_tool_async(&self, name: &str) -> bool {
@@ -151,6 +176,7 @@ impl McpPool {
                 "{global_name} is a mutating MCP tool — approval required"
             )));
         }
+        check_workflow_mcp_allowed(global_name, entry.mutating)?;
         self.ensure_connected(&entry.server_id).await?;
         let timeout_secs = self.server_timeout_for_id(&entry.server_id).await;
         let started = Instant::now();
@@ -181,7 +207,10 @@ impl McpPool {
                 self.set_rpc_ok(&entry.server_id, elapsed).await;
                 Ok(truncate_tool_output(
                     &text,
-                    self.defaults.read().expect("mcp defaults lock").max_output_chars,
+                    self.defaults
+                        .read()
+                        .expect("mcp defaults lock")
+                        .max_output_chars,
                 ))
             }
             Err(e) => {
@@ -209,12 +238,13 @@ impl McpPool {
 
     /// Read `mcp+{server_id}://...` resources via MCP `resources/read`.
     pub async fn read_federated_resource(&self, uri: &str, cancel: McpCancel) -> Result<String> {
+        check_workflow_mcp_allowed("resource_read", false)?;
         let rest = uri
             .strip_prefix("mcp+")
             .ok_or_else(|| CoworkerError::Workflow(format!("unsupported resource URI {uri:?}")))?;
-        let (server_id, resource_uri) = rest.split_once("://").ok_or_else(|| {
-            CoworkerError::Workflow(format!("invalid mcp resource URI {uri:?}"))
-        })?;
+        let (server_id, resource_uri) = rest
+            .split_once("://")
+            .ok_or_else(|| CoworkerError::Workflow(format!("invalid mcp resource URI {uri:?}")))?;
         self.ensure_connected(server_id).await?;
         let timeout_secs = self.server_timeout_for_id(server_id).await;
         let started = Instant::now();
@@ -237,13 +267,14 @@ impl McpPool {
         let elapsed = started.elapsed().as_millis();
         match result {
             Ok(text) => {
-                tracing::info!(
-                    "mcp.rpc server={server_id} tool=resources/read ms={elapsed}"
-                );
+                tracing::info!("mcp.rpc server={server_id} tool=resources/read ms={elapsed}");
                 self.set_rpc_ok(server_id, elapsed).await;
                 Ok(truncate_tool_output(
                     &text,
-                    self.defaults.read().expect("mcp defaults lock").max_output_chars,
+                    self.defaults
+                        .read()
+                        .expect("mcp defaults lock")
+                        .max_output_chars,
                 ))
             }
             Err(e) => {
@@ -260,7 +291,10 @@ impl McpPool {
                     "mcp.rpc server={server_id} tool=resources/read ms={elapsed} err={e}"
                 );
                 self.set_rpc_ok(server_id, elapsed).await;
-                Err(mcp_tool_rpc_error(&format!("mcp+{server_id}://{resource_uri}"), &e))
+                Err(mcp_tool_rpc_error(
+                    &format!("mcp+{server_id}://{resource_uri}"),
+                    &e,
+                ))
             }
         }
     }
@@ -309,7 +343,11 @@ impl McpPool {
     }
 
     async fn server_timeout_for_id(&self, server_id: &str) -> u64 {
-        let default_secs = self.defaults.read().expect("mcp defaults lock").timeout_secs;
+        let default_secs = self
+            .defaults
+            .read()
+            .expect("mcp defaults lock")
+            .timeout_secs;
         self.servers
             .read()
             .expect("mcp servers lock")
@@ -330,7 +368,9 @@ impl McpPool {
             .iter()
             .find(|s| s.id == server_id)
             .cloned()
-            .ok_or_else(|| CoworkerError::Other(anyhow::anyhow!("unknown mcp server {server_id:?}")))?;
+            .ok_or_else(|| {
+                CoworkerError::Other(anyhow::anyhow!("unknown mcp server {server_id:?}"))
+            })?;
         if !server.enabled {
             return Err(CoworkerError::Other(anyhow::anyhow!(
                 "mcp server {server_id:?} is disabled"
@@ -361,7 +401,11 @@ impl McpPool {
 
     async fn connect_server(&self, server: &McpServerConfig) -> Result<()> {
         let started = Instant::now();
-        let default_secs = self.defaults.read().expect("mcp defaults lock").timeout_secs;
+        let default_secs = self
+            .defaults
+            .read()
+            .expect("mcp defaults lock")
+            .timeout_secs;
         let timeout_secs = server_timeout(server, default_secs);
         let result: Result<(McpClient, Vec<McpToolDescriptor>)> = async {
             let mut client = McpClient::connect(server, timeout_secs).await?;
@@ -378,10 +422,10 @@ impl McpPool {
                     .entries()
                     .filter(|e| e.server_id == server.id)
                     .count() as u32;
-                self.sessions.write().await.insert(
-                    server.id.clone(),
-                    ConnectedServer { client, tools },
-                );
+                self.sessions
+                    .write()
+                    .await
+                    .insert(server.id.clone(), ConnectedServer { client, tools });
                 self.set_connected(&server.id, tool_count, started.elapsed().as_millis())
                     .await;
                 tracing::info!(
@@ -500,8 +544,7 @@ mod tests {
 
     use super::*;
     use crate::config::{
-        McpApprovalConfig, McpConfig, McpDefaults, McpExposeConfig,
-        McpServerConfig, McpTransport,
+        McpApprovalConfig, McpConfig, McpDefaults, McpExposeConfig, McpServerConfig, McpTransport,
     };
 
     fn mock_http_server(url: &str) -> McpServerConfig {
@@ -522,6 +565,7 @@ mod tests {
             approval: McpApprovalConfig::default(),
             startup: Some(McpStartup::Eager),
             timeout_secs: Some(5),
+            skills: vec![],
         }
     }
 

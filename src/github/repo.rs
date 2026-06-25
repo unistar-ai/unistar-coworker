@@ -105,7 +105,11 @@ pub async fn repo_get_info(exec: &GhExec, args: &Value) -> Result<String> {
         .as_ref()
         .map(|l| l.name.as_str())
         .unwrap_or("none");
-    let topics: Vec<_> = info.repository_topics.iter().map(|t| t.name.as_str()).collect();
+    let topics: Vec<_> = info
+        .repository_topics
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
     let visibility = if info.is_private { "private" } else { "public" };
 
     let mut out = format!(
@@ -121,7 +125,10 @@ pub async fn repo_get_info(exec: &GhExec, args: &Value) -> Result<String> {
     if labels.is_empty() {
         out.push_str("\nLabels: (unavailable)");
     } else {
-        out.push_str(&format!("\nLabels (up to {label_limit}): {}", labels.join(", ")));
+        out.push_str(&format!(
+            "\nLabels (up to {label_limit}): {}",
+            labels.join(", ")
+        ));
     }
     Ok(out)
 }

@@ -34,10 +34,11 @@ impl RunResult {
         let transient = TRANSIENT.get_or_init(|| {
             Regex::new(r"(?i)HTTP 50[234]|bad gateway|service unavailable|gateway timeout|server error|connection reset|unexpected EOF|TLS handshake timeout").unwrap()
         });
-        let rate = RATE.get_or_init(|| {
-            Regex::new(r"(?i)rate limit|HTTP 429|too many requests").unwrap()
-        });
-        self.err.is_some() && transient.is_match(&self.combined()) && !rate.is_match(&self.combined())
+        let rate =
+            RATE.get_or_init(|| Regex::new(r"(?i)rate limit|HTTP 429|too many requests").unwrap());
+        self.err.is_some()
+            && transient.is_match(&self.combined())
+            && !rate.is_match(&self.combined())
     }
 
     pub fn wrap(&self, action: &str) -> CoworkerError {
@@ -84,10 +85,7 @@ impl RunResult {
             )));
         }
 
-        if low.contains("http 403")
-            || low.contains("permission")
-            || low.contains("forbidden")
-        {
+        if low.contains("http 403") || low.contains("permission") || low.contains("forbidden") {
             return CoworkerError::Other(anyhow::anyhow!(format_tool_error(
                 ErrCode::Forbidden,
                 &format!("{action}: permission denied"),

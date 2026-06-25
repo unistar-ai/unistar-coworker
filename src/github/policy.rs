@@ -139,7 +139,9 @@ pub fn format_policy_classification(analysis: &RunFailureAnalysis) -> String {
 
     match verdict {
         FailureVerdict::Timeout | FailureVerdict::Infra => {
-            out.push_str("Next: ci_rerun_workflow if this looks transient; ci_compare_runs after rerun.");
+            out.push_str(
+                "Next: ci_rerun_workflow if this looks transient; ci_compare_runs after rerun.",
+            );
         }
         FailureVerdict::Auth => {
             out.push_str("Next: fix credentials/secrets — do not rerun until auth is resolved.");
@@ -149,7 +151,9 @@ pub fn format_policy_classification(analysis: &RunFailureAnalysis) -> String {
                 "Error class: {}\n",
                 super::error::ErrCode::ExternalCi.as_str()
             ));
-            out.push_str("Next: ci_list_external_checks — do not call ci_get_failed_logs for external CI.");
+            out.push_str(
+                "Next: ci_list_external_checks — do not call ci_get_failed_logs for external CI.",
+            );
         }
         FailureVerdict::Test => {
             out.push_str("Next: ci_get_failed_logs for details; avoid blind rerun.");

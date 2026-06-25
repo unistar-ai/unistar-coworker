@@ -1,9 +1,9 @@
 //! LLM safety review gate — approve, reject → human approval fallback.
 
+use crate::agent::bash_tool::BASH_RUN_TOOL;
 use crate::agent::bash_tool::{BashCommandReview, BashCriticalIssue};
 use crate::agent::file_tools::{EDIT_FILE, WRITE_FILE};
 use crate::agent::python_tool::PYTHON_RUN_TOOL;
-use crate::agent::bash_tool::BASH_RUN_TOOL;
 use crate::store::ApprovalKind;
 
 #[derive(Debug, Clone)]

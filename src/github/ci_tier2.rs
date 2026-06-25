@@ -53,9 +53,8 @@ pub async fn ci_list_workflows(exec: &GhExec, args: &Value) -> Result<String> {
     ];
     let res = exec.run_retry(&gh_args).await;
     let stdout = GhExec::into_result(res, "failed to list workflows")?;
-    let mut workflows: Vec<WorkflowRow> = serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Other(anyhow::anyhow!("failed to parse workflow list: {e}"))
-    })?;
+    let mut workflows: Vec<WorkflowRow> = serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Other(anyhow::anyhow!("failed to parse workflow list: {e}")))?;
     workflows.sort_by(|a, b| {
         a.name
             .to_ascii_lowercase()
@@ -82,10 +81,7 @@ pub async fn ci_get_job_logs(exec: &GhExec, args: &Value) -> Result<String> {
         .get("offset_lines")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
-    let max_lines = args
-        .get("max_lines")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    let max_lines = args.get("max_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     let run = ci_common::load_run_summary(exec, &repo, run_id).await?;
     let job = ci_common::find_run_job(&run.jobs, job_id).ok_or_else(|| {
@@ -201,9 +197,8 @@ async fn load_run_correlate_meta(
     ];
     let res = exec.run_retry(&args).await;
     let stdout = GhExec::into_result(res, "failed to fetch run metadata")?;
-    serde_json::from_str(&stdout).map_err(|e| {
-        CoworkerError::Other(anyhow::anyhow!("failed to parse run metadata: {e}"))
-    })
+    serde_json::from_str(&stdout)
+        .map_err(|e| CoworkerError::Other(anyhow::anyhow!("failed to parse run metadata: {e}")))
 }
 
 async fn merged_prs_on_branch(
@@ -242,7 +237,11 @@ async fn merged_prs_on_branch(
     Ok(prs)
 }
 
-fn filter_prs_before_run(prs: &[PrMergedRow], run_at: chrono::DateTime<Utc>, limit: u32) -> Vec<PrMergedRow> {
+fn filter_prs_before_run(
+    prs: &[PrMergedRow],
+    run_at: chrono::DateTime<Utc>,
+    limit: u32,
+) -> Vec<PrMergedRow> {
     let mut out = Vec::new();
     for pr in prs {
         let Some(merged_at) = ci_common::parse_rfc3339(&pr.merged_at) else {

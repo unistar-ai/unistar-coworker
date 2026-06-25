@@ -13,11 +13,7 @@ pub async fn federated_tool_list(pool: &McpPool) -> String {
     out
 }
 
-pub async fn federated_tool_search(
-    pool: &McpPool,
-    query: &str,
-    limit: usize,
-) -> Result<String> {
+pub async fn federated_tool_search(pool: &McpPool, query: &str, limit: usize) -> Result<String> {
     let limit = limit.clamp(1, 15);
     let mut lines: Vec<(i32, String)> = Vec::new();
 
@@ -73,8 +69,11 @@ pub async fn federated_tool_describe(pool: &McpPool, name: &str) -> Result<Strin
 }
 
 fn score_mcp_entry(entry: &GlobalToolEntry, tokens: &[String]) -> i32 {
-    let hay = format!("{} {} {}", entry.global_name, entry.remote_name, entry.server_id)
-        .to_ascii_lowercase();
+    let hay = format!(
+        "{} {} {}",
+        entry.global_name, entry.remote_name, entry.server_id
+    )
+    .to_ascii_lowercase();
     let mut score = 0;
     for token in tokens {
         if hay.contains(token) {
