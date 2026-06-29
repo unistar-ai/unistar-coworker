@@ -1184,8 +1184,7 @@ pub async fn load_chat_session_ui(
         // full skill specs (body/description/frontmatter) from the persisted
         // runtime_state.loaded_skills so the Skills section shows real
         // content + token counts, not just names with 0 tokens.
-        let native_tools = ToolCatalog::new()
-            .native_tool_definitions(state.config.chat.tool_mode);
+        let native_tools = ToolCatalog::new().native_tool_definitions(state.config.chat.tool_mode);
         let persisted_skills: Vec<String> = store
             .get_chat_session(&session_id)
             .await
@@ -1198,8 +1197,7 @@ pub async fn load_chat_session_ui(
         let loaded_skills: Vec<_> = persisted_skills
             .iter()
             .filter_map(|name| {
-                crate::engine::skill::load_skill(crate::engine::skill::resolve_skill_ref(name))
-                    .ok()
+                crate::engine::skill::load_skill(crate::engine::skill::resolve_skill_ref(name)).ok()
             })
             .collect();
         build_context_snapshot(
@@ -1392,9 +1390,9 @@ diff --git a/x.go b/x.go\n\
         use tempfile::tempdir;
 
         let dir = tempdir().expect("tempdir");
-        let store = Arc::new(
-            SqliteStore::open(dir.path().join("test.db"), false).expect("open store"),
-        ) as Arc<dyn crate::store::Store>;
+        let store =
+            Arc::new(SqliteStore::open(dir.path().join("test.db"), false).expect("open store"))
+                as Arc<dyn crate::store::Store>;
 
         let session = store
             .create_chat_session(Some("preview-test"), None)
@@ -1419,8 +1417,14 @@ diff --git a/x.go b/x.go\n\
             tool_name: None,
             tool_calls_json: None,
         };
-        store.append_chat_message(&user_msg).await.expect("append user");
-        store.append_chat_message(&ai_msg).await.expect("append assistant");
+        store
+            .append_chat_message(&user_msg)
+            .await
+            .expect("append user");
+        store
+            .append_chat_message(&ai_msg)
+            .await
+            .expect("append assistant");
 
         let mut state = AppState::new(
             serde_yaml::from_str(
@@ -1486,9 +1490,9 @@ repos: [acme/widget]
         use tempfile::tempdir;
 
         let dir = tempdir().expect("tempdir");
-        let store = Arc::new(
-            SqliteStore::open(dir.path().join("test.db"), false).expect("open store"),
-        ) as Arc<dyn crate::store::Store>;
+        let store =
+            Arc::new(SqliteStore::open(dir.path().join("test.db"), false).expect("open store"))
+                as Arc<dyn crate::store::Store>;
 
         // Create a session and persist loaded_skills in its runtime_state.
         let mut session = store
@@ -1496,7 +1500,10 @@ repos: [acme/widget]
             .await
             .expect("create session");
         session.runtime_state.loaded_skills = vec!["github-ops-tone".into(), "ci-triage".into()];
-        store.update_chat_session(&session).await.expect("persist runtime_state");
+        store
+            .update_chat_session(&session)
+            .await
+            .expect("persist runtime_state");
         let sid = session.id;
         store
             .append_chat_message(&ChatMessage {
@@ -1541,7 +1548,10 @@ repos: [acme/widget]
         assert!(
             ctx.skill_blocks.iter().all(|s| s.tokens > 0),
             "expected nonzero skill tokens, got: {:?}",
-            ctx.skill_blocks.iter().map(|s| (s.name.clone(), s.tokens)).collect::<Vec<_>>()
+            ctx.skill_blocks
+                .iter()
+                .map(|s| (s.name.clone(), s.tokens))
+                .collect::<Vec<_>>()
         );
         assert!(
             ctx.skill_blocks.iter().all(|s| !s.body.is_empty()),

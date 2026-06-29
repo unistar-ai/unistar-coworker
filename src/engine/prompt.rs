@@ -248,7 +248,7 @@ mod tests {
                 description: String::new(),
                 body: "Prompt body".into(),
                 argument_hint: String::new(),
-            skill_refs: vec![],
+                skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
                 intent_keywords: vec![],
@@ -291,7 +291,7 @@ mod tests {
                 description: String::new(),
                 body: "Prompt body".into(),
                 argument_hint: String::new(),
-            skill_refs: vec![],
+                skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
                 intent_keywords: vec![],
@@ -306,7 +306,7 @@ mod tests {
                 description: String::new(),
                 body: "Be concise".into(),
                 argument_hint: String::new(),
-            skill_refs: vec![],
+                skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
                 intent_keywords: vec![],
@@ -339,7 +339,7 @@ mod tests {
                 description: String::new(),
                 body: "Prompt body".into(),
                 argument_hint: String::new(),
-            skill_refs: vec![],
+                skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
                 intent_keywords: vec![],
@@ -464,10 +464,22 @@ mod tests {
                     .map(|n| n.to_string_lossy().to_string())
             })
             .collect();
-        assert!(names.contains(&"github-ops-tone".to_string()), "missing github-ops-tone");
-        assert!(names.contains(&"ci-triage".to_string()), "missing ci-triage");
-        assert!(names.contains(&"my-prs".to_string()), "missing my-prs — dir scan must include it");
+        assert!(
+            names.contains(&"github-ops-tone".to_string()),
+            "missing github-ops-tone"
+        );
+        assert!(
+            names.contains(&"ci-triage".to_string()),
+            "missing ci-triage"
+        );
+        assert!(
+            names.contains(&"my-prs".to_string()),
+            "missing my-prs — dir scan must include it"
+        );
         // _base is not a skill (no SKILL.md) — must be excluded.
-        assert!(!names.contains(&"_base".to_string()), "_base should be skipped");
+        assert!(
+            !names.contains(&"_base".to_string()),
+            "_base should be skipped"
+        );
     }
 }

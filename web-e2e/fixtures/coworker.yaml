@@ -1,0 +1,18 @@
+# Minimal config for Playwright smoke tests (no GitHub token required).
+llm:
+  base_url: http://127.0.0.1:11434/v1
+  model: test-model
+  context_limit: 64000
+
+storage:
+  backend: json
+  path: ./data
+
+repos:
+  - acme/widget
+
+chat:
+  enabled: true
+
+web:
+  bind: 127.0.0.1:18787

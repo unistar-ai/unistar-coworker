@@ -262,7 +262,13 @@ tools:\n\
         assert_eq!(s.argument_hint, "Author filter or repo");
         assert_eq!(
             s.intent_phrases,
-            vec!["my pr", "my open", "my pull", "assigned to me", "what do i need"]
+            vec![
+                "my pr",
+                "my open",
+                "my pull",
+                "assigned to me",
+                "what do i need"
+            ]
         );
         assert_eq!(s.intent_bonus_keywords, vec!["@me"]);
         assert_eq!(s.tool_refs, vec!["pr_list_open", "pr_get_status_batch"]);

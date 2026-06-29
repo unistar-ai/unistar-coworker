@@ -152,8 +152,7 @@ fn skill_key(skill: &SkillSpec) -> String {
 /// without duplicating ones it did.
 #[allow(dead_code)]
 fn merge_skills(base: &mut Vec<SkillSpec>, extra: Vec<SkillSpec>) {
-    let existing: std::collections::HashSet<String> =
-        base.iter().map(|s| skill_key(s)).collect();
+    let existing: std::collections::HashSet<String> = base.iter().map(|s| skill_key(s)).collect();
     for s in extra {
         let key = skill_key(&s);
         if !key.is_empty() && !existing.contains(&key) {
@@ -425,10 +424,16 @@ mod tests {
         let names: Vec<_> = merged.iter().map(|s| s.name.clone()).collect();
         assert!(names.contains(&"github-ops-tone".to_string()));
         assert!(names.contains(&"ci-triage".to_string()));
-        assert!(names.contains(&"my-prs".to_string()), "my-prs must be merged in");
+        assert!(
+            names.contains(&"my-prs".to_string()),
+            "my-prs must be merged in"
+        );
         // No duplicates.
         assert_eq!(
-            merged.iter().filter(|s| s.name == "github-ops-tone").count(),
+            merged
+                .iter()
+                .filter(|s| s.name == "github-ops-tone")
+                .count(),
             1
         );
     }
