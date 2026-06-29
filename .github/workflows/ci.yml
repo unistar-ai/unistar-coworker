@@ -28,6 +28,10 @@ jobs:
         working-directory: web-ui
         run: npm install
 
+      - name: Build Web UI
+        working-directory: web-ui
+        run: npm run build:fast
+
       - name: cargo fmt --check
         run: cargo fmt --check
 
@@ -57,6 +61,10 @@ jobs:
       - name: Install Web UI deps
         working-directory: web-ui
         run: npm install
+
+      - name: Build Web UI
+        working-directory: web-ui
+        run: npm run build:fast
 
       - name: cargo check --no-default-features
         run: cargo check --no-default-features
