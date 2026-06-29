@@ -15,6 +15,8 @@ pub struct CompactOptions {
     pub audit_days: u32,
     pub digest_keep: u32,
     pub workflow_runs_days: u32,
+    /// When true, count what would be pruned but do not delete anything.
+    pub dry_run: bool,
 }
 
 impl Default for CompactOptions {
@@ -23,6 +25,7 @@ impl Default for CompactOptions {
             audit_days: 90,
             digest_keep: 30,
             workflow_runs_days: 30,
+            dry_run: false,
         }
     }
 }
@@ -55,12 +58,17 @@ pub fn compact_json(root: &Path, opts: &CompactOptions) -> Result<CompactStats> 
         )));
     }
     let _ = JsonStore::open(root.to_path_buf())?;
-    let (audit_entries_removed, audit_files_removed) = prune_json_audit(root, opts.audit_days)?;
+    let (audit_entries_removed, audit_files_removed) =
+        prune_json_audit(root, opts.audit_days, opts.dry_run)?;
     Ok(CompactStats {
         audit_entries_removed,
         audit_files_removed,
-        digests_removed: prune_json_digests(root, opts.digest_keep)?,
-        workflow_runs_removed: prune_json_workflow_runs(root, opts.workflow_runs_days)?,
+        digests_removed: prune_json_digests(root, opts.digest_keep, opts.dry_run)?,
+        workflow_runs_removed: prune_json_workflow_runs(
+            root,
+            opts.workflow_runs_days,
+            opts.dry_run,
+        )?,
     })
 }
 
@@ -73,10 +81,14 @@ pub fn compact_sqlite(path: &Path, wal: bool, opts: &CompactOptions) -> Result<C
     }
     let store = SqliteStore::open(path.to_path_buf(), wal)?;
     Ok(CompactStats {
-        audit_entries_removed: prune_sqlite_audit(&store, opts.audit_days)?,
+        audit_entries_removed: prune_sqlite_audit(&store, opts.audit_days, opts.dry_run)?,
         audit_files_removed: 0,
-        digests_removed: prune_sqlite_digests(&store, opts.digest_keep)?,
-        workflow_runs_removed: prune_sqlite_workflow_runs(&store, opts.workflow_runs_days)?,
+        digests_removed: prune_sqlite_digests(&store, opts.digest_keep, opts.dry_run)?,
+        workflow_runs_removed: prune_sqlite_workflow_runs(
+            &store,
+            opts.workflow_runs_days,
+            opts.dry_run,
+        )?,
     })
 }
 
@@ -88,7 +100,7 @@ fn workflow_run_cutoff(days: u32) -> DateTime<Utc> {
     Utc::now() - Duration::days(i64::from(days))
 }
 
-fn prune_json_audit(root: &Path, audit_days: u32) -> Result<(u32, u32)> {
+fn prune_json_audit(root: &Path, audit_days: u32, dry_run: bool) -> Result<(u32, u32)> {
     let dir = root.join("audit");
     if !dir.is_dir() {
         return Ok((0, 0));
@@ -111,9 +123,11 @@ fn prune_json_audit(root: &Path, audit_days: u32) -> Result<(u32, u32)> {
             }
         }
         if kept.is_empty() {
-            fs::remove_file(&path)?;
             files_removed += 1;
-        } else {
+            if !dry_run {
+                fs::remove_file(&path)?;
+            }
+        } else if !dry_run {
             let mut out = kept.join("\n");
             out.push('\n');
             fs::write(&path, out)?;
@@ -122,7 +136,7 @@ fn prune_json_audit(root: &Path, audit_days: u32) -> Result<(u32, u32)> {
     Ok((removed, files_removed))
 }
 
-fn prune_json_digests(root: &Path, digest_keep: u32) -> Result<u32> {
+fn prune_json_digests(root: &Path, digest_keep: u32, dry_run: bool) -> Result<u32> {
     let dir = root.join("digests");
     if !dir.is_dir() {
         return Ok(0);
@@ -139,13 +153,15 @@ fn prune_json_digests(root: &Path, digest_keep: u32) -> Result<u32> {
     files.sort_by_key(|(date, _)| std::cmp::Reverse(*date));
     let mut removed = 0u32;
     for (_, path) in files.into_iter().skip(digest_keep as usize) {
-        fs::remove_file(path)?;
         removed += 1;
+        if !dry_run {
+            fs::remove_file(path)?;
+        }
     }
     Ok(removed)
 }
 
-fn prune_json_workflow_runs(root: &Path, workflow_runs_days: u32) -> Result<u32> {
+fn prune_json_workflow_runs(root: &Path, workflow_runs_days: u32, dry_run: bool) -> Result<u32> {
     let dir = root.join("workflow_runs");
     if !dir.is_dir() {
         return Ok(0);
@@ -159,22 +175,32 @@ fn prune_json_workflow_runs(root: &Path, workflow_runs_days: u32) -> Result<u32>
         }
         let run: WorkflowRun = serde_json::from_str(&fs::read_to_string(&path)?)?;
         if run.finished_at.is_some_and(|t| t < cutoff) {
-            fs::remove_file(path)?;
             removed += 1;
+            if !dry_run {
+                fs::remove_file(path)?;
+            }
         }
     }
     Ok(removed)
 }
 
-fn prune_sqlite_audit(store: &SqliteStore, audit_days: u32) -> Result<u32> {
+fn prune_sqlite_audit(store: &SqliteStore, audit_days: u32, dry_run: bool) -> Result<u32> {
     let cutoff = audit_cutoff(audit_days).to_rfc3339();
     store.with_conn(|conn| {
+        if dry_run {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE ts < ?1",
+                [&cutoff],
+                |r| r.get(0),
+            )?;
+            return Ok(n as u32);
+        }
         let n = conn.execute("DELETE FROM audit_log WHERE ts < ?1", [&cutoff])?;
         Ok(n as u32)
     })
 }
 
-fn prune_sqlite_digests(store: &SqliteStore, digest_keep: u32) -> Result<u32> {
+fn prune_sqlite_digests(store: &SqliteStore, digest_keep: u32, dry_run: bool) -> Result<u32> {
     store.with_conn(|conn| {
         let mut stmt = conn.prepare("SELECT date FROM digests ORDER BY date DESC LIMIT ?1")?;
         let keep: Vec<String> = stmt
@@ -185,15 +211,24 @@ fn prune_sqlite_digests(store: &SqliteStore, digest_keep: u32) -> Result<u32> {
             return Ok(0);
         }
         let placeholders = keep.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-        let sql = format!("DELETE FROM digests WHERE date NOT IN ({placeholders})");
         let params: Vec<&dyn rusqlite::ToSql> =
             keep.iter().map(|d| d as &dyn rusqlite::ToSql).collect();
+        if dry_run {
+            let sql = format!("SELECT COUNT(*) FROM digests WHERE date NOT IN ({placeholders})");
+            let n: i64 = conn.query_row(&sql, params.as_slice(), |r| r.get(0))?;
+            return Ok(n as u32);
+        }
+        let sql = format!("DELETE FROM digests WHERE date NOT IN ({placeholders})");
         let n = conn.execute(&sql, params.as_slice())?;
         Ok(n as u32)
     })
 }
 
-fn prune_sqlite_workflow_runs(store: &SqliteStore, workflow_runs_days: u32) -> Result<u32> {
+fn prune_sqlite_workflow_runs(
+    store: &SqliteStore,
+    workflow_runs_days: u32,
+    dry_run: bool,
+) -> Result<u32> {
     let cutoff = workflow_run_cutoff(workflow_runs_days);
     store.with_conn(|conn| {
         let mut stmt = conn.prepare("SELECT id, payload_json FROM workflow_runs")?;
@@ -205,8 +240,10 @@ fn prune_sqlite_workflow_runs(store: &SqliteStore, workflow_runs_days: u32) -> R
             let (id, json) = row?;
             let run: WorkflowRun = serde_json::from_str(&json)?;
             if run.finished_at.is_some_and(|t| t < cutoff) {
-                conn.execute("DELETE FROM workflow_runs WHERE id = ?1", [&id])?;
                 removed += 1;
+                if !dry_run {
+                    conn.execute("DELETE FROM workflow_runs WHERE id = ?1", [&id])?;
+                }
             }
         }
         Ok(removed)
@@ -339,6 +376,7 @@ mod tests {
                 audit_days: 90,
                 digest_keep: 3,
                 workflow_runs_days: 30,
+                dry_run: false,
             },
         )
         .unwrap();
@@ -393,6 +431,7 @@ mod tests {
                 audit_days: 30,
                 digest_keep: 30,
                 workflow_runs_days: 30,
+                dry_run: false,
             },
         )
         .unwrap();
@@ -476,6 +515,7 @@ mod tests {
                 audit_days: 90,
                 digest_keep: 2,
                 workflow_runs_days: 30,
+                dry_run: false,
             },
         )
         .unwrap();

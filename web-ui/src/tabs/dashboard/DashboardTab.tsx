@@ -53,6 +53,7 @@ export default function DashboardTab() {
                 key={d.date}
                 d={d}
                 active={d.date === activeDate}
+                preview={bodies[d.date] || ""}
                 onSelect={() => void apiPost(`/api/digest/${i}/select`)}
               />
             ))}
@@ -81,12 +82,23 @@ export default function DashboardTab() {
 function DigestRow({
   d,
   active,
+  preview,
   onSelect,
 }: {
   d: DigestSummary;
   active: boolean;
+  preview: string;
   onSelect: () => void;
 }) {
+  // Extract a one-line summary from the digest body (first non-heading line).
+  const summary = preview
+    ? preview
+        .split("\n")
+        .map((l) => l.trim())
+        .find((l) => l && !l.startsWith("#") && !l.startsWith("|"))
+        ?.slice(0, 100)
+    : "";
+
   return (
     <li
       role="button"
@@ -102,6 +114,7 @@ function DigestRow({
       }}
     >
       <div className="list-item-title">{d.date}</div>
+      {summary && <div className="list-item-preview">{summary}</div>}
       <div className="list-item-meta">
         {d.needs_attention > 0 && (
           <span className="pill warn">{d.needs_attention} attn</span>

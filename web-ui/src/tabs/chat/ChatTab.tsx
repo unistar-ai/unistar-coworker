@@ -41,16 +41,53 @@ export default function ChatTab() {
   const [stickBottom, setStickBottom] = useState(true);
   const liveActive = useLiveZoneActive();
   const isMobile = useIsMobile();
+
+  // Esc cancels generation when busy.
+  useEffect(() => {
+    if (!chatBusy) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        void apiPost("/api/chat/cancel");
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [chatBusy]);
+
+  // Ctrl/Cmd+F opens in-chat search.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        const target = e.target as HTMLElement;
+        // Don't intercept browser's native find when already in a text field.
+        if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
   // Local drawer state for the mobile context panel. The server-side
   // chat_context_visible flag drives the desktop column; on mobile we layer a
   // local "drawer open" toggle on top so the panel can be shown/hidden as an
   // overlay without round-tripping through the backend for every toggle.
   const [mobileCtxOpen, setMobileCtxOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
 
-  const blocks = useMemo(
-    () => buildChatBlocks(chatLines, outputs),
-    [chatLines, outputs],
-  );
+  const blocks = useMemo(() => {
+    const built = buildChatBlocks(chatLines, outputs);
+    // Mark the last assistant message block for the Regenerate button.
+    for (let i = built.length - 1; i >= 0; i--) {
+      if (built[i].type === "message" && built[i].message?.role === "assistant") {
+        built[i].isLastAssistant = true;
+        break;
+      }
+    }
+    return built;
+  }, [chatLines, outputs]);
   const stats = useMemo(() => messageStatsFromBlocks(blocks), [blocks]);
   const countLabel = formatMessageCount(stats);
 
@@ -104,6 +141,14 @@ export default function ChatTab() {
             <div className="messages-header-actions">
               <button
                 type="button"
+                className="btn-header-action btn-header-search"
+                onClick={() => setSearchOpen((v) => !v)}
+                title="Search in chat (Ctrl/Cmd+F)"
+              >
+                Search
+              </button>
+              <button
+                type="button"
                 className={`btn-header-action btn-header-export${hasHistory ? "" : " hidden"}`}
                 onClick={() => void apiFetchDownload("/api/chat/export")}
                 title="Export transcript"
@@ -140,12 +185,50 @@ export default function ChatTab() {
               )}
             </div>
           </div>
+          {searchOpen && (
+            <div className="chat-search-bar">
+              <input
+                type="text"
+                className="chat-search-input"
+                placeholder="Search in chat…"
+                value={searchQuery}
+                autoFocus
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setSearchOpen(false);
+                    setSearchQuery("");
+                  }
+                }}
+              />
+              {searchQuery && (
+                <span className="chat-search-count">
+                  {blocks.filter((b) => {
+                    const text = b.message?.body || b.reasoningText || "";
+                    return text.toLowerCase().includes(searchQuery.toLowerCase());
+                  }).length} matches
+                </span>
+              )}
+              <button
+                type="button"
+                className="chat-search-close"
+                onClick={() => {
+                  setSearchOpen(false);
+                  setSearchQuery("");
+                }}
+              >
+                ×
+              </button>
+            </div>
+          )}
           <div ref={scrollRef} className="messages">
             <div className="msg-history">
               <ChatHistory
                 blocks={blocks}
                 scrollRef={scrollRef}
+                stickBottom={stickBottom}
                 onStickBottomChange={setStickBottom}
+                searchQuery={searchQuery}
               />
             </div>
             <LiveDivider visible={liveActive} />
@@ -209,23 +292,55 @@ async function apiFetchDownload(url: string) {
 }
 
 function ChatInput({ busy }: { busy: boolean }) {
-  const [draft, setDraft] = useState("");
+  const draft = useStore((s) => s.chatDraft);
+  const setDraft = useStore((s) => s.setChatDraft);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const historyRef = useRef<string[]>([]);
+  const historyIdxRef = useRef(-1);
 
   const send = () => {
     const msg = draft.trim();
     if (!msg || busy) return;
+    // Push to input history (dedup consecutive).
+    const hist = historyRef.current;
+    if (hist[hist.length - 1] !== msg) {
+      hist.push(msg);
+      if (hist.length > 100) hist.shift();
+    }
+    historyIdxRef.current = -1;
     void apiPost("/api/chat", { message: msg });
     setDraft("");
     if (taRef.current) taRef.current.style.height = "auto";
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter sends, Shift+Enter inserts a newline. Cmd/Ctrl+Enter also sends
-    // (useful for IME composition where plain Enter is needed for confirm).
+    // Enter sends, Shift+Enter inserts a newline.
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       send();
+      return;
+    }
+    // ↑/↓ navigate input history when cursor is on first/last line.
+    const hist = historyRef.current;
+    if (hist.length === 0) return;
+    if (e.key === "ArrowUp" && e.currentTarget.selectionStart === 0) {
+      e.preventDefault();
+      const idx = historyIdxRef.current === -1
+        ? hist.length - 1
+        : Math.max(0, historyIdxRef.current - 1);
+      historyIdxRef.current = idx;
+      setDraft(hist[idx]);
+    } else if (e.key === "ArrowDown" && e.currentTarget.selectionStart === draft.length) {
+      e.preventDefault();
+      const idx = historyIdxRef.current;
+      if (idx === -1) return;
+      if (idx >= hist.length - 1) {
+        historyIdxRef.current = -1;
+        setDraft("");
+      } else {
+        historyIdxRef.current = idx + 1;
+        setDraft(hist[idx + 1]);
+      }
     }
   };
 

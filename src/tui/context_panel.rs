@@ -160,11 +160,31 @@ pub fn token_bar(used: u32, limit: u32, width: usize) -> String {
     } else {
         (used as f64 / limit as f64).clamp(0.0, 1.0)
     };
-    let filled = (pct * width as f64).round() as usize;
+    // Use 8-level Unicode block characters for finer granularity:
+    // ▏▎▍▌▋▊▉█ — each step is 1/8 of a cell.
+    let total_eighths = (pct * (width as f64 * 8.0)).round() as usize;
+    let full_cells = total_eighths / 8;
+    let remainder = total_eighths % 8;
+    let partial = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+    let filled_str = format!(
+        "{}{}",
+        "█".repeat(full_cells.min(width)),
+        if full_cells < width && remainder > 0 {
+            partial[remainder]
+        } else {
+            ""
+        }
+    );
+    let filled_len = full_cells.min(width)
+        + if remainder > 0 && full_cells < width {
+            1
+        } else {
+            0
+        };
     format!(
         "[{}{}]",
-        "█".repeat(filled.min(width)),
-        "░".repeat(width.saturating_sub(filled))
+        filled_str,
+        "░".repeat(width.saturating_sub(filled_len))
     )
 }
 

@@ -8,7 +8,6 @@ import {
   parseApprovalDescription,
   type ParsedApprovalDescription,
 } from "./parser";
-import ApprovalModal from "./ApprovalModal";
 import Skeleton from "../../components/Skeleton";
 import EmptyState from "../../components/EmptyState";
 import { Hand, History } from "lucide-react";
@@ -50,7 +49,6 @@ export default function ApprovalsTab() {
         </button>
       </div>
       {sub === "pending" ? <PendingList /> : <HistoryList />}
-      <ApprovalModal />
     </div>
   );
 }

@@ -5,6 +5,7 @@ import Status from "./Status";
 import {
   Sun,
   Moon,
+  Sparkles,
   MessageSquare,
   LayoutDashboard,
   GitPullRequest,
@@ -16,6 +17,8 @@ import {
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 import ApprovalsTab from "../tabs/approvals/ApprovalsTab";
+import ApprovalModal from "../tabs/approvals/ApprovalModal";
+import CommandPalette from "./CommandPalette";
 import ChatTab from "../tabs/chat/ChatTab";
 import DashboardTab from "../tabs/dashboard/DashboardTab";
 import PrsTab from "../tabs/prs/PrsTab";
@@ -48,6 +51,7 @@ export default function Layout({ tabLabels }: LayoutProps) {
   const reconnectAttempts = useStore((s) => s.reconnectAttempts);
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
+  const [cmdOpen, setCmdOpen] = useState(false);
 
   useEffect(() => setMounted(true), []);
 
@@ -78,19 +82,10 @@ export default function Layout({ tabLabels }: LayoutProps) {
         return;
       }
 
-      // Cmd/Ctrl + K → focus chat input
+      // Cmd/Ctrl + K → open command palette
       if (e.key.toLowerCase() === "k") {
         e.preventDefault();
-        if (tab !== "chat" && tabs.includes("chat")) {
-          onTabChange("chat");
-        }
-        // Defer to the next tick so the Chat tab has mounted.
-        requestAnimationFrame(() => {
-          const ta = document.querySelector<HTMLTextAreaElement>(
-            "textarea[data-chat-input]",
-          );
-          ta?.focus();
-        });
+        setCmdOpen(true);
       }
     };
     document.addEventListener("keydown", onKey);
@@ -106,6 +101,7 @@ export default function Layout({ tabLabels }: LayoutProps) {
       <header className="topbar">
         <div className="brand">
           <ConnDot />
+          <Sparkles className="brand-icon" size={16} aria-hidden="true" />
           <span>unistar-coworker</span>
         </div>
         <Tabs.Root value={tab} onValueChange={onTabChange}>
@@ -168,6 +164,8 @@ export default function Layout({ tabLabels }: LayoutProps) {
         </div>
       </main>
       <Footer />
+      <ApprovalModal />
+      <CommandPalette open={cmdOpen} onOpenChange={setCmdOpen} />
     </div>
   );
 }
@@ -205,9 +203,10 @@ function ConnDot() {
   const connected = useStore((s) => s.connected);
   const attempts = useStore((s) => s.reconnectAttempts);
   const label = connected ? "Connected" : attempts > 0 ? "Reconnecting" : "Offline";
+  const dotClass = connected ? "live" : attempts > 0 ? "reconnecting" : "dead";
   return (
     <span
-      className={`brand-dot ${connected ? "live" : "dead"}`}
+      className={`brand-dot ${dotClass}`}
       title={`Connection: ${label}`}
       aria-label={`Connection: ${label}`}
     />

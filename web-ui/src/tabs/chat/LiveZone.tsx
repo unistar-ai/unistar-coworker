@@ -3,6 +3,7 @@ import { useStore } from "../../store/wsStore";
 import Markdown from "../../components/Markdown";
 import ReasoningCard from "../../components/ReasoningCard";
 import { splitStreaming } from "./streamSplit";
+import { ArrowRight, BookOpen, Clock, Sparkles, Zap } from "lucide-react";
 
 interface LiveState {
   chatBusy: boolean;
@@ -84,7 +85,9 @@ export default function LiveZone() {
         {(toolRunning || toolPending) && (
           <div className={`tool-card status-running live-tool is-collapsed`}>
             <div className="tool-card-header">
-              <span className="tool-card-icon">{toolRunning ? "→" : "⏳"}</span>
+              <span className="tool-card-icon">
+                {toolRunning ? <ArrowRight size={14} aria-hidden="true" /> : <Clock size={14} aria-hidden="true" />}
+              </span>
               <div className="tool-card-title-wrap">
                 <span className="tool-card-title">
                   {toolRunning || toolPending}
@@ -103,7 +106,7 @@ export default function LiveZone() {
           <div className="activity-flow">
             <div className="activity-flow-head">
               <span className="activity-icon">
-                {activityFlow.kind === "Skill" ? "📚" : "⚡"}
+                {activityFlow.kind === "Skill" ? <BookOpen size={14} aria-hidden="true" /> : <Zap size={14} aria-hidden="true" />}
               </span>
               <span className="activity-title">
                 {activityFlow.kind === "Skill" ? "Skill" : "Activity"}
@@ -156,7 +159,7 @@ function StreamingReply({ text }: { text: string }) {
   return (
     <div className="activity-streaming">
       <div className="activity-streaming-head">
-        <span className="activity-icon">✦</span>
+        <span className="activity-icon"><Sparkles size={14} aria-hidden="true" /></span>
         <span className="activity-title">Assistant</span>
       </div>
       <div className="activity-streaming-body is-streaming" aria-hidden="true">

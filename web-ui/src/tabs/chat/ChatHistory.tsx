@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import Markdown from "../../components/Markdown";
 import ReasoningCard from "../../components/ReasoningCard";
 import { useStore } from "../../store/wsStore";
+import { apiPost } from "../../lib/api";
 import { toolMeta, parseToolArgsString, formatToolArgValue, normalizeReasoningText } from "./parser";
 import { ToolOutputView } from "./toolOutput";
 import type {
@@ -16,13 +17,18 @@ import type {
 export default function ChatHistory({
   blocks,
   scrollRef,
+  stickBottom,
   onStickBottomChange,
+  searchQuery = "",
 }: {
   blocks: ChatBlock[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
+  stickBottom: boolean;
   onStickBottomChange?: (stick: boolean) => void;
+  searchQuery?: string;
 }) {
   const chatBusy = useStore((s) => s.chat_busy);
+  const chatStreaming = useStore((s) => s.chat_streaming);
   const mcpServers = useStore((s) => s.mcp_servers);
   const prevCountRef = useRef(0);
 
@@ -46,6 +52,18 @@ export default function ChatHistory({
     return added;
   }, [blocks]);
 
+  // Blocks matching the search query (substring on message body or reasoning text).
+  const searchMatches = useMemo(() => {
+    if (!searchQuery.trim()) return new Set<string>();
+    const q = searchQuery.toLowerCase();
+    const matches = new Set<string>();
+    for (const b of blocks) {
+      const text = b.message?.body || b.reasoningText || "";
+      if (text.toLowerCase().includes(q)) matches.add(b.key);
+    }
+    return matches;
+  }, [blocks, searchQuery]);
+
   const virtualizer = useVirtualizer({
     count: blocks.length,
     getScrollElement: () => scrollRef.current,
@@ -67,18 +85,24 @@ export default function ChatHistory({
 
   const count = blocks.length;
   useEffect(() => {
-    if (count > prevCountRef.current) {
+    if (count > prevCountRef.current && stickBottom) {
       virtualizer.scrollToIndex(count - 1, { align: "end" });
     }
     prevCountRef.current = count;
-  }, [count, virtualizer]);
+  }, [count, virtualizer, stickBottom]);
 
   useEffect(() => {
-    if (chatBusy && scrollRef.current) {
+    if (chatBusy && stickBottom && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      onStickBottomChange?.(true);
     }
-  }, [chatBusy, scrollRef, onStickBottomChange]);
+  }, [chatBusy, stickBottom, scrollRef]);
+
+  // Follow streaming text growth when stuck to bottom.
+  useEffect(() => {
+    if (chatStreaming && stickBottom && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [chatStreaming, stickBottom, scrollRef]);
 
   const VIRTUAL_THRESHOLD = 80;
 
@@ -101,7 +125,7 @@ export default function ChatHistory({
         {blocks.map((block) => (
           <div
             key={block.key}
-            className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}`}
+            className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}${searchMatches.has(block.key) ? " is-search-match" : ""}`}
           >
             <BlockRenderer block={block} mcpPrefixes={mcpPrefixes} />
           </div>
@@ -136,7 +160,7 @@ export default function ChatHistory({
                   transform: `translateY(${vi.start}px)`,
                 }}
               >
-                <div className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}`}>
+                <div className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}${searchMatches.has(block.key) ? " is-search-match" : ""}`}>
                   <BlockRenderer block={block} mcpPrefixes={mcpPrefixes} />
                 </div>
               </div>
@@ -170,7 +194,7 @@ function BlockRenderer({
   mcpPrefixes: { id: string; prefix: string }[];
 }) {
   if (block.type === "message" && block.message) {
-    return <MessageView msg={block.message} />;
+    return <MessageView msg={block.message} isLastAssistant={block.isLastAssistant} />;
   }
   if (block.type === "tool-batch") {
     return <ToolBatchView block={block} mcpPrefixes={mcpPrefixes} />;
@@ -184,8 +208,9 @@ function BlockRenderer({
   return null;
 }
 
-function MessageView({ msg }: { msg: ChatMessage }) {
+function MessageView({ msg, isLastAssistant }: { msg: ChatMessage; isLastAssistant?: boolean }) {
   const [copied, setCopied] = useState(false);
+  const chatBusy = useStore((s) => s.chat_busy);
 
   // System/meta messages get a centered pill style.
   if (msg.role === "system" || msg.role === "meta") {
@@ -236,6 +261,17 @@ function MessageView({ msg }: { msg: ChatMessage }) {
         >
           {copied ? "✓" : "⧉"}
         </button>
+        {isLastAssistant && !chatBusy && (
+          <button
+            type="button"
+            className="msg-regenerate"
+            onClick={() => void apiPost("/api/chat/regenerate")}
+            aria-label="Regenerate response"
+            title="Regenerate response"
+          >
+            ↻
+          </button>
+        )}
       </div>
     </div>
   );
@@ -499,9 +535,14 @@ function ToolGroupView({
       </div>
 
       {expanded && (
-        <div className="tool-card-body">
+        <div className="tool-timeline">
           {group.steps.map((s, i) => (
-            <ToolStepView key={i} step={s} />
+            <div key={i} className={`tool-timeline-node kind-${s.kind}`}>
+              <span className="tool-timeline-dot" />
+              <div className="tool-timeline-content">
+                <ToolStepView step={s} />
+              </div>
+            </div>
           ))}
         </div>
       )}

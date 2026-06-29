@@ -53,6 +53,8 @@ export interface ChatBlock {
   reasoningText?: string;
   /** For reasoning blocks: the raw line text (before normalization). */
   reasoningRaw?: string;
+  /** True on the last assistant message block — used for Regenerate button. */
+  isLastAssistant?: boolean;
   key: string;
 }
 

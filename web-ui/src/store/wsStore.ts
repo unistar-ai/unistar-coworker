@@ -92,6 +92,9 @@ interface Store extends WebSnapshot, UiState {
   setConnection: (connected: boolean, attempts: number) => void;
   setStatusError: (msg: string | null) => void;
   setTab: (tab: string) => void;
+  /** Chat input draft — persisted across tab switches in the store. */
+  chatDraft: string;
+  setChatDraft: (draft: string) => void;
 }
 
 export const useStore = create<Store>((set) => ({
@@ -100,6 +103,7 @@ export const useStore = create<Store>((set) => ({
   reconnectAttempts: 0,
   statusError: null,
   hasSnapshot: false,
+  chatDraft: "",
 
   applySnapshot: (s) =>
     set(() => ({ ...s, connected: true, reconnectAttempts: 0, hasSnapshot: true })),
@@ -190,4 +194,5 @@ export const useStore = create<Store>((set) => ({
   // Optimistic tab switch — immediately update local state so the Radix Tabs
   // component reflects the change before the WS snapshot arrives.
   setTab: (tab: string) => set({ tab }),
+  setChatDraft: (draft: string) => set({ chatDraft: draft }),
 }));

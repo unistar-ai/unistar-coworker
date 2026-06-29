@@ -92,8 +92,9 @@ export default function ConfigTab() {
         <div className="config-shortcuts">
           <ShortcutRow keys={["Ctrl/⌘", "1–6"]} desc="Switch to tab 1–6" />
           <ShortcutRow keys={["Ctrl/⌘", "K"]} desc="Focus chat input" />
-          <ShortcutRow keys={["Shift", "Enter"]} desc="Send chat message" />
-          <ShortcutRow keys={["Esc"]} desc="Close dialog / context drawer" />
+          <ShortcutRow keys={["Enter"]} desc="Send chat message" />
+          <ShortcutRow keys={["Shift", "Enter"]} desc="Insert newline" />
+          <ShortcutRow keys={["Esc"]} desc="Cancel generation / close dialog / context drawer" />
         </div>
       </div>
     </div>

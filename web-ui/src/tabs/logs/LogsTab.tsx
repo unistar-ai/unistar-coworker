@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
@@ -80,6 +80,17 @@ export default function LogsTab() {
 
 function LogRow({ log }: { log: { level: string; message: string; ts: string } }) {
   const level = (log.level || "info").toLowerCase();
+  const [copied, setCopied] = useState(false);
+  const onCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(`[${log.ts}] ${log.level}: ${log.message}`);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
   return (
     <div className="log-row">
       <span className="log-ts">
@@ -89,6 +100,15 @@ function LogRow({ log }: { log: { level: string; message: string; ts: string } }
         <span className={`log-level log-level-${level}`}>{level}</span>
         <span className="log-msg">{log.message}</span>
       </div>
+      <button
+        type="button"
+        className={`log-copy${copied ? " is-copied" : ""}`}
+        onClick={onCopy}
+        aria-label="Copy log line"
+        title="Copy"
+      >
+        {copied ? "✓" : "⧉"}
+      </button>
     </div>
   );
 }

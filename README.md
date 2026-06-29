@@ -26,24 +26,33 @@ Chat can still use workspace tools (`read_file`, `grep`, `bash_run`, …) for li
 
 ## Table of contents
 
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Requirements](#requirements)
-- [Usage](#usage)
-  - [TUI](#tui)
-  - [Web UI](#web-ui)
-  - [Chat](#chat)
-  - [Workflows](#workflows)
-  - [CLI reference](#cli-reference)
-- [Configuration](#configuration)
-- [Storage](#storage)
-- [MCP federation](#mcp-federation)
-- [Architecture](#architecture)
-- [Development](#development)
-- [Project layout](#project-layout)
-- [Contributing](#contributing)
-- [Related](#related)
-- [License](#license)
+- [unistar-coworker](#unistar-coworker)
+  - [Overview](#overview)
+  - [Table of contents](#table-of-contents)
+  - [Features](#features)
+  - [Quick start](#quick-start)
+  - [Requirements](#requirements)
+  - [Usage](#usage)
+    - [TUI](#tui)
+    - [Web UI](#web-ui)
+    - [Chat](#chat)
+    - [Workflows](#workflows)
+    - [CLI reference](#cli-reference)
+    - [GitHub harness tools](#github-harness-tools)
+  - [Configuration](#configuration)
+  - [Storage](#storage)
+  - [MCP federation](#mcp-federation)
+  - [Architecture](#architecture)
+    - [Product boundaries](#product-boundaries)
+    - [Skill / Prompt / Harness](#skill--prompt--harness)
+  - [Development](#development)
+    - [Web UI development (HMR)](#web-ui-development-hmr)
+    - [Web UI E2E (Playwright)](#web-ui-e2e-playwright)
+    - [Feature flags](#feature-flags)
+  - [Project layout](#project-layout)
+  - [Contributing](#contributing)
+  - [Related](#related)
+  - [License](#license)
 
 ---
 
@@ -66,16 +75,20 @@ Chat can still use workspace tools (`read_file`, `grep`, `bash_run`, …) for li
 
 ```bash
 cd unistar-coworker
-cargo build --release
 cp coworker.example.yaml coworker.yaml
 # Edit repos, github:, llm.base_url / model
 
 export GH_TOKEN=ghp_...   # or: gh auth login
 
-cargo run --release                              # TUI + cron scheduler
-cargo run --release -- serve                     # Web → http://127.0.0.1:8787
-cargo run --release -- run-once                  # headless daily-work
-cargo run --release -- chat --once "Summarize open PRs in acme/widget"
+# Frontend (optional but recommended): build the React UI once before cargo build
+(cd web-ui && npm install && npm run build:fast)
+
+cargo build --release
+
+./target/release/unistar-coworker                                   # TUI + cron scheduler
+./target/release/unistar-coworker serve                             # Web → http://127.0.0.1:8787
+./target/release/unistar-coworker run-once                          # headless daily-work
+./target/release/unistar-coworker chat --once "Summarize open PRs in acme/widget" --json
 ```
 
 ---
@@ -128,7 +141,7 @@ cargo run --release -- serve
 # Open http://127.0.0.1:8787
 ```
 
-The Web UI is a **React 18 SPA** (Vite + Tailwind + Radix UI + zustand) embedded into the binary at compile time. It provides streaming chat with live tool/reasoning cards, a context pane, an approval modal, theme toggle, and Markdown transcript export. Source lives in `web-ui/`; `build.rs` runs `vite build` during `cargo build` and embeds the output via `include_str!`/`include_bytes!`.
+The Web UI is a **React 18 SPA** (Vite + Tailwind + Radix UI + zustand) embedded into the binary at compile time. It provides streaming chat with live tool/reasoning cards, a context pane, an approval modal, theme toggle, and Markdown transcript export. Source lives in `web-ui/`; `build.rs` embeds whatever `web-ui/dist/` already contains via `include_str!`/`include_bytes!` (it does **not** run `npm` itself — the frontend build is owned by the developer / CI / `start-agent.sh` via `npm run build:fast`). The embedded manifest is content-gated, so `cargo build` only recompiles the crate when the bundled assets actually change.
 
 **Development with HMR:**
 
@@ -159,13 +172,28 @@ When you must bind beyond localhost (e.g. `0.0.0.0`), set `web.auth_token`:
 ### Chat
 
 ```bash
-cargo run --release -- chat
+cargo run --release -- chat                                       # interactive REPL
 cargo run --release -- chat --once "Why is #42 CI red in acme/widget?"
-cargo run --release -- chat --session <uuid>
-cargo run --release -- chat --list-sessions
+cargo run --release -- chat --once "Summarize open PRs" --json    # script-friendly JSON on stdout
+cargo run --release -- chat --session <uuid>                      # resume a session
+cargo run --release -- chat --list-sessions --json
+cargo run --release -- chat --title "read the README"             # name a new session
 ```
 
-Mutating GitHub and MCP tools enqueue **Approvals** unless `chat.auto_approve_mutations: true`.
+The CLI chat REPL is built on **rustyline**: line editing (←/→/Home/End), ↑/↓ input history persisted to `coworker-cli-history.txt`, a colored `you·<short-id>>` prompt (auto-disabled when stdout is not a TTY), and **streamed** assistant replies — partial tokens render live as the LLM generates, instead of waiting for the whole turn.
+
+| REPL keys / commands | Behavior |
+|----------------------|----------|
+| `Ctrl-C` (during a turn) | Cancel the in-flight turn (mirrors TUI `Esc`) — does not exit |
+| `Ctrl-C` (at the prompt) | Clear the current input line |
+| `Ctrl-D` / `/quit` | Exit the REPL |
+| `/help` | List slash commands |
+| `/sessions` | List recent sessions (`*` marks the current one) |
+| `/new` | Start a fresh session on the next message |
+| `/resume <id>` | Resume an existing session |
+| `/clear` | Clear the screen |
+
+`chat --once` streams to stdout (so `$(...)` capture works) and prints tool progress to stderr; with `--json` it emits `{ok, session_id, assistant, tool_calls, awaiting_approval}` and exits non-zero on error. Mutating GitHub and MCP tools enqueue **Approvals** unless `chat.auto_approve_mutations: true`.
 
 | `chat.tool_mode` | Behavior |
 |------------------|----------|
@@ -189,29 +217,34 @@ Mutating GitHub and MCP tools enqueue **Approvals** unless `chat.auto_approve_mu
 
 ```bash
 cargo run --release -- run-once
-cargo run --release -- run-once --workflow review-radar
-cargo run --release -- daemon          # cron only, no TUI
-cargo run --release -- --attach        # TUI attached to a running daemon's store
+cargo run --release -- run-once --workflow review-radar --json   # structured JSON on stdout
+cargo run --release -- daemon                  # cron only, no TUI (Ctrl-C / SIGTERM to stop)
+cargo run --release -- daemon --pid-file ./coworker.pid
+cargo run --release -- --attach                # TUI attached to a running daemon's store
 ```
 
 Batch workflows **block third-party MCP by default**; set `workflows.mcp_readonly: true` (global) or `workflows.<id>.mcp_readonly: true` (per-workflow) to allow readonly MCP only. Mutating MCP stays chat-only.
 
 ### CLI reference
 
+**Global flags** (before the subcommand): `--config <PATH>` override config file (skip discover); `-v` / `--verbose` (`-v` debug, `-vv` trace); `-q` / `--quiet` (warn); `--attach` attach to a daemon store only.
+
 | Command | Description |
 |---------|-------------|
 | *(default)* | TUI + cron scheduler |
 | `serve [--bind ADDR]` | Web UI + API + WebSocket |
 | `--attach` | TUI attached to a running daemon's store |
-| `run-once [--workflow ID]` | Headless workflow (default: `daily-work`) |
-| `daemon` | Cron only, no TUI |
-| `chat [--once MSG] [--session UUID] [--list-sessions]` | Interactive or one-shot chat |
-| `triage-pr --repo O/R --pr N` | Debug triage for a single PR |
-| `report oncall` | On-call handoff pack from local store (no MCP) |
-| `report ci [--since-days 7]` | CI efficiency report (requires MCP) |
+| `run-once [--workflow ID] [--json]` | Headless workflow (default: `daily-work`) |
+| `daemon [--pid-file FILE]` | Cron only, no TUI; graceful SIGINT/SIGTERM, writes+removes pid file |
+| `chat [--once MSG] [--session UUID] [--list-sessions] [--title NAME] [--json]` | Interactive or one-shot chat |
+| `triage-pr --repo O/R --pr N [--json]` | Debug triage for a single PR |
+| `report oncall [--json]` | On-call handoff pack from local store (no MCP) |
+| `report ci [--since-days 7] [--json]` | CI efficiency report (requires MCP) |
 | `store migrate --from json --to sqlite --source DIR --dest FILE` | Migrate store backend |
-| `store compact [--audit-days 90] [--digest-keep 30] [--workflow-runs-days 30]` | Prune old audit entries, digests, workflow runs |
-| `skills list` / `workflows list` | Print catalog |
+| `store compact [--audit-days 90] [--digest-keep 30] [--workflow-runs-days 30] [--dry-run]` | Prune old audit entries, digests, workflow runs |
+| `skills list [--json]` / `workflows list [--json]` | Print catalog |
+
+`--json` is available on the script-oriented commands (`run-once`, `chat --once` / `--list-sessions`, `triage-pr`, `report`, `skills list`, `workflows list`) for machine-readable stdout; human progress stays on stderr. `store compact --dry-run` reports what *would* be pruned without deleting.
 
 ### GitHub harness tools
 
@@ -313,6 +346,7 @@ Prune old data to keep the store compact:
 ```bash
 cargo run --release -- store compact            # defaults: audit 90d, keep 30 digests, workflow runs 30d
 cargo run --release -- store compact --audit-days 180 --digest-keep 60
+cargo run --release -- store compact --dry-run  # preview what would be pruned, delete nothing
 ```
 
 ---
@@ -411,7 +445,7 @@ Further detail: [AGENTS.md](./AGENTS.md).
 ## Development
 
 ```bash
-# Rust backend (build.rs auto-runs `vite build` in web-ui/)
+# Rust backend (build.rs embeds web-ui/dist/ — run `npm run build:fast` first to (re)build the UI)
 cargo check
 cargo clippy -- -D warnings
 cargo test
@@ -419,7 +453,7 @@ cargo test --no-default-features   # slim build without headless Chromium
 cargo fmt --check
 ```
 
-If `npm` is unavailable, `cargo build` skips the frontend rebuild and falls back to the existing `web-ui/dist/` (or returns 503 for `/` if dist is missing). Install Node to build the React UI:
+`cargo build` never depends on Node — it only embeds an existing `web-ui/dist/`. If `dist/` is absent the binary still compiles and the React UI returns 404 (fall back to `/legacy`); run `npm run build:fast` in `web-ui/` to (re)generate it. Install Node to build the React UI:
 
 ```bash
 brew install node          # macOS
@@ -461,7 +495,7 @@ Optional: `UNISTAR_BIN=/path/to/unistar-coworker npm test` if the binary is else
 
 A vendored `chromiumoxide` patch lives under `vendor/chromiumoxide/` for CDP schema drift resilience.
 
-The Web UI (`web-ui/`) requires Node 18+ and is built by `build.rs` via `npm run build:fast`. It is not a Cargo feature — the React bundle is embedded at compile time.
+The Web UI (`web-ui/`) requires Node 18+ and is built with `npm run build:fast` (owned by the developer / CI / `start-agent.sh`, **not** by `build.rs`). The resulting bundle is embedded at compile time.
 
 ---
 

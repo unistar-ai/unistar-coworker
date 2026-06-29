@@ -17,7 +17,7 @@ export default function SessionPicker() {
   const [activeIdx, setActiveIdx] = useState(-1);
   const pickerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  const refreshSessions = () => {
     void apiFetch<SessionItem[]>("/api/chat/sessions").then((res) => {
       if (res.ok && Array.isArray(res.data)) {
         setSessions(res.data);
@@ -25,7 +25,17 @@ export default function SessionPicker() {
         setSessions([]);
       }
     });
+  };
+
+  // Initial load.
+  useEffect(() => {
+    refreshSessions();
   }, []);
+
+  // Refresh when session changes (new session created or session switched).
+  useEffect(() => {
+    refreshSessions();
+  }, [sessionId]);
 
   useEffect(() => {
     if (!menuOpen) return;

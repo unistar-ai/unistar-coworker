@@ -31,7 +31,7 @@ use crate::app::{
 };
 use crate::engine::Engine;
 use crate::error::Result;
-use crate::store::Store;
+use crate::store::{ChatRole, Store};
 
 use snapshot::{build_chat_patch, build_live_patch, build_snapshot};
 
@@ -100,6 +100,7 @@ pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>)
         .route("/api/chat", post(api_chat))
         .route("/api/chat/cancel", post(api_chat_cancel))
         .route("/api/chat/clear", post(api_chat_clear))
+        .route("/api/chat/regenerate", post(api_chat_regenerate))
         .route("/api/chat/sessions", get(api_list_chat_sessions))
         .route("/api/chat/sessions/new", post(api_new_chat_session))
         .route("/api/chat/sessions/{id}", post(api_load_chat_session))
@@ -456,6 +457,39 @@ async fn api_chat_clear(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
         publish_snapshot(&rt.state, &rt.snap_tx).await;
     }
     StatusCode::NO_CONTENT
+}
+
+/// Re-run the last user message — finds the most recent `ChatRole::User` in
+/// the session history and calls `run_chat` with it.
+async fn api_chat_regenerate(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
+    let (session_id, last_user_msg) = {
+        let s = rt.state.read().await;
+        if s.chat_busy || !s.config.chat.enabled {
+            return StatusCode::CONFLICT;
+        }
+        let sid = match s.chat_session_id {
+            Some(id) => id,
+            None => return StatusCode::NOT_FOUND,
+        };
+        // Find the last user message from the store.
+        let msgs = match rt.store.list_chat_messages(&sid, 100).await {
+            Ok(m) => m,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        let last = msgs.iter().rev().find(|m| m.role == ChatRole::User);
+        match last {
+            Some(m) => (Some(sid), m.content.clone()),
+            None => return StatusCode::NOT_FOUND,
+        }
+    };
+    let engine = Arc::clone(&rt.engine);
+    let state = rt.state.clone();
+    let snap_tx = rt.snap_tx.clone();
+    tokio::spawn(async move {
+        let _ = engine.run_chat(session_id, &last_user_msg).await;
+        publish_snapshot(&state, &snap_tx).await;
+    });
+    StatusCode::ACCEPTED
 }
 
 #[derive(Serialize)]

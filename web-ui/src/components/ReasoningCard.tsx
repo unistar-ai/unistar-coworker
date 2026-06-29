@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { Brain } from "lucide-react";
 import Markdown from "./Markdown";
 import { normalizeReasoningText } from "../tabs/chat/parser";
 
@@ -52,7 +53,7 @@ export default function ReasoningCard({
   return (
     <div className={cardClass}>
       <div className="activity-reasoning-head">
-        <span className="activity-icon">💭</span>
+        <span className="activity-icon"><Brain size={14} aria-hidden="true" /></span>
         <div className="activity-reasoning-title-wrap">
           <span className="activity-title">Reasoning</span>
           <span className="activity-reasoning-meta">{metaText}</span>

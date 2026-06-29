@@ -1412,6 +1412,23 @@ fn tab_header_label(state: &AppState, tab: Tab) -> String {
 }
 
 fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: ThemePalette) {
+    // Brand mark: ✦ in accent color, followed by the product name.
+    let brand: Vec<Span> = vec![
+        Span::styled(
+            "✦ ",
+            Style::default()
+                .fg(th.accent)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+        Span::styled(
+            "unistar-coworker",
+            Style::default()
+                .fg(th.accent)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+        Span::raw("  "),
+    ];
+
     let tabs_list: Vec<Span> = Tab::all_for_config(&state.config)
         .iter()
         .enumerate()
@@ -1433,8 +1450,10 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: The
     let block = theme::header_block(th);
     let inner = block.inner(area);
     frame.render_widget(Paragraph::new("").block(block), area);
+    let mut all_spans = brand;
+    all_spans.extend(tabs_list);
     frame.render_widget(
-        Paragraph::new(Line::from(tabs_list)).style(Style::default().bg(th.surface)),
+        Paragraph::new(Line::from(all_spans)).style(Style::default().bg(th.surface)),
         inner,
     );
 }
