@@ -11,6 +11,8 @@ pub struct MarkdownSpec {
     pub name: String,
     pub description: String,
     pub body: String,
+    /// Frontmatter `argument-hint` — shown in the skill preview as a usage cue.
+    pub argument_hint: String,
     /// Technique skill names from frontmatter `skills:` (prompt files only).
     pub skill_refs: Vec<String>,
     /// Business/harness tool names from frontmatter `tools:` (skills only).
@@ -22,10 +24,8 @@ pub struct MarkdownSpec {
     #[allow(dead_code)]
     pub intent_keywords: Vec<String>,
     /// Lazy routing: multi-word phrase triggers (skills only).
-    #[allow(dead_code)]
     pub intent_phrases: Vec<String>,
     /// Extra score when these substrings appear (e.g. PR context for ci-triage).
-    #[allow(dead_code)]
     pub intent_bonus_keywords: Vec<String>,
     /// Subtract `intent_penalty` when any of these appear (e.g. PR on branch-health skill).
     #[allow(dead_code)]
@@ -47,6 +47,8 @@ struct SpecFrontmatter {
     name: String,
     #[serde(default)]
     description: String,
+    #[serde(default, rename = "argument-hint")]
+    argument_hint: String,
     #[serde(default)]
     skills: Vec<String>,
     #[serde(default)]
@@ -136,6 +138,7 @@ pub fn parse_markdown_spec(raw: &str) -> Result<MarkdownSpec> {
     Ok(MarkdownSpec {
         name: meta.name,
         description: meta.description,
+        argument_hint: meta.argument_hint,
         body: body.trim_start_matches('\n').trim().to_string(),
         skill_refs: meta.skills,
         tool_refs: meta.tools,
@@ -153,6 +156,7 @@ fn empty_markdown_spec(body: String) -> MarkdownSpec {
     MarkdownSpec {
         name: String::new(),
         description: String::new(),
+        argument_hint: String::new(),
         body,
         skill_refs: Vec::new(),
         tool_refs: Vec::new(),
@@ -236,6 +240,32 @@ mod tests {
         assert_eq!(s.intent_bonus_keywords, vec!["pr"]);
         assert_eq!(s.intent_penalty_keywords, vec!["draft"]);
         assert_eq!(s.intent_penalty, 4);
+    }
+
+    #[test]
+    fn parses_my_prs_frontmatter_with_multiword_intent_phrases() {
+        // Reproduces the my-prs SKILL.md frontmatter: intent_phrases with
+        // multiple comma-separated multi-word phrases in a YAML flow sequence.
+        let raw = "---\n\
+name: my-prs\n\
+description: \"Author-focused open PR status\"\n\
+argument-hint: \"Author filter or repo\"\n\
+intent_phrases: [my pr, my open, my pull, assigned to me, what do i need]\n\
+intent_bonus_keywords: [\"@me\"]\n\
+tools:\n\
+  - pr_list_open\n\
+  - pr_get_status_batch\n\
+---\n\n\
+# My PRs\n";
+        let s = parse_markdown_spec(raw).unwrap();
+        assert_eq!(s.name, "my-prs");
+        assert_eq!(s.argument_hint, "Author filter or repo");
+        assert_eq!(
+            s.intent_phrases,
+            vec!["my pr", "my open", "my pull", "assigned to me", "what do i need"]
+        );
+        assert_eq!(s.intent_bonus_keywords, vec!["@me"]);
+        assert_eq!(s.tool_refs, vec!["pr_list_open", "pr_get_status_batch"]);
     }
 
     #[test]

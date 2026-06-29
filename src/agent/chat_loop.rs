@@ -13,7 +13,7 @@ use crate::agent::budget::TokenBudget;
 use crate::agent::chat_discovery::ChatDiscoveryState;
 use crate::agent::chat_duplicate::{
     duplicate_tool_block_reason, fulfill_duplicate_readonly_tool, harness_retry_or_stop,
-    maybe_block_duplicate_tool_call, push_harness_nudge, prune_stale_missing_arg_nudges,
+    maybe_block_duplicate_tool_call, prune_stale_missing_arg_nudges, push_harness_nudge,
     DuplicateToolBlock, MAX_HARNESS_CORRECTIONS,
 };
 use crate::agent::chat_stream::persist_interim_assistant_message;
@@ -21,9 +21,9 @@ use crate::agent::chat_stream::persist_interim_assistant_message;
 use crate::agent::context::{
     estimate_message_tokens, estimate_tools_tokens, format_system_for_context_panel,
     format_tool_approval_pending_message, format_tool_context_message,
-    format_tools_for_context_panel, history_token_budget,
-    message_budget_for_tools, pack_session_history_with_llm, skill_body_for_context_panel,
-    tool_names_from_definitions, trim_llm_messages_with_llm, trim_system_content, truncate_chars,
+    format_tools_for_context_panel, history_token_budget, message_budget_for_tools,
+    pack_session_history_with_llm, skill_body_for_context_panel, tool_names_from_definitions,
+    trim_llm_messages_with_llm, trim_system_content, truncate_chars,
 };
 use crate::agent::file_tools;
 use crate::agent::hooks::{HookRunner, TurnContext};
@@ -38,8 +38,7 @@ use crate::app::AppEvent;
 use crate::config::{ChatToolMode, Config};
 use crate::engine::SkillSpec;
 use crate::engine::{
-    compose_chat_system_prompt, format_session_context_message,
-    load_chat_prompt_bundle_for_session,
+    compose_chat_system_prompt, format_session_context_message, load_chat_prompt_bundle_for_session,
 };
 use crate::error::{CoworkerError, Result};
 use crate::github::{effective_chat_tool_mode, GithubHarness};
@@ -56,8 +55,8 @@ use crate::agent::chat_mutating::{
     MutatingToolContext, MutatingToolOutcome,
 };
 use crate::agent::chat_readonly::{
-    execute_readonly_tools_parallel, record_tool_outcome, ReadonlyToolContext,
-    ReadonlyToolHarness, ReadonlyToolOutcome,
+    execute_readonly_tools_parallel, record_tool_outcome, ReadonlyToolContext, ReadonlyToolHarness,
+    ReadonlyToolOutcome,
 };
 
 const MUTATING_TOOLS: &[&str] = &[
@@ -80,6 +79,20 @@ pub struct ContextSkillBlock {
     pub name: String,
     pub body: String,
     pub tokens: u32,
+    /// Frontmatter `description` — shown in the context panel skill preview.
+    pub description: String,
+    /// Frontmatter `always: true` — always-on skills are flagged in the preview.
+    pub always: bool,
+    /// Frontmatter `skills:` refs (technique skills this skill pulls in).
+    pub skills: Vec<String>,
+    /// Frontmatter `tools:` refs (business/harness tools this skill declares).
+    pub tools: Vec<String>,
+    /// Frontmatter `argument-hint` — usage cue shown in the preview.
+    pub argument_hint: String,
+    /// Frontmatter `intent_phrases` — lazy-routing trigger phrases.
+    pub intent_phrases: Vec<String>,
+    /// Frontmatter `intent_bonus_keywords` — bonus scoring substrings.
+    pub intent_bonus_keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -478,6 +491,13 @@ pub fn build_context_snapshot(
                 name: s.name.clone(),
                 body,
                 tokens,
+                description: s.description.clone(),
+                always: s.always_load,
+                skills: s.skill_refs.clone(),
+                tools: s.tool_refs.clone(),
+                argument_hint: s.argument_hint.clone(),
+                intent_phrases: s.intent_phrases.clone(),
+                intent_bonus_keywords: s.intent_bonus_keywords.clone(),
             }
         })
         .collect();
@@ -879,6 +899,19 @@ pub async fn run_chat_turn(
     trim_system_content(&mut system_content, token_budget.system_budget());
 
     let mut llm_messages = vec![LlmTurnMessage::new("system", system_content)];
+
+    // Inject the Available skills catalog as a separate system message so it
+    // isn't subject to trim_system_content's budget cuts. The catalog lists
+    // every skill's name + description; the model uses it to pick skill_load
+    // targets. Keeping it separate means a large skill set won't cause
+    // mid-word truncation of the core system prompt.
+    let catalog = prompt_bundle.skill_catalog.trim();
+    if !catalog.is_empty() {
+        llm_messages.push(LlmTurnMessage::new(
+            "system",
+            format!("## Available skills\n\n{catalog}"),
+        ));
+    }
     if !runtime_plan.skip_llm_injection {
         let session_context = format_session_context_message(&runtime_plan.llm_body);
         if !session_context.is_empty() {
@@ -2348,7 +2381,10 @@ fn validate_prepared_tool_calls(
     None
 }
 
-pub(crate) fn push_native_assistant_tool_calls(messages: &mut Vec<LlmTurnMessage>, step: &ChatAgentStep) {
+pub(crate) fn push_native_assistant_tool_calls(
+    messages: &mut Vec<LlmTurnMessage>,
+    step: &ChatAgentStep,
+) {
     let calls: Vec<LlmToolCall> = step
         .tool_calls
         .iter()
@@ -2788,11 +2824,11 @@ mod tests {
         let budget = TokenBudget::from_config(64_000);
         let skills = vec![SkillSpec {
             name: "ci-triage".into(),
-            description: String::new(),
+            description: "Classify CI failures".into(),
             body: "## Rules\n- classify CI".into(),
-            skill_refs: vec![],
-            tool_refs: vec![],
-            always_load: false,
+            skill_refs: vec!["github-ops-tone".into()],
+            tool_refs: vec!["pr_get_ci_snapshot".into()],
+            always_load: true,
             ..Default::default()
         }];
         let system = "Agent body\n\n## Techniques\nhidden\n\n## Context\nrepos: x";
@@ -2806,6 +2842,11 @@ mod tests {
         );
         assert_eq!(snap.skill_blocks.len(), 1);
         assert!(snap.skill_blocks[0].body.contains("classify CI"));
+        // Frontmatter metadata is surfaced for the context-panel preview.
+        assert_eq!(snap.skill_blocks[0].description, "Classify CI failures");
+        assert!(snap.skill_blocks[0].always);
+        assert_eq!(snap.skill_blocks[0].skills, vec!["github-ops-tone"]);
+        assert_eq!(snap.skill_blocks[0].tools, vec!["pr_get_ci_snapshot"]);
         assert!(snap.messages[0].content.contains("Agent body"));
         assert!(!snap.messages[0].content.contains("Techniques"));
         assert!(snap.skills_tokens > 0);

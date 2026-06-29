@@ -49,14 +49,14 @@ enum Commands {
         #[command(subcommand)]
         kind: ReportKind,
     },
-    /// Debug triage for a single PR (stub in v0.1)
+    /// Debug triage for a single PR
     TriagePr {
         #[arg(long)]
         repo: String,
         #[arg(long)]
         pr: u32,
     },
-    /// Headless daemon: cron scheduler without TUI (Phase 2)
+    /// Headless daemon: cron scheduler without TUI
     Daemon,
     /// Web UI server (browser)
     Serve {
@@ -64,7 +64,7 @@ enum Commands {
         #[arg(long)]
         bind: Option<String>,
     },
-    /// Interactive chat REPL (Phase 2+)
+    /// Interactive chat REPL
     Chat {
         /// Single message then exit (script-friendly)
         #[arg(long)]
@@ -650,7 +650,10 @@ async fn run_tui(
 
     {
         let mut s = state.write().await;
-        s.push_log("info", "unistar-coworker v0.3 started");
+        s.push_log(
+            "info",
+            format!("unistar-coworker v{} started", env!("CARGO_PKG_VERSION")),
+        );
     }
 
     let engine =

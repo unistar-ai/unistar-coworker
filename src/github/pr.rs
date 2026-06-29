@@ -1708,3 +1708,373 @@ fn merge_blockers(pr: &PullRequest, fail: i32, pending: i32) -> Vec<String> {
 fn has_prefix_blocker(blockers: &[String], prefix: &str) -> bool {
     blockers.iter().any(|b| b.starts_with(prefix))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::github::checks::CheckRollup;
+
+    fn pr_with(mergeable: &str, review: &str, checks: Vec<CheckRollup>) -> PullRequest {
+        PullRequest {
+            number: 1,
+            title: "t".into(),
+            author: PrAuthor::default(),
+            state: "OPEN".into(),
+            is_draft: false,
+            mergeable: mergeable.into(),
+            review_decision: review.into(),
+            status_check: checks,
+        }
+    }
+
+    fn check_run(conclusion: &str) -> CheckRollup {
+        CheckRollup {
+            typename: Some("CheckRun".into()),
+            name: Some("ci".into()),
+            context: None,
+            status: Some("COMPLETED".into()),
+            conclusion: Some(conclusion.into()),
+            state: None,
+            details_url: None,
+            target_url: None,
+        }
+    }
+
+    #[test]
+    fn docs_path_recognizes_common_doc_locations() {
+        assert!(is_docs_path("README.md"));
+        assert!(is_docs_path("docs/intro.md"));
+        assert!(is_docs_path("doc/guide.rst"));
+        assert!(is_docs_path("src/docs/foo.md"));
+        assert!(is_docs_path("CHANGELOG.md"));
+        assert!(!is_docs_path("src/main.rs"));
+        assert!(!is_docs_path("docs.go"));
+    }
+
+    #[test]
+    fn lockfile_detection_covers_common_names() {
+        assert!(is_lockfile("package-lock.json"));
+        assert!(is_lockfile("yarn.lock"));
+        assert!(is_lockfile("Cargo.lock"));
+        assert!(is_lockfile("poetry.lock"));
+        assert!(is_lockfile("go.sum"));
+        assert!(is_lockfile("foo.lock"));
+        assert!(!is_lockfile("Cargo.toml"));
+        assert!(!is_lockfile("lockfile.txt"));
+    }
+
+    #[test]
+    fn ci_green_when_all_pass_or_empty() {
+        assert!(is_ci_green(&pr_with(
+            "MERGEABLE",
+            "APPROVED",
+            vec![check_run("SUCCESS")]
+        )));
+        assert!(is_ci_green(&pr_with("MERGEABLE", "APPROVED", vec![])));
+        assert!(!is_ci_green(&pr_with(
+            "MERGEABLE",
+            "APPROVED",
+            vec![check_run("FAILURE")]
+        )));
+        assert!(!is_ci_green(&pr_with(
+            "MERGEABLE",
+            "APPROVED",
+            vec![check_run("EXPECTED")]
+        )));
+    }
+
+    #[test]
+    fn merge_ready_requires_all_conditions() {
+        let green = vec![check_run("SUCCESS")];
+        assert!(is_merge_ready(&pr_with(
+            "MERGEABLE",
+            "APPROVED",
+            green.clone()
+        )));
+        // draft
+        let mut draft = pr_with("MERGEABLE", "APPROVED", green.clone());
+        draft.is_draft = true;
+        assert!(!is_merge_ready(&draft));
+        // ci failing
+        assert!(!is_merge_ready(&pr_with(
+            "MERGEABLE",
+            "APPROVED",
+            vec![check_run("FAILURE")]
+        )));
+        // review required
+        assert!(!is_merge_ready(&pr_with(
+            "MERGEABLE",
+            "REVIEW_REQUIRED",
+            green.clone()
+        )));
+        // not mergeable
+        assert!(!is_merge_ready(&pr_with(
+            "CONFLICTING",
+            "APPROVED",
+            green.clone()
+        )));
+    }
+
+    #[test]
+    fn merge_queue_blocker_reports_specific_reason() {
+        let mut draft = pr_with("MERGEABLE", "APPROVED", vec![]);
+        draft.is_draft = true;
+        assert_eq!(merge_queue_blocker(&draft), "draft");
+        assert_eq!(
+            merge_queue_blocker(&pr_with("CONFLICTING", "APPROVED", vec![])),
+            "merge conflicts"
+        );
+        assert_eq!(
+            merge_queue_blocker(&pr_with("UNKNOWN", "APPROVED", vec![])),
+            "mergeability unknown"
+        );
+        assert_eq!(
+            merge_queue_blocker(&pr_with("MERGEABLE", "REVIEW_REQUIRED", vec![])),
+            "review required"
+        );
+        assert_eq!(
+            merge_queue_blocker(&pr_with("MERGEABLE", "CHANGES_REQUESTED", vec![])),
+            "changes requested"
+        );
+        assert_eq!(
+            merge_queue_blocker(&pr_with(
+                "MERGEABLE",
+                "APPROVED",
+                vec![check_run("FAILURE")]
+            )),
+            "CI failing"
+        );
+        assert_eq!(
+            merge_queue_blocker(&pr_with(
+                "MERGEABLE",
+                "APPROVED",
+                vec![check_run("EXPECTED")]
+            )),
+            "CI pending"
+        );
+        // All green but still no approval -> falls through to "other blocker" only if review approved; here APPROVED + green -> "other blocker" by elimination
+        assert_eq!(
+            merge_queue_blocker(&pr_with(
+                "MERGEABLE",
+                "APPROVED",
+                vec![check_run("SUCCESS")]
+            )),
+            "other blocker (branch protection?)"
+        );
+    }
+
+    #[test]
+    fn merge_blockers_combines_multiple_signals() {
+        let pr = pr_with(
+            "CONFLICTING",
+            "REVIEW_REQUIRED",
+            vec![check_run("FAILURE"), check_run("SUCCESS")],
+        );
+        let b = merge_blockers(&pr, 1, 0);
+        assert!(b.iter().any(|x| x.contains("merge conflicts")));
+        assert!(b.iter().any(|x| x.contains("CI failing")));
+        assert!(b.iter().any(|x| x == "review required"));
+    }
+
+    #[test]
+    fn merge_blockers_does_not_double_count_prefix() {
+        // Two failing checks -> still only one "CI failing:" entry plus a tally fallback if no name match.
+        let pr = pr_with(
+            "MERGEABLE",
+            "APPROVED",
+            vec![check_run("FAILURE"), check_run("ERROR")],
+        );
+        let b = merge_blockers(&pr, 2, 0);
+        let ci_failing_named = b.iter().filter(|x| x.starts_with("CI failing:")).count();
+        assert_eq!(ci_failing_named, 2);
+        // tally fallback should NOT trigger because prefix blocker exists
+        assert!(!b.iter().any(|x| x == "CI failing (2 check(s))"));
+    }
+
+    #[test]
+    fn has_prefix_blocker_basic() {
+        let bs = vec!["CI failing: build".to_string(), "draft PR".to_string()];
+        assert!(has_prefix_blocker(&bs, "CI failing"));
+        assert!(!has_prefix_blocker(&bs, "CI pending"));
+    }
+
+    #[test]
+    fn parse_codeowners_skips_blanks_and_comments() {
+        let text = "# comment\n\n*       @team-a\n/src/   @bob @alice\nbadline\n";
+        let rules = parse_codeowners(text);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].pattern, "*");
+        assert_eq!(rules[0].owners, vec!["@team-a"]);
+        assert_eq!(rules[1].pattern, "/src/");
+        assert_eq!(rules[1].owners, vec!["@bob", "@alice"]);
+    }
+
+    #[test]
+    fn match_codeowners_strips_dot_slash_and_dedups() {
+        let rules = vec![
+            CodeownersRule {
+                pattern: "*".into(),
+                owners: vec!["@team-a".into()],
+            },
+            CodeownersRule {
+                pattern: "/src/**".into(),
+                owners: vec!["@bob".into(), "@team-a".into()],
+            },
+        ];
+        let owners = match_codeowners(&rules, "./src/main.rs");
+        assert_eq!(owners, vec!["@team-a", "@bob"]);
+        assert!(match_codeowners(&rules, "./nonexistent").contains(&"@team-a".to_string()));
+    }
+
+    #[test]
+    fn codeowners_pattern_match_variants() {
+        assert!(codeowners_pattern_match("*", "anything.rs"));
+        assert!(codeowners_pattern_match("**", "any/path.rs"));
+        assert!(codeowners_pattern_match("/**", "any/path.rs"));
+        // ** prefix
+        assert!(codeowners_pattern_match("/src/**", "src/main.rs"));
+        assert!(!codeowners_pattern_match("/src/**", "tests/foo.rs"));
+        // directory match
+        assert!(codeowners_pattern_match("/docs/*", "docs/intro.md"));
+        // basename match when no slash in pattern
+        assert!(codeowners_pattern_match("*.ts", "src/foo.ts"));
+        assert!(!codeowners_pattern_match("*.ts", "src/foo.rs"));
+        // anchored pattern
+        assert!(codeowners_pattern_match("/Cargo.toml", "Cargo.toml"));
+    }
+
+    #[test]
+    fn glob_match_wildcards() {
+        assert!(glob_match("*.rs", "main.rs"));
+        assert!(glob_match("foo*.rs", "foobar.rs"));
+        assert!(glob_match("?atch", "catch"));
+        assert!(!glob_match("?atch", "cat"));
+        assert!(glob_match("exact", "exact"));
+        assert!(!glob_match("exact", "other"));
+        assert!(glob_match("*", ""));
+    }
+
+    #[test]
+    fn format_pr_status_renders_fields() {
+        let pr = pr_with("MERGEABLE", "APPROVED", vec![check_run("SUCCESS")]);
+        let s = format_pr_status(&pr);
+        assert!(s.contains("PR #1 t"));
+        assert!(s.contains("CI: 1 passing / 0 failing / 0 pending"));
+        assert!(s.contains("Review: approved"));
+        assert!(s.contains("Mergeable: yes"));
+    }
+
+    #[test]
+    fn format_pr_status_marks_draft() {
+        let mut pr = pr_with("MERGEABLE", "APPROVED", vec![]);
+        pr.is_draft = true;
+        let s = format_pr_status(&pr);
+        assert!(s.contains("(draft)"));
+    }
+
+    #[test]
+    fn format_pr_list_line_includes_draft_suffix() {
+        let mut pr = pr_with("MERGEABLE", "APPROVED", vec![check_run("SUCCESS")]);
+        let line = format_pr_list_line(&pr);
+        assert!(!line.contains("[draft]"));
+        pr.is_draft = true;
+        let line = format_pr_list_line(&pr);
+        assert!(line.contains("[draft]"));
+    }
+
+    #[test]
+    fn format_proverview_batch_line_renders_counts() {
+        let pr = PullRequestOverviewBatch {
+            number: 42,
+            title: "feat".into(),
+            author: PrAuthor { login: "u".into() },
+            is_draft: false,
+            review_decision: "APPROVED".into(),
+            status_check: vec![check_run("SUCCESS"), check_run("FAILURE")],
+            additions: 100,
+            deletions: 5,
+            changed_files: 3,
+        };
+        let line = format_proverview_batch_line(&pr);
+        assert!(line.contains("#42  feat  @u"));
+        assert!(line.contains("CI:1/1/0"));
+        assert!(line.contains("review:approved"));
+        assert!(line.contains("files:3 +100/-5"));
+    }
+
+    #[test]
+    fn format_diff_risk_scan_empty_files() {
+        let s = format_diff_risk_scan("repo", 9, &[]);
+        assert!(s.contains("No changed files for repo#9"));
+    }
+
+    #[test]
+    fn format_diff_risk_scan_flags_lockfile_and_large_diff() {
+        let files = vec![
+            PrFileChange {
+                filename: "package-lock.json".into(),
+                additions: 10,
+                deletions: 0,
+                status: "modified".into(),
+            },
+            PrFileChange {
+                filename: "src/main.rs".into(),
+                additions: 600,
+                deletions: 0,
+                status: "modified".into(),
+            },
+        ];
+        let s = format_diff_risk_scan("repo", 1, &files);
+        assert!(s.contains("lockfile"));
+        assert!(s.contains("large_diff"));
+        assert!(s.contains("package-lock.json"));
+    }
+
+    #[test]
+    fn format_diff_risk_scan_flags_workflow_and_tests_removed() {
+        let files = vec![
+            PrFileChange {
+                filename: ".github/workflows/ci.yml".into(),
+                additions: 1,
+                deletions: 1,
+                status: "modified".into(),
+            },
+            PrFileChange {
+                filename: "tests/foo_test.rs".into(),
+                additions: 0,
+                deletions: 5,
+                status: "removed".into(),
+            },
+        ];
+        let s = format_diff_risk_scan("repo", 1, &files);
+        assert!(s.contains("workflow_changed"));
+        assert!(s.contains("tests_removed"));
+    }
+
+    #[test]
+    fn merged_since_date_accepts_iso_date() {
+        let d = merged_since_date("2026-01-15").unwrap();
+        assert_eq!(d, "2026-01-15");
+    }
+
+    #[test]
+    fn merged_since_date_rejects_garbage() {
+        assert!(merged_since_date("not-a-date").is_err());
+    }
+
+    #[test]
+    fn merged_since_date_days_integer_falls_back_to_14_on_zero() {
+        // 0 or negative -> 14 days. We can't assert exact date due to time,
+        // but it should parse and produce a YYYY-MM-DD shape.
+        let d = merged_since_date("0").unwrap();
+        assert_eq!(d.len(), 10);
+        assert_eq!(d.as_bytes().get(4), Some(&b'-'));
+    }
+
+    #[test]
+    fn base64_decode_roundtrip_ascii() {
+        // "Hello, World!" in base64
+        let s = base64_decode("SGVsbG8sIFdvcmxkIQ==").unwrap();
+        assert_eq!(s, "Hello, World!");
+    }
+}

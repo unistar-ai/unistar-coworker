@@ -10,7 +10,10 @@ tokio::task_local! {
 }
 
 /// Run `f` with workflow MCP policy (readonly third-party MCP on/off).
-pub async fn workflow_mcp_scope<T>(mcp_readonly: bool, f: impl std::future::Future<Output = T>) -> T {
+pub async fn workflow_mcp_scope<T>(
+    mcp_readonly: bool,
+    f: impl std::future::Future<Output = T>,
+) -> T {
     WORKFLOW_MCP_READONLY.scope(mcp_readonly, f).await
 }
 

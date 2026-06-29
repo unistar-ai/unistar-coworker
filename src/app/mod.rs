@@ -11,7 +11,12 @@ use std::time::{Duration, Instant};
 use chrono::NaiveDate;
 use tokio::sync::broadcast;
 
-use crate::agent::chat_loop::{ChatActivityFlow, ChatProgress, ContextSnapshot};
+use crate::agent::budget::TokenBudget;
+use crate::agent::chat_loop::{
+    build_context_snapshot, ChatActivityFlow, ChatProgress, ContextSnapshot,
+};
+use crate::agent::context::chat_message_to_llm;
+use crate::agent::tool_catalog::ToolCatalog;
 use crate::config::Config;
 use crate::store::{
     Approval, AuditEntry, ChatMessage, ChatRole, Digest, DigestMeta, LogLine, PrSnapshot, Store,
@@ -1107,9 +1112,12 @@ pub async fn load_chat_session_ui(
     session_id: uuid::Uuid,
 ) -> crate::error::Result<()> {
     let messages = store.list_chat_messages(&session_id, 300).await?;
+    // Capture the prior context BEFORE clear_chat_transcript() nulls it, so we
+    // can preserve its discovered tools & skills across the transcript reload.
+    let prev_context = state.chat_context.clone();
     state.clear_chat_transcript();
     state.chat_session_id = Some(session_id);
-    for msg in messages {
+    for msg in &messages {
         if msg.role == ChatRole::Reasoning {
             let body =
                 crate::agent::context::strip_reasoning_summary_marker(&msg.content).to_string();
@@ -1140,6 +1148,70 @@ pub async fn load_chat_session_ui(
     }
     state.chat_scroll_from_bottom = 0;
     state.rehydrate_chat_pending_approval();
+
+    // Rebuild the context panel's message-derived fields (turn, tokens,
+    // message_count, messages) from the freshly loaded messages. Tools &
+    // skills are NOT rediscovered on session load (that needs the full chat
+    // discovery pipeline, which only runs during a chat turn), so we preserve
+    // them from the existing chat_context when present — otherwise the panel
+    // would blank out TOOLS/SKILLS after every session switch *and* after every
+    // chat turn (apply_chat_turn_result calls this to reload the transcript).
+    //
+    // On a cold switch (no prior context, e.g. picking a session from the
+    // picker before chatting) we seed:
+    //   - skill names from the session's persisted runtime_state.loaded_skills
+    //   - tool definitions from the static ToolCatalog for the configured
+    //     tool_mode (these are config-fixed, not session-specific, so they're
+    //     a faithful preview; warmed business tools get added on the next turn)
+    let llm_messages: Vec<_> = messages.iter().map(chat_message_to_llm).collect();
+    let turn = llm_messages.len().max(1) as u32;
+    let budget = TokenBudget::from_config(64_000);
+
+    let merged = if let Some(prev) = prev_context {
+        // Keep the previously discovered tools & skills; refresh the rest.
+        let fresh = build_context_snapshot(&llm_messages, turn, &budget, &[], &[], None);
+        ContextSnapshot {
+            tools_body: prev.tools_body,
+            tools_tokens: prev.tools_tokens,
+            tool_names: prev.tool_names,
+            skill_blocks: prev.skill_blocks,
+            skills_tokens: prev.skills_tokens,
+            runtime_context_revision: prev.runtime_context_revision,
+            ..fresh
+        }
+    } else {
+        // Cold switch: discover tools from the static catalog + load the
+        // full skill specs (body/description/frontmatter) from the persisted
+        // runtime_state.loaded_skills so the Skills section shows real
+        // content + token counts, not just names with 0 tokens.
+        let native_tools = ToolCatalog::new()
+            .native_tool_definitions(state.config.chat.tool_mode);
+        let persisted_skills: Vec<String> = store
+            .get_chat_session(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.runtime_state.loaded_skills)
+            .unwrap_or_default();
+        // Load each skill spec from disk; skip any that fail (e.g. removed
+        // skill files) so a missing skill doesn't blank the whole panel.
+        let loaded_skills: Vec<_> = persisted_skills
+            .iter()
+            .filter_map(|name| {
+                crate::engine::skill::load_skill(crate::engine::skill::resolve_skill_ref(name))
+                    .ok()
+            })
+            .collect();
+        build_context_snapshot(
+            &llm_messages,
+            turn,
+            &budget,
+            &native_tools,
+            &loaded_skills,
+            None,
+        )
+    };
+    state.set_chat_context(merged);
     Ok(())
 }
 
@@ -1305,5 +1377,192 @@ diff --git a/x.go b/x.go\n\
             line.starts_with("  … reasoning: Checked CI on PR #42."),
             "got: {line}"
         );
+    }
+
+    /// Switching sessions must rebuild the context panel's message-derived
+    /// fields from the loaded messages immediately — otherwise the panel keeps
+    /// showing the previous session's context (or empty) until the next chat
+    /// turn. Tools & skills discovered earlier are preserved across the reload
+    /// (this path also runs after every chat turn to reload the transcript).
+    #[tokio::test]
+    async fn load_chat_session_ui_rebuilds_context_and_preserves_tools_skills() {
+        use crate::agent::chat_loop::ContextSkillBlock;
+        use crate::store::sqlite::SqliteStore;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            SqliteStore::open(dir.path().join("test.db"), false).expect("open store"),
+        ) as Arc<dyn crate::store::Store>;
+
+        let session = store
+            .create_chat_session(Some("preview-test"), None)
+            .await
+            .expect("create session");
+        let sid = session.id;
+        let user_msg = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            role: ChatRole::User,
+            content: "hello world".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+        };
+        let ai_msg = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            role: ChatRole::Assistant,
+            content: "hi there".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+        };
+        store.append_chat_message(&user_msg).await.expect("append user");
+        store.append_chat_message(&ai_msg).await.expect("append assistant");
+
+        let mut state = AppState::new(
+            serde_yaml::from_str(
+                r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+chat: { enabled: true }
+storage: { backend: json, path: ./data }
+repos: [acme/widget]
+"#,
+            )
+            .expect("parse config"),
+            "coworker.yaml".into(),
+        );
+        // Pre-seed a context with tools & skills (simulating what chat_loop
+        // produced on a prior turn) to prove they survive the reload.
+        state.set_chat_context(ContextSnapshot {
+            tools_body: "bash_run / read_file".into(),
+            tools_tokens: 800,
+            tool_names: vec!["bash_run".into(), "read_file".into()],
+            skill_blocks: vec![ContextSkillBlock {
+                name: "github-ops-tone".into(),
+                body: "be concise".into(),
+                tokens: 60,
+                description: "secretary tone".into(),
+                always: true,
+                skills: vec![],
+                tools: vec![],
+                argument_hint: String::new(),
+                intent_phrases: vec![],
+                intent_bonus_keywords: vec![],
+            }],
+            skills_tokens: 60,
+            ..Default::default()
+        });
+
+        load_chat_session_ui(&mut state, store.as_ref(), sid)
+            .await
+            .expect("load session");
+
+        let ctx = state
+            .chat_context
+            .as_ref()
+            .expect("context rebuilt after session load");
+        // Message-derived fields refreshed from the loaded messages.
+        assert!(ctx.message_count >= 2, "expected >=2 messages in context");
+        assert!(ctx.message_tokens > 0, "expected nonzero message tokens");
+        assert_eq!(state.chat_session_id, Some(sid));
+        // Tools & skills preserved from the prior context — NOT blanked.
+        assert_eq!(ctx.tool_names, vec!["bash_run", "read_file"]);
+        assert_eq!(ctx.tools_body, "bash_run / read_file");
+        assert_eq!(ctx.skill_blocks.len(), 1);
+        assert_eq!(ctx.skill_blocks[0].name, "github-ops-tone");
+        assert!(ctx.skill_blocks[0].always);
+    }
+
+    /// Cold session switch (no prior context) seeds skill names from the
+    /// session's persisted runtime_state.loaded_skills so the Skills section
+    /// isn't empty before the first chat turn.
+    #[tokio::test]
+    async fn load_chat_session_ui_seeds_skills_from_persisted_runtime_state() {
+        use crate::store::sqlite::SqliteStore;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            SqliteStore::open(dir.path().join("test.db"), false).expect("open store"),
+        ) as Arc<dyn crate::store::Store>;
+
+        // Create a session and persist loaded_skills in its runtime_state.
+        let mut session = store
+            .create_chat_session(Some("seeded-skills"), None)
+            .await
+            .expect("create session");
+        session.runtime_state.loaded_skills = vec!["github-ops-tone".into(), "ci-triage".into()];
+        store.update_chat_session(&session).await.expect("persist runtime_state");
+        let sid = session.id;
+        store
+            .append_chat_message(&ChatMessage {
+                id: Uuid::new_v4(),
+                session_id: sid,
+                role: ChatRole::User,
+                content: "hi".into(),
+                ts: Utc::now(),
+                tool_name: None,
+                tool_calls_json: None,
+            })
+            .await
+            .expect("append");
+
+        let mut state = AppState::new(
+            serde_yaml::from_str(
+                r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+chat: { enabled: true }
+storage: { backend: json, path: ./data }
+repos: [acme/widget]
+"#,
+            )
+            .expect("parse config"),
+            "coworker.yaml".into(),
+        );
+        // No prior chat_context — cold switch path.
+        assert!(state.chat_context.is_none());
+
+        load_chat_session_ui(&mut state, store.as_ref(), sid)
+            .await
+            .expect("load session");
+
+        let ctx = state
+            .chat_context
+            .as_ref()
+            .expect("context built on cold switch");
+        let skill_names: Vec<_> = ctx.skill_blocks.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(skill_names, vec!["github-ops-tone", "ci-triage"]);
+        // Skills are loaded from disk with real bodies + token counts, not
+        // just names with 0 tokens.
+        assert!(
+            ctx.skill_blocks.iter().all(|s| s.tokens > 0),
+            "expected nonzero skill tokens, got: {:?}",
+            ctx.skill_blocks.iter().map(|s| (s.name.clone(), s.tokens)).collect::<Vec<_>>()
+        );
+        assert!(
+            ctx.skill_blocks.iter().all(|s| !s.body.is_empty()),
+            "expected non-empty skill bodies"
+        );
+        // github-ops-tone has always: true in its frontmatter.
+        let tone = ctx
+            .skill_blocks
+            .iter()
+            .find(|s| s.name == "github-ops-tone")
+            .expect("github-ops-tone present");
+        assert!(tone.always, "github-ops-tone should be always-on");
+        assert!(!tone.description.is_empty(), "description should be loaded");
+        // Tools are discovered from the static ToolCatalog for the configured
+        // tool_mode (Auto → lazy-native subset), so TOOLS is NOT empty.
+        assert!(
+            !ctx.tool_names.is_empty(),
+            "expected tool names from static catalog, got: {:?}",
+            ctx.tool_names
+        );
+        assert!(ctx.tool_names.contains(&"bash_run".to_string()));
+        assert!(!ctx.tools_body.is_empty(), "expected non-empty tools_body");
     }
 }

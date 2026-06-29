@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::ChatToolMode;
 use crate::error::Result;
@@ -62,12 +62,10 @@ fn join_skills(skills: &[SkillSpec]) -> String {
 
 pub fn compose_static_system_prompt(bundle: &PromptBundle) -> String {
     let mut parts = vec![bundle.chat_prompt.body.clone()];
-    if !bundle.skill_catalog.trim().is_empty() {
-        parts.push(format!(
-            "## Available skills\n\n{}",
-            bundle.skill_catalog.trim()
-        ));
-    }
+    // NOTE: the "Available skills" catalog is NOT inlined here — it's injected
+    // as a separate message in chat_loop so it isn't subject to
+    // trim_system_content's budget cuts (the catalog can be long with many
+    // skills, and blind truncation was cutting skill names mid-word).
     let techniques = join_skills(&bundle.skills);
     if !techniques.is_empty() {
         parts.push(format!("## Techniques\n{techniques}"));
@@ -127,10 +125,46 @@ pub fn default_chat_prompt_path() -> PathBuf {
 }
 
 pub fn default_chat_skill_paths() -> Vec<PathBuf> {
-    vec![
-        PathBuf::from("skills/github-ops-tone/SKILL.md"),
-        PathBuf::from("skills/ci-triage/SKILL.md"),
-    ]
+    // Scan the skills/ directory for every SKILL.md so newly added skills are
+    // automatically registered (and surfaced in the system prompt's "Available
+    // skills" list). Previously this was a hardcoded 2-skill list, which meant
+    // any skill not explicitly listed (e.g. my-prs) couldn't be loaded via
+    // skill_load — the registry didn't know about it.
+    scan_skill_dir(Path::new("skills"))
+}
+
+/// Recursively collect every `SKILL.md` under `dir`, sorted for stable order.
+/// Subdirectories whose name starts with `_` (e.g. `_base`) are skipped —
+/// they hold shared fragments (TOOLS.md), not skills.
+fn scan_skill_dir(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        // Directory missing (e.g. running outside the repo) — fall back to the
+        // known defaults so the agent still has its core skills.
+        return vec![
+            PathBuf::from("skills/github-ops-tone/SKILL.md"),
+            PathBuf::from("skills/ci-triage/SKILL.md"),
+        ];
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let name = e.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('_') {
+                return None;
+            }
+            if path.is_dir() {
+                let skill_md = path.join("SKILL.md");
+                if skill_md.is_file() {
+                    return Some(skill_md);
+                }
+            }
+            None
+        })
+        .collect();
+    paths.sort();
+    paths
 }
 
 pub fn load_chat_prompt_bundle_for_session(
@@ -213,7 +247,8 @@ mod tests {
                 name: "chat".into(),
                 description: String::new(),
                 body: "Prompt body".into(),
-                skill_refs: vec![],
+                argument_hint: String::new(),
+            skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
                 intent_keywords: vec![],
@@ -255,7 +290,8 @@ mod tests {
                 name: "chat".into(),
                 description: String::new(),
                 body: "Prompt body".into(),
-                skill_refs: vec![],
+                argument_hint: String::new(),
+            skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
                 intent_keywords: vec![],
@@ -269,7 +305,8 @@ mod tests {
                 name: "tone".into(),
                 description: String::new(),
                 body: "Be concise".into(),
-                skill_refs: vec![],
+                argument_hint: String::new(),
+            skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
                 intent_keywords: vec![],
@@ -301,7 +338,8 @@ mod tests {
                 name: "chat".into(),
                 description: String::new(),
                 body: "Prompt body".into(),
-                skill_refs: vec![],
+                argument_hint: String::new(),
+            skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: false,
                 intent_keywords: vec![],
@@ -361,7 +399,8 @@ mod tests {
         assert!(bundle.skill_catalog.contains("**code-edit**"));
         assert!(bundle.skill_catalog.contains("**github-ops-tone**"));
         let static_prompt = compose_static_system_prompt(&bundle);
-        assert!(static_prompt.contains("## Available skills"));
+        // Available skills is now a separate message, NOT in the static prompt.
+        assert!(!static_prompt.contains("## Available skills"));
         assert!(static_prompt.contains("## Techniques"));
         assert!(static_prompt.contains("github-ops-tone"));
     }
@@ -372,6 +411,7 @@ mod tests {
             name: "ci-triage".into(),
             description: String::new(),
             body: "## Tool chains\n| x | y |\n\n## Rules\n- be careful".into(),
+            argument_hint: String::new(),
             skill_refs: vec![],
             tool_refs: vec![],
             always_load: false,
@@ -393,6 +433,7 @@ mod tests {
             name: "ci-triage".into(),
             description: String::new(),
             body: "- flaky: transient\n- real: code bug".into(),
+            argument_hint: String::new(),
             skill_refs: vec![],
             tool_refs: vec![],
             always_load: false,
@@ -406,5 +447,27 @@ mod tests {
         let out = compose_classify_prompt("", &skills);
         assert!(out.contains("flaky: transient"));
         assert!(out.contains("reason: one line"));
+    }
+
+    #[test]
+    fn default_chat_skill_paths_scans_skills_directory() {
+        // The skills dir is scanned at runtime relative to the cargo test CWD
+        // (project root). Verify my-prs and the known defaults are included —
+        // this guards against regressing back to a hardcoded 2-skill list that
+        // silently dropped every other skill from the registry.
+        let paths = default_chat_skill_paths();
+        let names: Vec<String> = paths
+            .iter()
+            .filter_map(|p| {
+                p.parent()
+                    .and_then(|d| d.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+            })
+            .collect();
+        assert!(names.contains(&"github-ops-tone".to_string()), "missing github-ops-tone");
+        assert!(names.contains(&"ci-triage".to_string()), "missing ci-triage");
+        assert!(names.contains(&"my-prs".to_string()), "missing my-prs — dir scan must include it");
+        // _base is not a skill (no SKILL.md) — must be excluded.
+        assert!(!names.contains(&"_base".to_string()), "_base should be skipped");
     }
 }

@@ -1147,7 +1147,10 @@ mcp:
       skills: [slack-ops, github-ops-tone]
 "#;
         let cfg = Config::load_from_str(yaml).expect("parse");
-        assert_eq!(cfg.mcp.servers[0].skills, vec!["slack-ops", "github-ops-tone"]);
+        assert_eq!(
+            cfg.mcp.servers[0].skills,
+            vec!["slack-ops", "github-ops-tone"]
+        );
     }
 
     #[test]

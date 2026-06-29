@@ -1,3 +1,7 @@
+//! Batch workflow agent loop (daily-work, review-radar).
+//!
+//! Distinct from [`crate::agent::chat_loop`], which drives interactive chat.
+
 use std::sync::Arc;
 
 use tokio::sync::broadcast;

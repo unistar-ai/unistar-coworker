@@ -310,6 +310,13 @@ fn build_chat_context_json(s: &AppState) -> Value {
                 "name": sk.name,
                 "tokens": sk.tokens,
                 "body": sk.body,
+                "description": sk.description,
+                "always": sk.always,
+                "skills": sk.skills,
+                "tools": sk.tools,
+                "argument_hint": sk.argument_hint,
+                "intent_phrases": sk.intent_phrases,
+                "intent_bonus_keywords": sk.intent_bonus_keywords,
             })).collect::<Vec<_>>(),
             "input_budget": c.input_budget,
             "context_limit": c.context_limit,
@@ -485,5 +492,233 @@ repos: [acme/widget]
         assert_eq!(server["tool_count"], 3);
         assert_eq!(server["last_rpc_ms"], 42);
         assert!(server["last_error"].is_null());
+    }
+
+    /// Keys that MUST appear in every `WebLivePatch` JSON. Adding or removing
+    /// a field requires updating both the Rust struct and the JS applicator in
+    /// `app.js::applyLivePatch` — this test forces that conscious update.
+    const EXPECTED_LIVE_PATCH_KEYS: &[&str] = &[
+        "_type",
+        "status",
+        "chat_busy",
+        "chat_streaming",
+        "chat_reasoning",
+        "chat_tool_running",
+        "chat_tool_running_detail",
+        "chat_tool_pending",
+        "chat_turn_phase",
+        "chat_reasoning_compressing",
+        "chat_activity_flow",
+    ];
+
+    /// Keys that MUST appear in every `WebChatPatch` JSON.
+    const EXPECTED_CHAT_PATCH_KEYS: &[&str] = &[
+        "_type",
+        "status",
+        "chat_busy",
+        "chat_session_id",
+        "chat_lines",
+        "chat_tool_outputs",
+        "chat_history_revision",
+        "chat_context_revision",
+        "chat_streaming",
+        "chat_reasoning",
+        "chat_tool_running",
+        "chat_tool_running_detail",
+        "chat_tool_pending",
+        "chat_turn_phase",
+        "chat_reasoning_compressing",
+        "chat_activity_flow",
+        "chat_context_visible",
+        "chat_context",
+        "chat_pending_approval",
+        "approval_dialog",
+    ];
+
+    fn obj_keys(v: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = v
+            .as_object()
+            .expect("json object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    fn expected_sorted(expected: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn live_patch_serializes_expected_keys() {
+        let app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        let patch = build_live_patch_from(&app);
+        let v = serde_json::to_value(&patch).expect("serialize live patch");
+        assert_eq!(obj_keys(&v), expected_sorted(EXPECTED_LIVE_PATCH_KEYS));
+    }
+
+    #[test]
+    fn chat_patch_serializes_expected_keys() {
+        let app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        let patch = build_chat_patch_from(&app);
+        let v = serde_json::to_value(&patch).expect("serialize chat patch");
+        assert_eq!(obj_keys(&v), expected_sorted(EXPECTED_CHAT_PATCH_KEYS));
+    }
+
+    #[test]
+    fn live_patch_type_is_live() {
+        let app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        let patch = build_live_patch_from(&app);
+        let v = serde_json::to_value(&patch).expect("serialize");
+        assert_eq!(v["_type"], "live");
+    }
+
+    #[test]
+    fn chat_patch_type_is_chat() {
+        let app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        let patch = build_chat_patch_from(&app);
+        let v = serde_json::to_value(&patch).expect("serialize");
+        assert_eq!(v["_type"], "chat");
+    }
+
+    #[test]
+    fn chat_patch_truncates_tool_output_to_8k() {
+        let mut app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        // Insert a tool output well beyond the 8k cap.
+        let big = "x".repeat(WEB_CHAT_PATCH_TOOL_OUTPUT_CHARS * 2);
+        app.chat_tool_outputs.insert(0, big.clone());
+        let patch = build_chat_patch_from(&app);
+        let v = serde_json::to_value(&patch).expect("serialize");
+        let outputs = v["chat_tool_outputs"].as_object().expect("outputs map");
+        // The key is the line index as a string ("0").
+        let body = outputs
+            .get("0")
+            .and_then(|b| b.as_str())
+            .expect("output body present");
+        // `truncate_chars` appends an ellipsis (`…`) when truncating, so the
+        // patched body is capped at `WEB_CHAT_PATCH_TOOL_OUTPUT_CHARS` chars
+        // plus the ellipsis — never the full `big` body.
+        assert!(
+            body.chars().count() <= WEB_CHAT_PATCH_TOOL_OUTPUT_CHARS + 1,
+            "chat patch must truncate tool output to <= {}+1 chars, got {}",
+            WEB_CHAT_PATCH_TOOL_OUTPUT_CHARS,
+            body.chars().count()
+        );
+        assert!(body.ends_with('…'));
+        // Full snapshot does NOT truncate (separate contract).
+        let snap = build_snapshot_from(&app);
+        let snap_body = snap
+            .chat_tool_outputs
+            .get("0")
+            .map(String::as_str)
+            .expect("snapshot output present");
+        assert_eq!(snap_body.len(), big.len());
+    }
+
+    #[test]
+    fn live_patch_carries_streaming_and_phase_fields() {
+        let mut app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        app.chat_busy = true;
+        app.chat_streaming = Some("hello".into());
+        app.chat_reasoning = Some("thinking…".into());
+        app.chat_tool_running = Some("pr_get_diff".into());
+        app.chat_reasoning_compressing = true;
+        // `chat_turn_phase` is derived: tool_running wins → "tool".
+        let patch = build_live_patch_from(&app);
+        let v = serde_json::to_value(&patch).expect("serialize");
+        assert_eq!(v["chat_busy"], true);
+        assert_eq!(v["chat_streaming"], "hello");
+        assert_eq!(v["chat_reasoning"], "thinking…");
+        assert_eq!(v["chat_tool_running"], "pr_get_diff");
+        assert_eq!(v["chat_turn_phase"], "tool");
+        assert_eq!(v["chat_reasoning_compressing"], true);
+    }
+
+    #[test]
+    fn live_patch_phase_is_none_when_not_busy() {
+        let app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        let patch = build_live_patch_from(&app);
+        let v = serde_json::to_value(&patch).expect("serialize");
+        assert_eq!(v["chat_busy"], false);
+        assert!(v["chat_turn_phase"].is_null());
+    }
+
+    /// Sanity check: full snapshot exposes the full set of UI-relevant keys.
+    /// This guards against accidental field removal in `WebSnapshot`.
+    #[test]
+    fn snapshot_includes_core_keys() {
+        let app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        let snap = build_snapshot_from(&app);
+        let v = serde_json::to_value(&snap).expect("serialize snapshot");
+        for key in [
+            "tab",
+            "tabs",
+            "status",
+            "engine_busy",
+            "chat_enabled",
+            "chat_busy",
+            "chat_lines",
+            "chat_tool_outputs",
+            "chat_history_revision",
+            "chat_context_revision",
+            "chat_streaming",
+            "chat_reasoning",
+            "chat_tool_running",
+            "chat_tool_pending",
+            "chat_turn_phase",
+            "chat_reasoning_compressing",
+            "chat_activity_flow",
+            "chat_context_visible",
+            "chat_context",
+            "approval_dialog",
+            "digest_history",
+            "prs",
+            "approvals",
+            "logs",
+            "mcp_servers",
+            "auto_approve_mutations",
+            "ui_theme",
+        ] {
+            assert!(v.get(key).is_some(), "snapshot missing key {key}");
+        }
+    }
+
+    /// The context panel skill preview needs frontmatter metadata (description,
+    /// always, skills, tools) in addition to the body. Verify these fields are
+    /// serialized onto each skill_block.
+    #[test]
+    fn snapshot_skill_blocks_carry_frontmatter_metadata() {
+        use crate::agent::chat_loop::{ContextSkillBlock, ContextSnapshot};
+        let mut app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        app.set_chat_context(ContextSnapshot {
+            turn: 1,
+            skill_blocks: vec![ContextSkillBlock {
+                name: "my-prs".into(),
+                body: "# My PRs\n...".into(),
+                tokens: 140,
+                description: "Author-focused open PR status".into(),
+                always: false,
+                skills: vec![],
+                tools: vec!["pr_list_open".into()],
+                argument_hint: "Author filter or repo".into(),
+                intent_phrases: vec!["my pr".into(), "my open".into()],
+                intent_bonus_keywords: vec!["@me".into()],
+            }],
+            ..Default::default()
+        });
+        let snap = build_snapshot_from(&app);
+        let v = serde_json::to_value(&snap).expect("serialize snapshot");
+        let blocks = &v["chat_context"]["skill_blocks"];
+        assert_eq!(blocks[0]["name"], "my-prs");
+        assert_eq!(blocks[0]["description"], "Author-focused open PR status");
+        assert_eq!(blocks[0]["tools"][0], "pr_list_open");
+        assert_eq!(blocks[0]["argument_hint"], "Author filter or repo");
+        assert_eq!(blocks[0]["intent_phrases"][0], "my pr");
+        assert_eq!(blocks[0]["intent_phrases"][1], "my open");
+        assert_eq!(blocks[0]["intent_bonus_keywords"][0], "@me");
+        assert!(blocks[0]["body"].as_str().unwrap().contains("My PRs"));
     }
 }

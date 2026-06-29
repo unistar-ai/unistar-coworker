@@ -1427,10 +1427,7 @@ pub fn stream_wall_exceeded(
     if stream_elapsed >= full_wall {
         return true;
     }
-    if reasoning_only_warn_secs == 0
-        || content_len > 0
-        || reasoning_len == 0
-        || tool_calls_len > 0
+    if reasoning_only_warn_secs == 0 || content_len > 0 || reasoning_len == 0 || tool_calls_len > 0
     {
         return false;
     }

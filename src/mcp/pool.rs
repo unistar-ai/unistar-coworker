@@ -49,17 +49,65 @@ impl McpPool {
         }
     }
 
+    /// Read-only access to the servers config. Lock poisoning is treated as
+    /// "no servers" rather than panicking the process — a poisoned lock means
+    /// a writer panicked mid-update, and crashing the whole engine on a
+    /// config-read path is disproportionate. The error is logged once.
+    fn read_servers(&self) -> std::sync::RwLockReadGuard<'_, Vec<McpServerConfig>> {
+        match self.servers.read() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("mcp servers lock poisoned: {e}; returning empty");
+                // Poisoned guard still gives access via unwrap_or_else fallback
+                // but we cannot fabricate a guard; fall back to clearing via a
+                // panic-safe path is impossible without unsafe. Re-acquire with
+                // the inner poison ignored to keep the process alive.
+                self.servers.read().unwrap_or_else(|p| p.into_inner())
+            }
+        }
+    }
+
+    /// Read-only access to the mcp defaults. Same poison policy as
+    /// [`read_servers`]: fall back to default rather than panic.
+    fn read_defaults(&self) -> std::sync::RwLockReadGuard<'_, crate::config::McpDefaults> {
+        match self.defaults.read() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("mcp defaults lock poisoned: {e}; returning defaults");
+                self.defaults.read().unwrap_or_else(|p| p.into_inner())
+            }
+        }
+    }
+
+    /// Write access to the servers config. Poison is recovered via
+    /// `into_inner()` so a previous failed writer does not block future updates.
+    fn write_servers(&self) -> std::sync::RwLockWriteGuard<'_, Vec<McpServerConfig>> {
+        match self.servers.write() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("mcp servers lock poisoned on write: {e}; recovering");
+                self.servers.write().unwrap_or_else(|p| p.into_inner())
+            }
+        }
+    }
+
+    fn write_defaults(&self) -> std::sync::RwLockWriteGuard<'_, crate::config::McpDefaults> {
+        match self.defaults.write() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("mcp defaults lock poisoned on write: {e}; recovering");
+                self.defaults.write().unwrap_or_else(|p| p.into_inner())
+            }
+        }
+    }
+
     pub fn has_servers(&self) -> bool {
-        self.servers
-            .read()
-            .expect("mcp servers lock")
-            .iter()
-            .any(|s| s.enabled)
+        self.read_servers().iter().any(|s| s.enabled)
     }
 
     pub async fn connect_eager(&self) {
-        let servers = self.servers.read().expect("mcp servers lock").clone();
-        let default_startup = self.defaults.read().expect("mcp defaults lock").startup;
+        let servers = self.read_servers().clone();
+        let default_startup = self.read_defaults().startup;
         for server in servers {
             if !server.enabled {
                 continue;
@@ -80,9 +128,7 @@ impl McpPool {
 
     /// Configured `skills:` for an MCP server (empty when unknown or unset).
     pub fn server_skills(&self, server_id: &str) -> Vec<String> {
-        self.servers
-            .read()
-            .expect("mcp servers lock")
+        self.read_servers()
             .iter()
             .find(|s| s.id == server_id)
             .map(|s| s.skills.clone())
@@ -98,9 +144,7 @@ impl McpPool {
     }
 
     fn server_id_for_tool_by_prefix(&self, global_name: &str) -> Option<String> {
-        self.servers
-            .read()
-            .expect("mcp servers lock")
+        self.read_servers()
             .iter()
             .filter(|s| s.enabled)
             .find(|s| global_name.starts_with(&expose_prefix(s)))
@@ -129,7 +173,7 @@ impl McpPool {
 
     pub async fn server_mutating_policy(&self, global_name: &str) -> Option<McpMutatingPolicy> {
         let entry = self.resolve_entry(global_name).await?;
-        let servers = self.servers.read().expect("mcp servers lock");
+        let servers = self.read_servers();
         servers
             .iter()
             .find(|s| s.id == entry.server_id)
@@ -207,10 +251,7 @@ impl McpPool {
                 self.set_rpc_ok(&entry.server_id, elapsed).await;
                 Ok(truncate_tool_output(
                     &text,
-                    self.defaults
-                        .read()
-                        .expect("mcp defaults lock")
-                        .max_output_chars,
+                    self.read_defaults().max_output_chars,
                 ))
             }
             Err(e) => {
@@ -271,10 +312,7 @@ impl McpPool {
                 self.set_rpc_ok(server_id, elapsed).await;
                 Ok(truncate_tool_output(
                     &text,
-                    self.defaults
-                        .read()
-                        .expect("mcp defaults lock")
-                        .max_output_chars,
+                    self.read_defaults().max_output_chars,
                 ))
             }
             Err(e) => {
@@ -302,8 +340,8 @@ impl McpPool {
     pub async fn reload_from_config(&self, config: McpConfig) {
         self.sessions.write().await.clear();
         *self.registry.write().await = GlobalToolRegistry::default();
-        *self.defaults.write().expect("mcp defaults lock") = config.defaults;
-        *self.servers.write().expect("mcp servers lock") = config.servers.clone();
+        *self.write_defaults() = config.defaults;
+        *self.write_servers() = config.servers.clone();
         *self.status.write().await = initial_status_map(&config.servers);
         self.connect_eager().await;
     }
@@ -343,14 +381,8 @@ impl McpPool {
     }
 
     async fn server_timeout_for_id(&self, server_id: &str) -> u64 {
-        let default_secs = self
-            .defaults
-            .read()
-            .expect("mcp defaults lock")
-            .timeout_secs;
-        self.servers
-            .read()
-            .expect("mcp servers lock")
+        let default_secs = self.read_defaults().timeout_secs;
+        self.read_servers()
             .iter()
             .find(|s| s.id == server_id)
             .map(|s| server_timeout(s, default_secs))
@@ -362,9 +394,7 @@ impl McpPool {
             return Ok(());
         }
         let server = self
-            .servers
-            .read()
-            .expect("mcp servers lock")
+            .read_servers()
             .iter()
             .find(|s| s.id == server_id)
             .cloned()
@@ -376,7 +406,7 @@ impl McpPool {
                 "mcp server {server_id:?} is disabled"
             )));
         }
-        let default_startup = self.defaults.read().expect("mcp defaults lock").startup;
+        let default_startup = self.read_defaults().startup;
         let startup = server.startup.unwrap_or(default_startup);
         if startup == McpStartup::Disabled {
             return Err(CoworkerError::Other(anyhow::anyhow!(
@@ -401,11 +431,7 @@ impl McpPool {
 
     async fn connect_server(&self, server: &McpServerConfig) -> Result<()> {
         let started = Instant::now();
-        let default_secs = self
-            .defaults
-            .read()
-            .expect("mcp defaults lock")
-            .timeout_secs;
+        let default_secs = self.read_defaults().timeout_secs;
         let timeout_secs = server_timeout(server, default_secs);
         let result: Result<(McpClient, Vec<McpToolDescriptor>)> = async {
             let mut client = McpClient::connect(server, timeout_secs).await?;

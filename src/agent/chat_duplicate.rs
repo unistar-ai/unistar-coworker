@@ -1,3 +1,8 @@
+//! Guards against duplicate tool calls within a chat turn.
+//!
+//! Despite the name, this module is about *tool-call* duplication detection
+//! and harness nudges — not code-duplication.
+
 use std::collections::HashSet;
 
 use serde_json::Value;
@@ -27,7 +32,9 @@ pub(crate) enum DuplicateToolBlock {
     FailedTooMany,
 }
 
-pub(crate) fn duplicate_tool_block_reason(record: Option<&ToolExecRecord>) -> Option<DuplicateToolBlock> {
+pub(crate) fn duplicate_tool_block_reason(
+    record: Option<&ToolExecRecord>,
+) -> Option<DuplicateToolBlock> {
     let record = record?;
     if record.succeeded {
         return Some(DuplicateToolBlock::AlreadySucceeded);
@@ -619,8 +626,8 @@ mod tests {
 
     #[test]
     fn failed_tool_output_allows_identical_retry() {
-        use std::collections::HashMap;
         use crate::agent::chat_loop::tool_call_fingerprint;
+        use std::collections::HashMap;
         let fp = tool_call_fingerprint("pr_list_open", &json!({"repo": "acme/widget"}));
         let mut records = HashMap::new();
         records.insert(

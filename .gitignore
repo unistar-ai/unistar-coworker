@@ -24,3 +24,19 @@ unistar-coworker
 .vscode/
 .cursor/settings.json
 .claude/settings.local.json
+
+# web-ui (React / Vite) — do not commit deps, build output, or tooling caches
+web-ui/node_modules/
+web-ui/dist/
+web-ui/dist-tsbuildinfo/
+web-ui/.vite/
+web-ui/coverage/
+web-ui/.turbo/
+web-ui/.cache/
+web-ui/**/*.tsbuildinfo
+web-ui/test-results/
+web-ui/playwright-report/
+web-ui/.e2e-workdir
+
+# Generated at `cargo build` by build.rs (hashed asset paths from dist/)
+src/web/_dist_manifest.rs

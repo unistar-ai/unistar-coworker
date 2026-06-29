@@ -8,9 +8,9 @@ use chromiumoxide::detection::{default_executable, DetectionOptions};
 use futures_util::StreamExt;
 
 use crate::agent::harness_errors::{self, parse_error_line, workflow_error, ErrorEnvelope};
-use crate::error::CoworkerError;
 use crate::agent::web_fetch_tool::{FetchedContent, WEB_FETCH_TOOL};
 use crate::config::WebFetchToolConfig;
+use crate::error::CoworkerError;
 use crate::error::Result;
 
 pub async fn fetch_page_with_chromium(
@@ -223,8 +223,7 @@ pub fn is_browser_fetch_failure(err: &CoworkerError) -> bool {
     let CoworkerError::Workflow(body) = err else {
         return false;
     };
-    parse_error_line(body)
-        .is_some_and(|p| BROWSER_FETCH_FAILURE_CODES.contains(&p.code.as_str()))
+    parse_error_line(body).is_some_and(|p| BROWSER_FETCH_FAILURE_CODES.contains(&p.code.as_str()))
 }
 
 pub fn browser_failure_brief(err: &CoworkerError) -> String {

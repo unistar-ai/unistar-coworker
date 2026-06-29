@@ -44,60 +44,7 @@ impl Engine {
         )
         .await;
 
-        self.refresh_store().await?;
-        {
-            let mut s = self.state.write().await;
-            s.chat_busy = false;
-            s.set_chat_tool_pending(None);
-            s.set_chat_tool_running(None);
-            s.set_chat_reasoning(None);
-            s.set_chat_activity_flow(None);
-            s.set_chat_reasoning_compressing(false);
-            match &result {
-                Ok(r) if r.awaiting_approval => {
-                    s.chat_session_id = Some(r.session_id);
-                    s.set_chat_streaming(None);
-                    if let Err(e) =
-                        load_chat_session_ui(&mut s, self.store.as_ref(), r.session_id).await
-                    {
-                        s.push_log("warn", format!("chat reload failed: {e}"));
-                    }
-                    s.status = "awaiting approval — confirm in popup".into();
-                }
-                Ok(r) => {
-                    s.chat_session_id = Some(r.session_id);
-                    s.set_chat_streaming(None);
-                    if let Err(e) =
-                        load_chat_session_ui(&mut s, self.store.as_ref(), r.session_id).await
-                    {
-                        if !r.assistant_message.is_empty()
-                            && !crate::agent::context::is_tool_result_transcript(
-                                &r.assistant_message,
-                            )
-                        {
-                            s.push_chat_line(format!("assistant> {}", r.assistant_message));
-                        }
-                        s.push_log("warn", format!("chat reload failed: {e}"));
-                    }
-                    s.status = "chat ready".into();
-                }
-                Err(e) if is_chat_cancelled(e) => {
-                    s.set_chat_streaming(None);
-                    s.push_chat_line("chat> cancelled".to_string());
-                    s.status = "chat ready".into();
-                }
-                Err(e) => {
-                    s.set_chat_streaming(None);
-                    s.push_chat_line(format!("error> {e}"));
-                    s.status = format!("chat error: {e}");
-                }
-            }
-        }
-
-        if result.is_ok() {
-            let _ = self.events.send(crate::app::AppEvent::ChatReply);
-        }
-
+        self.apply_chat_turn_result(&result).await;
         result
     }
 
@@ -140,7 +87,21 @@ impl Engine {
         )
         .await;
 
-        self.refresh_store().await?;
+        self.apply_chat_turn_result(&result).await;
+        result
+    }
+
+    /// Shared post-turn state update for [`run_chat`] and [`resume_chat_after_approval`]:
+    /// refreshes the store, clears busy/tool/reasoning flags, reloads chat session UI,
+    /// sets status text, and broadcasts `ChatReply` on success.
+    ///
+    /// Store refresh errors are logged but no longer propagated, matching the
+    /// turn result taking precedence (the original code propagated refresh
+    /// errors and would shadow the chat result).
+    async fn apply_chat_turn_result(&self, result: &Result<ChatTurnResult>) {
+        if let Err(e) = self.refresh_store().await {
+            tracing::warn!("chat: refresh_store failed: {e}");
+        }
         {
             let mut s = self.state.write().await;
             s.chat_busy = false;
@@ -149,7 +110,7 @@ impl Engine {
             s.set_chat_reasoning(None);
             s.set_chat_activity_flow(None);
             s.set_chat_reasoning_compressing(false);
-            match &result {
+            match result {
                 Ok(r) if r.awaiting_approval => {
                     s.chat_session_id = Some(r.session_id);
                     s.set_chat_streaming(None);
@@ -193,8 +154,6 @@ impl Engine {
         if result.is_ok() {
             let _ = self.events.send(crate::app::AppEvent::ChatReply);
         }
-
-        result
     }
 }
 

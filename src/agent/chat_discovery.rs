@@ -146,8 +146,7 @@ impl ChatDiscoveryState {
     pub async fn warm_tool_from_registry(&mut self, name: &str, mcp: &crate::mcp::McpPool) {
         self.warm_tool(name);
         let server_id = mcp.server_id_for_tool(name).await;
-        let is_mcp =
-            server_id.is_some() || mcp.is_mcp_tool_async(name).await;
+        let is_mcp = server_id.is_some() || mcp.is_mcp_tool_async(name).await;
         if !self.warmed_tools.contains(name) && is_mcp {
             self.warmed_tools.insert(name.to_string());
         }

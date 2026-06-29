@@ -1,0 +1,94 @@
+import { useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useStore } from "../../store/wsStore";
+import { apiPost } from "../../lib/api";
+import EmptyState from "../../components/EmptyState";
+import { ScrollText } from "lucide-react";
+
+const VIRTUAL_THRESHOLD = 200;
+
+export default function LogsTab() {
+  const logs = useStore((s) => s.logs);
+  const logFilter = useStore((s) => s.log_filter);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const virtualizer = useVirtualizer({
+    count: logs.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 28,
+    overscan: 10,
+    enabled: logs.length >= VIRTUAL_THRESHOLD,
+  });
+
+  return (
+    <div className="panel log-list">
+      <div className="toolbar">
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => void apiPost("/api/logs/filter")}
+        >
+          Filter: {logFilter || "all"}
+        </button>
+      </div>
+      {logs.length === 0 ? (
+        <EmptyState
+          icon={ScrollText}
+          title="No logs"
+          description="Runtime logs will stream here as the agent works."
+        />
+      ) : logs.length < VIRTUAL_THRESHOLD ? (
+        <div>
+          {logs.map((l, i) => (
+            <LogRow key={i} log={l} />
+          ))}
+        </div>
+      ) : (
+        <div ref={scrollRef} className="log-scroll">
+          <div
+            style={{
+              height: `${virtualizer.getTotalSize()}px`,
+              width: "100%",
+              position: "relative",
+            }}
+          >
+            {virtualizer.getVirtualItems().map((vi) => {
+              const l = logs[vi.index];
+              return (
+                <div
+                  key={vi.index}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${vi.start}px)`,
+                  }}
+                >
+                  <LogRow log={l} />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LogRow({ log }: { log: { level: string; message: string; ts: string } }) {
+  const level = (log.level || "info").toLowerCase();
+  return (
+    <div className="log-row">
+      <span className="log-ts">
+        {new Date(log.ts).toLocaleTimeString()}
+      </span>
+      <div>
+        <span className={`log-level log-level-${level}`}>{level}</span>
+        <span className="log-msg">{log.message}</span>
+      </div>
+    </div>
+  );
+}

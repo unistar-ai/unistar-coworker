@@ -30,7 +30,9 @@ mod tests {
     fn embedded_chat_prompt_parses() {
         let spec = parse_markdown_spec(CHAT_MD).unwrap();
         assert_eq!(spec.name, "chat");
-        assert!(spec.skill_refs.len() >= 5);
+        // skills: frontmatter removed — skills are now auto-discovered from the
+        // skills/ directory, not listed in the prompt.
+        assert!(spec.skill_refs.is_empty());
     }
 
     #[test]

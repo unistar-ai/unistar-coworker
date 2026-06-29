@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::agent::chat_discovery;
 use crate::error::Result;
 
-use super::skill::{load_prompt, load_skills, load_skills_from_refs, SkillSpec};
+use super::skill::{load_prompt, load_skills, SkillSpec};
 
 /// All technique skills available to a chat session.
 #[derive(Debug, Clone)]
@@ -22,18 +22,26 @@ impl SkillRegistry {
 }
 
 impl SkillRegistry {
-    /// Load every skill referenced by the chat system prompt (or explicit config paths).
+    /// Load skills for the chat system prompt.
+    ///
+    /// Skill resolution order:
+    /// 1. Explicit `skill_paths` from config (full override).
+    /// 2. Otherwise, scan the `skills/` directory for every `SKILL.md` — this
+    ///    is the default. No need to list skills in the prompt frontmatter;
+    ///    anything dropped into `skills/` is automatically registered and
+    ///    surfaced in the "Available skills" catalog (loadable via skill_load).
+    ///
+    /// In lazy mode only `always: true` skills are injected into the prompt
+    /// (## Techniques); the rest appear in the catalog and are loaded on demand.
     pub fn load_for_chat(prompt_path: &str, skill_paths: &[PathBuf]) -> Result<Self> {
         let prompt_path = if prompt_path.is_empty() {
             super::prompt::default_chat_prompt_path()
         } else {
             PathBuf::from(prompt_path)
         };
-        let chat_prompt = load_prompt(&prompt_path)?;
+        let _chat_prompt = load_prompt(&prompt_path)?;
         let skills = if !skill_paths.is_empty() {
             load_skills(skill_paths)?
-        } else if !chat_prompt.skill_refs.is_empty() {
-            load_skills_from_refs(&chat_prompt.skill_refs)?
         } else {
             load_skills(&super::prompt::default_chat_skill_paths())?
         };
@@ -139,6 +147,21 @@ fn skill_key(skill: &SkillSpec) -> String {
     }
 }
 
+/// Append skills from `extra` into `base` that aren't already present (by
+/// lowercased name), so a directory scan can add skills the prompt didn't list
+/// without duplicating ones it did.
+#[allow(dead_code)]
+fn merge_skills(base: &mut Vec<SkillSpec>, extra: Vec<SkillSpec>) {
+    let existing: std::collections::HashSet<String> =
+        base.iter().map(|s| skill_key(s)).collect();
+    for s in extra {
+        let key = skill_key(&s);
+        if !key.is_empty() && !existing.contains(&key) {
+            base.push(s);
+        }
+    }
+}
+
 fn trim_desc(desc: &str) -> &str {
     desc.trim()
 }
@@ -231,6 +254,7 @@ mod tests {
                 name: "github-ops-tone".into(),
                 description: "Secretary tone".into(),
                 body: "Be accurate".into(),
+                argument_hint: String::new(),
                 skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: true,
@@ -245,6 +269,7 @@ mod tests {
                 name: "ci-triage".into(),
                 description: "Classify CI failures".into(),
                 body: "Tool chains here".into(),
+                argument_hint: String::new(),
                 skill_refs: vec![],
                 tool_refs: vec!["pr_get_ci_snapshot".into()],
                 always_load: false,
@@ -259,6 +284,7 @@ mod tests {
                 name: "pr-merge".into(),
                 description: "Merge blockers".into(),
                 body: "Blockers".into(),
+                argument_hint: String::new(),
                 skill_refs: vec![],
                 tool_refs: vec!["pr_get_merge_blockers".into()],
                 always_load: false,
@@ -319,6 +345,7 @@ mod tests {
             name: "issue-tracker".into(),
             description: "issues".into(),
             body: String::new(),
+            argument_hint: String::new(),
             skill_refs: vec![],
             tool_refs: vec![],
             always_load: false,
@@ -339,6 +366,7 @@ mod tests {
             name: "security-alerts".into(),
             description: "dependabot".into(),
             body: String::new(),
+            argument_hint: String::new(),
             skill_refs: vec![],
             tool_refs: vec![],
             always_load: false,
@@ -361,5 +389,47 @@ mod tests {
         assert!(!picked.iter().any(|s| s.name == "ci-health"));
         let branch = reg.select_for_message_by_intent("How is main branch CI health?");
         assert!(branch.iter().any(|s| s.name == "ci-health"));
+    }
+
+    #[test]
+    fn merge_skills_adds_unlisted_skills_without_duplicates() {
+        // The chat prompt lists github-ops-tone + ci-triage; a directory scan
+        // finds those PLUS my-prs (which the prompt doesn't list). The merge
+        // should include my-prs without duplicating the two already present.
+        let prompt_skills = vec![
+            SkillSpec {
+                name: "github-ops-tone".into(),
+                description: "tone".into(),
+                ..Default::default()
+            },
+            SkillSpec {
+                name: "ci-triage".into(),
+                description: "ci".into(),
+                ..Default::default()
+            },
+        ];
+        let scanned = vec![
+            SkillSpec {
+                name: "github-ops-tone".into(),
+                description: "tone".into(),
+                ..Default::default()
+            },
+            SkillSpec {
+                name: "my-prs".into(),
+                description: "my prs".into(),
+                ..Default::default()
+            },
+        ];
+        let mut merged = prompt_skills;
+        merge_skills(&mut merged, scanned);
+        let names: Vec<_> = merged.iter().map(|s| s.name.clone()).collect();
+        assert!(names.contains(&"github-ops-tone".to_string()));
+        assert!(names.contains(&"ci-triage".to_string()));
+        assert!(names.contains(&"my-prs".to_string()), "my-prs must be merged in");
+        // No duplicates.
+        assert_eq!(
+            merged.iter().filter(|s| s.name == "github-ops-tone").count(),
+            1
+        );
     }
 }

@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use futures_util::future::join_all;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
-use tokio::time::{self, MissedTickBehavior};
 use tokio::sync::Mutex;
+use tokio::time::{self, MissedTickBehavior};
 
 use crate::agent::bash_tool;
 use crate::agent::chat_discovery::ChatDiscoveryState;

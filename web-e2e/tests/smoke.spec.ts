@@ -1,5 +1,9 @@
 import { expect, test } from "@playwright/test";
 
+// React UI smoke tests. The legacy vanilla UI has been removed; these tests
+// drive the React SPA served at `/` and exercise the zustand store + WS
+// connection + tab switching.
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     try {
@@ -10,62 +14,49 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("home page loads", async ({ page }) => {
+test("home page loads with React root", async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator(".brand")).toContainText("unistar-coworker");
-  await expect(page.locator("#theme-toggle")).toBeVisible();
+  // The React app renders the brand text in the topbar.
+  await expect(page.locator("header")).toContainText("unistar-coworker");
+  // The theme toggle button is present (lucide icon).
+  await expect(page.locator("header button[aria-label*='mode']")).toBeVisible();
+  // The main panel is present.
   await expect(page.locator("#main")).toBeVisible();
 });
 
-test("theme toggle switches data-theme on html", async ({ page }) => {
+test("theme toggle switches class on html", async ({ page }) => {
   await page.goto("/");
-  await page.waitForFunction(
-    () => document.getElementById("conn-dot")?.classList.contains("live"),
-    null,
-    { timeout: 15_000 },
-  );
+  // Wait for the WS to connect and the React app to mount the theme button.
+  await expect(page.locator("header button[aria-label*='mode']")).toBeVisible({
+    timeout: 15_000,
+  });
 
   const html = page.locator("html");
-  const before = (await html.getAttribute("data-theme")) || "dark";
-  await page.click("#theme-toggle");
-  const after = await html.getAttribute("data-theme");
-  expect(after).toBeTruthy();
+  const before =
+    (await html.getAttribute("class"))?.includes("dark") ||
+    (await html.getAttribute("data-theme")) === "dark"
+      ? "dark"
+      : "light";
+  await page.click("header button[aria-label*='mode']");
+  const classAfter = (await html.getAttribute("class")) || "";
+  const dataThemeAfter = await html.getAttribute("data-theme");
+  const after = classAfter.includes("dark") ? "dark" : dataThemeAfter || "light";
   expect(after).not.toBe(before);
   expect(["light", "dark"]).toContain(after);
 });
 
-test("approval dialog shows tool command payload", async ({ page }) => {
+test("approvals tab renders pending empty state", async ({ page }) => {
   await page.goto("/");
-  await page.waitForFunction(
-    () => typeof updateApprovalModal === "function",
-    null,
-    { timeout: 15_000 },
-  );
-
-  await page.evaluate(() => {
-    // Playwright runs in the page realm; `state` / `updateApprovalModal` come from app.js.
-    // @ts-expect-error page globals from static scripts
-    state.approval_dialog = {
-      id: "e2e-approval-1",
-      tool_name: "bash_run",
-      description: "Approve bash_run for smoke test",
-      tool_args_json: JSON.stringify({
-        command: "echo smoke-test",
-        workdir: "/tmp",
-      }),
-      deciding: false,
-      approve_armed: true,
-      approve_arm_ms_remaining: 0,
-    };
-    // @ts-expect-error page globals from static scripts
-    updateApprovalModal();
+  // Wait for the tab list to render (WS snapshot arrives).
+  await expect(page.locator("header")).toContainText("unistar-coworker", {
+    timeout: 15_000,
   });
-
-  const modal = page.locator(".approval-modal");
-  await expect(modal).toBeVisible();
-  await expect(modal.locator(".approval-tool-name")).toHaveText("bash_run");
-  await expect(modal.locator(".approval-payload-pre")).toContainText(
-    "echo smoke-test",
-  );
-  await expect(modal.getByRole("button", { name: "Approve" })).toBeVisible();
+  // Click the Approvals tab trigger.
+  const approvalsTab = page.getByRole("tab", { name: /approvals/i });
+  await expect(approvalsTab).toBeVisible({ timeout: 10_000 });
+  await approvalsTab.click();
+  // The Approvals tab shows a "Pending" sub-tab and an empty-state message.
+  await expect(page.getByText(/no pending approvals/i)).toBeVisible({
+    timeout: 10_000,
+  });
 });

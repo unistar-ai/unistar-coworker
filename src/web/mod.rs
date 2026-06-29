@@ -1,4 +1,5 @@
 mod snapshot;
+mod ui;
 
 #[cfg(test)]
 mod api_tests;
@@ -80,6 +81,19 @@ pub async fn run(
 }
 
 pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>) -> Router {
+    // React UI takes `/` and `/assets/*` (embedded from web-ui/dist/ by
+    // build.rs). The legacy vanilla UI lives at `/legacy` as a fully-featured
+    // fallback while the React UI is being completed. The sensitive surface —
+    // /api/* (except /api/health) and /ws — is gated by `auth_token` below.
+    let react = ui::react_router().with_state(());
+
+    let legacy_assets = Router::new()
+        .route("/legacy", get(legacy_index))
+        .route("/legacy/markdown.js", get(legacy_markdown_js))
+        .route("/legacy/approvals.js", get(legacy_approvals_js))
+        .route("/legacy/app.js", get(legacy_app_js))
+        .route("/legacy/style.css", get(legacy_css));
+
     let protected = Router::new()
         .route("/api/state", get(api_state))
         .route("/api/tab/{tab}", post(api_set_tab))
@@ -106,26 +120,48 @@ pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>)
         .route("/ws", get(ws_handler));
 
     let protected = if let Some(token) = effective_auth_token(auth_token.as_ref()) {
-        tracing::info!("Web UI bearer auth enabled for /api/* and /ws");
+        tracing::info!("Web UI auth enabled for /api/* and /ws (static assets remain public)");
         protected.layer(middleware::from_fn_with_state(
             Arc::from(token),
-            require_bearer_auth,
+            require_auth,
         ))
     } else {
         protected
     };
 
     Router::new()
-        .route("/", get(index))
-        .route("/markdown.js", get(markdown_js))
-        .route("/approvals.js", get(approvals_js))
-        .route("/app.js", get(js))
-        .route("/style.css", get(css))
         .route("/api/health", get(api_health))
+        .merge(react)
+        .merge(legacy_assets)
         .merge(protected)
+        .layer(middleware::from_fn(csp_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(runtime)
+}
+
+/// Middleware that attaches a strict Content-Security-Policy header to every
+/// response. Inline scripts are forbidden (theme init lives in
+/// `/theme-init.js`); scripts/styles load only from `'self'`; WebSocket may
+/// reach `ws`/`wss` to the same origin; images may use `data:` URIs.
+async fn csp_middleware(req: Request<Body>, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(
+            "default-src 'self'; \
+             script-src 'self'; \
+             style-src 'self'; \
+             connect-src 'self' ws: wss:; \
+             img-src 'self' data:; \
+             font-src 'self'; \
+             object-src 'none'; \
+             base-uri 'self'; \
+             frame-ancestors 'none'",
+        ),
+    );
+    resp
 }
 
 fn effective_auth_token(token: Option<&String>) -> Option<&str> {
@@ -143,12 +179,24 @@ fn bearer_matches(headers: &axum::http::HeaderMap, expected: &str) -> bool {
         .is_some_and(|token| token == expected)
 }
 
-async fn require_bearer_auth(
+#[derive(Deserialize)]
+struct TokenQuery {
+    token: Option<String>,
+}
+
+async fn require_auth(
     State(expected): State<Arc<str>>,
+    Query(q): Query<TokenQuery>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    if bearer_matches(req.headers(), expected.as_ref()) {
+    let header_ok = bearer_matches(req.headers(), expected.as_ref());
+    let query_ok = q
+        .token
+        .as_deref()
+        .map(|t| t == expected.as_ref())
+        .unwrap_or(false);
+    if header_ok || query_ok {
         next.run(req).await
     } else {
         StatusCode::UNAUTHORIZED.into_response()
@@ -285,32 +333,34 @@ async fn publish_snapshot(state: &SharedState, snap_tx: &broadcast::Sender<Strin
     }
 }
 
-async fn index() -> Html<&'static str> {
+// --- Legacy vanilla UI handlers (served at /legacy/*) ---
+
+async fn legacy_index() -> Html<&'static str> {
     Html(include_str!("static/index.html"))
 }
 
-async fn markdown_js() -> impl IntoResponse {
+async fn legacy_markdown_js() -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
         include_str!("static/markdown.js"),
     )
 }
 
-async fn approvals_js() -> impl IntoResponse {
+async fn legacy_approvals_js() -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
         include_str!("static/approvals.js"),
     )
 }
 
-async fn js() -> impl IntoResponse {
+async fn legacy_app_js() -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
         include_str!("static/app.js"),
     )
 }
 
-async fn css() -> impl IntoResponse {
+async fn legacy_css() -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "text/css")],
         include_str!("static/style.css"),

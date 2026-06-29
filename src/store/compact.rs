@@ -55,8 +55,7 @@ pub fn compact_json(root: &Path, opts: &CompactOptions) -> Result<CompactStats> 
         )));
     }
     let _ = JsonStore::open(root.to_path_buf())?;
-    let (audit_entries_removed, audit_files_removed) =
-        prune_json_audit(root, opts.audit_days)?;
+    let (audit_entries_removed, audit_files_removed) = prune_json_audit(root, opts.audit_days)?;
     Ok(CompactStats {
         audit_entries_removed,
         audit_files_removed,
@@ -177,9 +176,7 @@ fn prune_sqlite_audit(store: &SqliteStore, audit_days: u32) -> Result<u32> {
 
 fn prune_sqlite_digests(store: &SqliteStore, digest_keep: u32) -> Result<u32> {
     store.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT date FROM digests ORDER BY date DESC LIMIT ?1",
-        )?;
+        let mut stmt = conn.prepare("SELECT date FROM digests ORDER BY date DESC LIMIT ?1")?;
         let keep: Vec<String> = stmt
             .query_map([digest_keep as i64], |row| row.get(0))?
             .filter_map(|r| r.ok())
@@ -308,10 +305,7 @@ mod tests {
         for day in 1u32..=9 {
             let date = NaiveDate::from_ymd_opt(2026, 1, day).unwrap();
             let digest = sample_digest(date);
-            write_json(
-                &root.join(format!("digests/{date}.json")),
-                &digest,
-            );
+            write_json(&root.join(format!("digests/{date}.json")), &digest);
         }
 
         let old_run = WorkflowRun {
@@ -453,13 +447,11 @@ mod tests {
             store
                 .with_conn(|conn| {
                     use rusqlite::params;
-                    let mut run: WorkflowRun = serde_json::from_str(
-                        &conn.query_row(
-                            "SELECT payload_json FROM workflow_runs WHERE id = ?1",
-                            [old_id.to_string()],
-                            |row| row.get::<_, String>(0),
-                        )?,
-                    )?;
+                    let mut run: WorkflowRun = serde_json::from_str(&conn.query_row(
+                        "SELECT payload_json FROM workflow_runs WHERE id = ?1",
+                        [old_id.to_string()],
+                        |row| row.get::<_, String>(0),
+                    )?)?;
                     run.started_at = old_ts;
                     run.finished_at = Some(old_ts + Duration::hours(1));
                     conn.execute(

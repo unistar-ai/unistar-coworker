@@ -17,6 +17,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web-ui/package.json
+
+      - name: Install Web UI deps
+        working-directory: web-ui
+        run: npm install
+
       - name: cargo fmt --check
         run: cargo fmt --check
 
@@ -35,6 +46,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web-ui/package.json
+
+      - name: Install Web UI deps
+        working-directory: web-ui
+        run: npm install
 
       - name: cargo check --no-default-features
         run: cargo check --no-default-features

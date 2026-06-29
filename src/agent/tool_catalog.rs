@@ -1739,10 +1739,8 @@ mod tests {
         let catalog: HashSet<String> = list_github_tool_names().into_iter().collect();
         let tools_md_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/_base/TOOLS.md");
-        let tools_md =
-            std::fs::read_to_string(&tools_md_path).unwrap_or_else(|e| {
-                panic!("read {}: {e}", tools_md_path.display())
-            });
+        let tools_md = std::fs::read_to_string(&tools_md_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", tools_md_path.display()));
         let documented = parse_tools_md_documented_names(&tools_md);
 
         let mut missing_from_md: Vec<String> = catalog
@@ -1789,10 +1787,7 @@ mod tests {
         // Lazy meta-tools table (no per-tool ### headings).
         if let Some(start) = content.find("## Lazy meta-tools") {
             let rest = &content[start..];
-            let end = rest[1..]
-                .find("\n## ")
-                .map(|i| i + 1)
-                .unwrap_or(rest.len());
+            let end = rest[1..].find("\n## ").map(|i| i + 1).unwrap_or(rest.len());
             let section = &rest[..end];
             let table_row = Regex::new(r"(?m)^\| `([a-z][a-z0-9_]+)` \|").expect("table regex");
             for cap in table_row.captures_iter(section) {

@@ -831,7 +831,7 @@ pub async fn pack_session_history_with_llm(
     Ok(out)
 }
 
-fn chat_message_to_llm(msg: &ChatMessage) -> LlmTurnMessage {
+pub fn chat_message_to_llm(msg: &ChatMessage) -> LlmTurnMessage {
     match msg.role {
         ChatRole::Assistant => {
             if let Some(json) = &msg.tool_calls_json {
@@ -876,6 +876,8 @@ pub fn trim_system_content(content: &mut String, max_tokens: u32) {
     if content.chars().count() <= max_chars {
         return;
     }
+    // NOTE: "Available skills" is no longer in the system prompt (it's a
+    // separate message), so we only drop Techniques and Tools here.
     const TECH: &str = "\n## Techniques\n";
     const TOOLS: &str = "\n## Tools\n";
     if let Some(tech_start) = content.find(TECH) {
@@ -1394,14 +1396,15 @@ mod tests {
 
     #[test]
     fn trim_system_content_drops_techniques_before_blind_cut() {
+        // Available skills is no longer in the system prompt (separate message),
+        // so trim_system_content only drops Techniques and Tools.
         let mut content = format!(
-            "{}\n\n## Available skills\n- **a** — x\n\n## Techniques\n{}",
+            "{}\n\n## Techniques\n{}",
             "Agent body ".repeat(200),
             "skill ".repeat(5000),
         );
         trim_system_content(&mut content, 800);
         assert!(!content.contains("## Techniques"));
-        assert!(content.contains("Available skills"));
         assert!(content.contains("skill_load"));
     }
 

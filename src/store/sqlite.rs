@@ -240,9 +240,8 @@ impl Store for SqliteStore {
 
     async fn list_approval_history(&self, limit: usize) -> Result<Vec<Approval>> {
         self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT payload_json, status FROM approvals WHERE status != 'pending'",
-            )?;
+            let mut stmt = conn
+                .prepare("SELECT payload_json, status FROM approvals WHERE status != 'pending'")?;
             let rows = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;

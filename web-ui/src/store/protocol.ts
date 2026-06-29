@@ -1,0 +1,222 @@
+// TypeScript mirrors of the Rust WS protocol structs.
+// Authoritative source: src/web/snapshot.rs (WebSnapshot / WebLivePatch / WebChatPatch).
+// Contract tests in src/web/snapshot.rs::tests lock the field sets.
+
+export interface ActivityFlow {
+  kind: string;
+  text: string;
+}
+
+export interface ContextMessage {
+  role: string;
+  tokens: number;
+  content: string;
+}
+
+export interface SkillBlock {
+  name: string;
+  tokens: number;
+  body: string;
+  /** Frontmatter `description` — shown in the skill preview modal. */
+  description?: string;
+  /** Frontmatter `always: true` — always-on skills are flagged. */
+  always?: boolean;
+  /** Frontmatter `skills:` refs (technique skills this skill pulls in). */
+  skills?: string[];
+  /** Frontmatter `tools:` refs (business/harness tools this skill declares). */
+  tools?: string[];
+  /** Frontmatter `argument-hint` — usage cue shown in the preview. */
+  argument_hint?: string;
+  /** Frontmatter `intent_phrases` — lazy-routing trigger phrases. */
+  intent_phrases?: string[];
+  /** Frontmatter `intent_bonus_keywords` — bonus scoring substrings. */
+  intent_bonus_keywords?: string[];
+}
+
+export interface ChatContext {
+  turn: number;
+  message_tokens: number;
+  tools_tokens: number;
+  tools_body: string;
+  tool_names: string[];
+  skills_tokens: number;
+  skill_blocks: SkillBlock[];
+  input_budget: number;
+  context_limit: number;
+  message_count: number;
+  messages: ContextMessage[];
+  runtime_context_revision: number | null;
+  context_trimmed_turns: number;
+  context_summary_note: string | null;
+}
+
+export interface PendingApproval {
+  id: string;
+  session_id: string;
+  tool_name: string;
+  tool_args_json: string;
+}
+
+export interface ApprovalDialog {
+  id: string;
+  tool_name: string;
+  description: string;
+  tool_args_json: string;
+  choice: string;
+  deciding: boolean;
+  approve_armed: boolean;
+  approve_arm_ms_remaining: number;
+}
+
+export interface DigestSummary {
+  date: string;
+  complete: boolean;
+  needs_attention: number;
+  ignorable: number;
+  flaky_candidates: number;
+  policy_gate: string;
+  duration_label: string;
+}
+
+export interface PrSnapshot {
+  repo: string;
+  number: number;
+  title: string;
+  author: string;
+  fetched_at: string;
+  ci_summary: string;
+  review_summary: string;
+  triage_note: string;
+  is_draft: boolean;
+}
+
+export interface ApprovalRow {
+  id: string;
+  kind: string;
+  description: string;
+  created_at: string;
+  repo: string | null;
+  pr_number: number | null;
+  run_id: number | null;
+  target_branch: string | null;
+  status: string;
+  comment_body: string | null;
+  issue_number: number | null;
+  label: string | null;
+}
+
+export interface LogEntry {
+  level: string;
+  message: string;
+  ts: string;
+}
+
+export interface McpServerStatus {
+  id: string;
+  connected: boolean;
+  tool_count: number;
+  last_error: string | null;
+  last_rpc_ms: number | null;
+  prefix: string;
+}
+
+export interface WebSnapshot {
+  tab: string;
+  tabs: string[];
+  status: string;
+  engine_busy: boolean;
+  engine_workflow_id: string | null;
+  chat_enabled: boolean;
+  chat_busy: boolean;
+  chat_session_id: string | null;
+  chat_lines: string[];
+  chat_tool_outputs: Record<string, string>;
+  chat_history_revision: number;
+  chat_context_revision: number;
+  chat_streaming: string | null;
+  chat_reasoning: string | null;
+  chat_tool_running: string | null;
+  chat_tool_running_detail: string | null;
+  chat_tool_pending: string | null;
+  chat_turn_phase: string | null;
+  chat_reasoning_compressing: boolean;
+  chat_activity_flow: ActivityFlow | null;
+  chat_context_visible: boolean;
+  chat_context: ChatContext;
+  chat_pending_approval: PendingApproval | null;
+  approval_dialog: ApprovalDialog | null;
+  digest_history: DigestSummary[];
+  digest_bodies: Record<string, string>;
+  selected_digest_date: string | null;
+  prs: PrSnapshot[];
+  pr_filter: string;
+  pr_sort: string;
+  selected_pr_index: number;
+  pr_overview: string | null;
+  pr_overview_loading: boolean;
+  approvals: ApprovalRow[];
+  log_filter: string;
+  logs: LogEntry[];
+  config_path: string;
+  repos: string[];
+  llm_model: string;
+  github_ok: boolean;
+  llm_ok: boolean;
+  github_latency_ms: number | null;
+  llm_latency_ms: number | null;
+  mcp_servers: McpServerStatus[];
+  attach_mode: boolean;
+  auto_approve_mutations: boolean;
+  ui_theme: string;
+}
+
+export interface WebLivePatch {
+  _type: "live";
+  status: string;
+  chat_busy: boolean;
+  chat_streaming: string | null;
+  chat_reasoning: string | null;
+  chat_tool_running: string | null;
+  chat_tool_running_detail: string | null;
+  chat_tool_pending: string | null;
+  chat_turn_phase: string | null;
+  chat_reasoning_compressing: boolean;
+  chat_activity_flow: ActivityFlow | null;
+}
+
+export interface WebChatPatch {
+  _type: "chat";
+  status: string;
+  chat_busy: boolean;
+  chat_session_id: string | null;
+  chat_lines: string[];
+  chat_tool_outputs: Record<string, string>;
+  chat_history_revision: number;
+  chat_context_revision: number;
+  chat_streaming: string | null;
+  chat_reasoning: string | null;
+  chat_tool_running: string | null;
+  chat_tool_running_detail: string | null;
+  chat_tool_pending: string | null;
+  chat_turn_phase: string | null;
+  chat_reasoning_compressing: boolean;
+  chat_activity_flow: ActivityFlow | null;
+  chat_context_visible: boolean;
+  chat_context: ChatContext;
+  chat_pending_approval: PendingApproval | null;
+  approval_dialog: ApprovalDialog | null;
+}
+
+export type WsMessage = WebSnapshot | WebLivePatch | WebChatPatch;
+
+export function isLivePatch(m: WsMessage): m is WebLivePatch {
+  return (m as WebLivePatch)._type === "live";
+}
+
+export function isChatPatch(m: WsMessage): m is WebChatPatch {
+  return (m as WebChatPatch)._type === "chat";
+}
+
+export function isSnapshot(m: WsMessage): m is WebSnapshot {
+  return !isLivePatch(m) && !isChatPatch(m);
+}

@@ -1,16 +1,6 @@
 ---
 name: chat
 description: Ops secretary and coding assistant in the local workspace.
-skills:
-  - github-ops-tone
-  - code-edit
-  - repo-explore
-  - debug
-  - test-run
-  - git-workflow
-  - pr-review
-  - ci-triage
-  - web-fetch
 ---
 
 # Chat system prompt
