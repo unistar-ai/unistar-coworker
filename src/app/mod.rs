@@ -1122,7 +1122,7 @@ pub async fn load_chat_session_ui(
             let body =
                 crate::agent::context::strip_reasoning_summary_marker(&msg.content).to_string();
             let idx = state.chat_lines.len();
-            state.push_chat_line(chat_message_display_line(&msg));
+            state.push_chat_line(chat_message_display_line(msg));
             state.record_chat_tool_output(idx, body);
             continue;
         }
@@ -1137,13 +1137,13 @@ pub async fn load_chat_session_ui(
             if !crate::agent::context::is_tool_approval_pending_transcript(&msg.content)
                 && !msg.content.contains("awaiting approval")
             {
-                state.push_chat_line(chat_tool_start_display_line(&msg));
+                state.push_chat_line(chat_tool_start_display_line(msg));
             }
             let idx = state.chat_lines.len();
-            state.push_chat_line(chat_message_display_line(&msg));
+            state.push_chat_line(chat_message_display_line(msg));
             state.record_chat_tool_output(idx, msg.content.clone());
         } else {
-            state.push_chat_line(chat_message_display_line(&msg));
+            state.push_chat_line(chat_message_display_line(msg));
         }
     }
     state.chat_scroll_from_bottom = 0;

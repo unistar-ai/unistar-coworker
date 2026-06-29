@@ -237,7 +237,7 @@ async fn responses_carry_strict_csp_header() {
     let runtime = test_runtime().await;
     let app = test_app(Arc::clone(&runtime), None);
 
-    let mut builder = Request::builder().method("GET").uri("/");
+    let builder = Request::builder().method("GET").uri("/");
     let response = app
         .oneshot(builder.body(Body::empty()).unwrap())
         .await

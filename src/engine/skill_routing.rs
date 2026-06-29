@@ -152,7 +152,7 @@ fn skill_key(skill: &SkillSpec) -> String {
 /// without duplicating ones it did.
 #[allow(dead_code)]
 fn merge_skills(base: &mut Vec<SkillSpec>, extra: Vec<SkillSpec>) {
-    let existing: std::collections::HashSet<String> = base.iter().map(|s| skill_key(s)).collect();
+    let existing: std::collections::HashSet<String> = base.iter().map(skill_key).collect();
     for s in extra {
         let key = skill_key(&s);
         if !key.is_empty() && !existing.contains(&key) {
