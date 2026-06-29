@@ -14,9 +14,13 @@ use axum::Router;
 
 /// Asset content embedded by the build script. Text assets (JS/CSS) are
 /// stored as `&str`; binary assets (fonts/images, if any) as `&[u8]`.
+///
+/// Either variant may be uninhabited depending on what `build.rs` embedded
+/// (e.g. when `web-ui/dist/` is absent the manifest is a stub and neither
+/// variant is constructed), so both allow `dead_code`.
+#[allow(dead_code)]
 pub enum AssetContent {
     Text(&'static str),
-    #[allow(dead_code)]
     Binary(&'static [u8]),
 }
 
