@@ -112,9 +112,10 @@ Default store backend is JSON under `./data` (gitignored). SQLite backend and `s
 
 ```sh
 cargo check
+cargo fmt --check              # CI enforces formatting
 cargo clippy -- -D warnings    # CI-quality bar; fix all warnings
 cargo test
-cargo test
+cd web-ui && npm run build:fast && npx tsc --noEmit && npx vitest run
 cargo run --release            # TUI + scheduler
 cargo run --release -- chat --once "Summarize open PRs in acme/widget"
 cargo run --release -- run-once --workflow daily-work
@@ -124,11 +125,32 @@ List skills/workflows: `cargo run --release -- skills list` / `workflows list`.
 
 ---
 
+## CI (required after `git push`)
+
+**Every push to `main` / `master` triggers GitHub Actions.** Your changes must leave CI green — do not push and walk away if checks are likely to fail.
+
+Before pushing (or immediately after, if you already pushed), run the same bar locally:
+
+```sh
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+cd web-ui && npm install && npm run build:fast && npx tsc --noEmit && npx vitest run
+```
+
+CI also runs a **`rust-no-default-features`** job (same fmt/clippy/test + Web UI build). If you touch `Cargo.toml` features, `build.rs`, or optional deps, verify that job too.
+
+When Web UI or `web-ui/dist` embedding changes, ensure `npm run build:fast` succeeds so Rust `build.rs` does not warn about a missing `web-ui/dist`.
+
+If CI fails after your push, **fix and push again** until all jobs pass — do not leave broken `main`.
+
+
 ## Conventions for code changes
 
 - **Minimal diff** — match existing style in the file; reuse `tool_catalog`, `context`, `parse` helpers instead of new one-off logic.
 - **Rust 2021**, `tokio` async, `thiserror` / `anyhow` for errors.
 - **Tests** — unit tests live next to modules (`mod tests`); use `acme/widget` and synthetic JSON; run full `cargo test` before finishing.
+- **CI must pass** — see [CI (required after `git push`)](#ci-required-after-git-push); run fmt/clippy/test (+ Web UI build when relevant) before pushing; fix failures until green.
 - **Comments** — only for non-obvious harness invariants; prefer clear names.
 - **No new secrets** in repo; no real session dumps under `data/` in commits.
 - **Mutating behavior** — must stay behind approval unless config explicitly opts out.
