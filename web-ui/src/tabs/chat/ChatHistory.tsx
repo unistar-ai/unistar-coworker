@@ -6,7 +6,7 @@ import ReasoningCard from "../../components/ReasoningCard";
 import EmptyState from "../../components/EmptyState";
 import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
-import { toolMeta, parseToolArgsString, formatToolArgValue, normalizeReasoningText } from "./parser";
+import { toolMeta, parseToolArgsString, formatToolArgValue, normalizeReasoningText, reasoningHasDistinctOriginal } from "./parser";
 import { ToolOutputView } from "./toolOutput";
 import type {
   ChatBlock,
@@ -642,7 +642,7 @@ function ToolReasoningNote({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [viewMode, setViewMode] = useState<"summary" | "original">("summary");
-  const hasOriginal = Boolean(original && original.trim());
+  const hasOriginal = reasoningHasDistinctOriginal(text, original);
   const activeText = viewMode === "original" && hasOriginal ? original! : text;
   const normalized = normalizeReasoningText(activeText);
   if (!normalized) return null;

@@ -4,7 +4,7 @@ import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
 import Markdown from "../../components/Markdown";
 import DetailModal from "../../components/DetailModal";
-import { formatTokens } from "./parser";
+import { formatTokens, reasoningHasDistinctOriginal } from "./parser";
 import type { ChatContext, SkillBlock } from "../../store/protocol";
 
 function ctxInlineSummary(items: string[], max = 3): string {
@@ -471,7 +471,7 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
   const cls = roleClass(message.role);
   const isTool = (message.role || "").toLowerCase().includes("tool");
   const isReasoning = (message.role || "").toLowerCase() === "reasoning";
-  const hasOriginal = Boolean(message.reasoning_original?.trim());
+  const hasOriginal = reasoningHasDistinctOriginal(message.content, message.reasoning_original);
   const activeContent =
     isReasoning && viewMode === "original" && hasOriginal
       ? message.reasoning_original!

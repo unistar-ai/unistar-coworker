@@ -1174,11 +1174,15 @@ pub async fn run_chat_turn(
             if !summary_body.trim().is_empty() {
                 let content = format!("[agent reasoning summary]\n\n{summary_body}");
                 llm_messages.push(LlmTurnMessage::new("user", content.clone()));
-                // Store the raw (uncompressed) thinking whenever compression was
-                // attempted — even if the summarizer failed and we fell back to
-                // the original verbatim (summary == raw), the user may still
-                // want to view the raw thinking trace.
-                let original = if will_compress { Some(raw.as_str()) } else { None };
+                // Keep a separate original only when the summarizer produced a
+                // distinct summary. If summarizer output was discarded and we
+                // fell back to verbatim text, summary == raw — show once in UI.
+                let original =
+                    if will_compress && summary_body.trim() != raw.trim() {
+                        Some(raw.as_str())
+                    } else {
+                        None
+                    };
                 persist_reasoning_summary(
                     store.as_ref(),
                     &session.id,

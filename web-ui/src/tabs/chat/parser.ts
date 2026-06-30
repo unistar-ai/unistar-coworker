@@ -400,6 +400,15 @@ export function normalizeReasoningText(text: string | null | undefined): string 
   return s.trim();
 }
 
+/** True when a separate original exists and differs from the summary body. */
+export function reasoningHasDistinctOriginal(
+  summary: string,
+  original: string | null | undefined,
+): boolean {
+  if (!original?.trim()) return false;
+  return normalizeReasoningText(original) !== normalizeReasoningText(summary);
+}
+
 function getToolOutput(index: number, outputs: Record<string, string>): string | null {
   return outputs[String(index)] ?? outputs[index] ?? null;
 }

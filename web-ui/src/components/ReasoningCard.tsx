@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Brain } from "lucide-react";
 import Markdown from "./Markdown";
-import { normalizeReasoningText } from "../tabs/chat/parser";
+import { normalizeReasoningText, reasoningHasDistinctOriginal } from "../tabs/chat/parser";
 
 function reasoningLineCount(text: string): number {
   const n = normalizeReasoningText(text);
@@ -37,7 +37,7 @@ export default function ReasoningCard({
 }: ReasoningCardProps) {
   const [viewMode, setViewMode] = useState<"summary" | "original">("summary");
 
-  const hasOriginal = Boolean(original && original.trim());
+  const hasOriginal = reasoningHasDistinctOriginal(text, original);
   const activeText = viewMode === "original" && hasOriginal ? original! : text;
 
   const normalized = useMemo(() => normalizeReasoningText(activeText), [activeText]);
