@@ -532,8 +532,9 @@ pub fn build_context_snapshot(
                 display_role: context_display_role(m.role, &m.content),
                 content,
                 tokens: estimate_message_tokens(m),
-                reasoning_original: if crate::agent::context::is_reasoning_summary_content(&m.content)
-                {
+                reasoning_original: if crate::agent::context::is_reasoning_summary_content(
+                    &m.content,
+                ) {
                     reasoning_originals.get(&m.content).cloned()
                 } else {
                     None
@@ -620,6 +621,7 @@ async fn native_tools_for_session(
         .native_tool_definitions_for_session(tool_mode, &state.warmed_tools)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn emit_context_snapshot(
     progress: &Option<broadcast::Sender<AppEvent>>,
     messages: &[LlmTurnMessage],
@@ -1177,12 +1179,11 @@ pub async fn run_chat_turn(
                 // Keep a separate original only when the summarizer produced a
                 // distinct summary. If summarizer output was discarded and we
                 // fell back to verbatim text, summary == raw — show once in UI.
-                let original =
-                    if will_compress && summary_body.trim() != raw.trim() {
-                        Some(raw.as_str())
-                    } else {
-                        None
-                    };
+                let original = if will_compress && summary_body.trim() != raw.trim() {
+                    Some(raw.as_str())
+                } else {
+                    None
+                };
                 persist_reasoning_summary(
                     store.as_ref(),
                     &session.id,
@@ -2955,7 +2956,15 @@ mod tests {
             "user",
             format_session_context_message(delta),
         )];
-        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], Some((full, 2)), &HashMap::new());
+        let snap = build_context_snapshot(
+            &msgs,
+            1,
+            &budget,
+            &[],
+            &[],
+            Some((full, 2)),
+            &HashMap::new(),
+        );
         assert_eq!(snap.runtime_context_revision, Some(2));
         assert!(snap.messages[0].content.contains("Local store snapshot"));
         assert!(!snap.messages[0].content.contains("Store updates"));
