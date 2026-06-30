@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
 import Markdown from "../../components/Markdown";
@@ -15,7 +16,7 @@ function ctxInlineSummary(items: string[], max = 3): string {
 }
 
 /** Render the tools_body as Markdown. If it parses as JSON, pretty-print it
- * inside a ```json fenced block so it gets shiki highlighting; otherwise emit
+ * inside a ```json fenced block so it gets syntax highlighting; otherwise emit
  * it verbatim (it may already be markdown prose). */
 export function toolsBodyAsMarkdown(body: string): string {
   const trimmed = body.trim();
@@ -184,7 +185,7 @@ function ContextTools({ ctx }: { ctx: ChatContext }) {
         <span className="ctx-inline-summary" title={names.join(", ")}>
           {ctxInlineSummary(names, 4)}
         </span>
-        <span className="ctx-compact-chevron">{chipsExpanded ? "▾" : "▸"}</span>
+        <span className={`ctx-compact-chevron${chipsExpanded ? " is-expanded" : ""}`}><ChevronRight size={10} /></span>
         <button
           type="button"
           className="ctx-tools-toggle"
@@ -248,7 +249,7 @@ function ContextSkills({ blocks }: { blocks: SkillBlock[] }) {
         <span className="ctx-inline-summary" title={names.join(", ")}>
           {ctxInlineSummary(names, 3)}
         </span>
-        <span className="ctx-compact-chevron">{listExpanded ? "▾" : "▸"}</span>
+        <span className={`ctx-compact-chevron${listExpanded ? " is-expanded" : ""}`}><ChevronRight size={10} /></span>
       </div>
 
       <div className="ctx-skills-list">
@@ -395,6 +396,7 @@ interface CollapsibleMessage {
   role: string;
   tokens: number;
   content: string;
+  reasoning_original?: string;
 }
 
 function truncateMiddle(s: string, max: number): string {
@@ -425,23 +427,69 @@ function roleClass(role: string): string {
   if (r.includes("assistant")) return "role-assistant";
   if (r.includes("tool")) return "role-tool";
   if (r.includes("system")) return "role-system";
+  if (r === "reasoning") return "role-reasoning";
   return "role-other";
+}
+
+function ContextReasoningToggle({
+  viewMode,
+  onChange,
+}: {
+  viewMode: "summary" | "original";
+  onChange: (mode: "summary" | "original") => void;
+}) {
+  return (
+    <div className="reasoning-view-toggle ctx-reasoning-toggle">
+      <button
+        type="button"
+        className={`reasoning-view-btn${viewMode === "summary" ? " is-active" : ""}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onChange("summary");
+        }}
+      >
+        Summary
+      </button>
+      <button
+        type="button"
+        className={`reasoning-view-btn${viewMode === "original" ? " is-active" : ""}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onChange("original");
+        }}
+      >
+        Original
+      </button>
+    </div>
+  );
 }
 
 function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
   const { collapsible, previewChars } = ctxCollapsePolicy(message);
   const [expanded, setExpanded] = useState(!collapsible);
+  const [viewMode, setViewMode] = useState<"summary" | "original">("summary");
   const cls = roleClass(message.role);
   const isTool = (message.role || "").toLowerCase().includes("tool");
+  const isReasoning = (message.role || "").toLowerCase() === "reasoning";
+  const hasOriginal = Boolean(message.reasoning_original?.trim());
+  const activeContent =
+    isReasoning && viewMode === "original" && hasOriginal
+      ? message.reasoning_original!
+      : message.content;
 
   // Tool results are plain text / JSON — NOT Markdown. Rendering them as
   // Markdown mangles JSON (e.g. `*` → italic, `#` → heading). Use a <pre>
   // with whitespace-pre-wrap so the raw output is shown verbatim.
   const contentEl = isTool ? (
-    <pre className="ctx-content-plain">{message.content}</pre>
+    <pre className="ctx-content-plain">{activeContent}</pre>
   ) : (
-    <Markdown>{message.content}</Markdown>
+    <Markdown>{activeContent}</Markdown>
   );
+
+  const reasoningToggle =
+    isReasoning && hasOriginal ? (
+      <ContextReasoningToggle viewMode={viewMode} onChange={setViewMode} />
+    ) : null;
 
   if (!collapsible) {
     return (
@@ -450,6 +498,7 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
           <span className={`ctx-role ${cls}`}>{message.role}</span>
           <span className="ctx-tokens">{message.tokens} tok</span>
         </div>
+        {reasoningToggle}
         <div className="ctx-content">
           {contentEl}
         </div>
@@ -458,7 +507,7 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
   }
 
   const preview = truncateMiddle(
-    message.content.replace(/\s+/g, " ").trim(),
+    activeContent.replace(/\s+/g, " ").trim(),
     previewChars,
   );
 
@@ -479,15 +528,18 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
       >
         <span className={`ctx-role ${cls}`}>{message.role}</span>
         <span className="ctx-tokens">{message.tokens} tok</span>
-        <button type="button" className="ctx-block-toggle">
-          {expanded ? "▾" : "▸"}
+        <button type="button" className={`ctx-block-toggle${expanded ? " is-expanded" : ""}`}>
+          <ChevronRight size={10} />
         </button>
       </div>
       {!expanded && <div className="ctx-preview">{preview}</div>}
       {expanded && (
-        <div className="ctx-content">
-          {contentEl}
-        </div>
+        <>
+          {reasoningToggle}
+          <div className="ctx-content">
+            {contentEl}
+          </div>
+        </>
       )}
     </div>
   );

@@ -1,7 +1,9 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { Copy, Check, RefreshCw, MessageSquare } from "lucide-react";
 import Markdown from "../../components/Markdown";
 import ReasoningCard from "../../components/ReasoningCard";
+import EmptyState from "../../components/EmptyState";
 import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
 import { toolMeta, parseToolArgsString, formatToolArgValue, normalizeReasoningText } from "./parser";
@@ -20,12 +22,14 @@ export default function ChatHistory({
   stickBottom,
   onStickBottomChange,
   searchQuery = "",
+  activeMatchKey = "",
 }: {
   blocks: ChatBlock[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
   stickBottom: boolean;
   onStickBottomChange?: (stick: boolean) => void;
   searchQuery?: string;
+  activeMatchKey?: string;
 }) {
   const chatBusy = useStore((s) => s.chat_busy);
   const chatStreaming = useStore((s) => s.chat_streaming);
@@ -104,11 +108,28 @@ export default function ChatHistory({
     }
   }, [chatStreaming, stickBottom, scrollRef]);
 
+  // Scroll to the active search match when it changes.
+  useEffect(() => {
+    if (!activeMatchKey) return;
+    const idx = blocks.findIndex((b) => b.key === activeMatchKey);
+    if (idx < 0) return;
+    if (blocks.length >= VIRTUAL_THRESHOLD) {
+      virtualizer.scrollToIndex(idx, { align: "center", behavior: "smooth" });
+    } else {
+      const el = document.querySelector(`[data-block-key="${activeMatchKey}"]`);
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [activeMatchKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const VIRTUAL_THRESHOLD = 80;
 
   if (blocks.length === 0) {
     return (
-      <div className="empty empty-chat">Send a message to start coding…</div>
+      <EmptyState
+        icon={MessageSquare}
+        title="No messages yet"
+        description="Send a message to start coding…"
+      />
     );
   }
 
@@ -125,7 +146,8 @@ export default function ChatHistory({
         {blocks.map((block) => (
           <div
             key={block.key}
-            className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}${searchMatches.has(block.key) ? " is-search-match" : ""}`}
+            data-block-key={block.key}
+            className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}${searchMatches.has(block.key) ? " is-search-match" : ""}${activeMatchKey === block.key ? " is-search-active" : ""}`}
           >
             <BlockRenderer block={block} mcpPrefixes={mcpPrefixes} />
           </div>
@@ -160,7 +182,7 @@ export default function ChatHistory({
                   transform: `translateY(${vi.start}px)`,
                 }}
               >
-                <div className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}${searchMatches.has(block.key) ? " is-search-match" : ""}`}>
+                <div data-block-key={block.key} className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}${searchMatches.has(block.key) ? " is-search-match" : ""}${activeMatchKey === block.key ? " is-search-active" : ""}`}>
                   <BlockRenderer block={block} mcpPrefixes={mcpPrefixes} />
                 </div>
               </div>
@@ -203,7 +225,7 @@ function BlockRenderer({
     return <ToolGroupBlockView group={block.group} mcpPrefixes={mcpPrefixes} />;
   }
   if (block.type === "reasoning") {
-    return <ReasoningBlockView text={block.reasoningText || ""} />;
+    return <ReasoningBlockView text={block.reasoningText || ""} original={block.reasoningOriginal} />;
   }
   return null;
 }
@@ -252,37 +274,40 @@ function MessageView({ msg, isLastAssistant }: { msg: ChatMessage; isLastAssista
         ) : (
           <div className="whitespace-pre-wrap">{msg.body}</div>
         )}
-        <button
-          type="button"
-          className="msg-copy"
-          onClick={onCopy}
-          aria-label="Copy message"
-          title="Copy message"
-        >
-          {copied ? "✓" : "⧉"}
-        </button>
-        {isLastAssistant && !chatBusy && (
+        <div className="msg-actions">
           <button
             type="button"
-            className="msg-regenerate"
-            onClick={() => void apiPost("/api/chat/regenerate")}
-            aria-label="Regenerate response"
-            title="Regenerate response"
+            className="msg-copy"
+            onClick={onCopy}
+            aria-label="Copy message"
+            title="Copy message"
           >
-            ↻
+            {copied ? <Check size={14} /> : <Copy size={14} />}
           </button>
-        )}
+          {isLastAssistant && !chatBusy && (
+            <button
+              type="button"
+              className="msg-regenerate"
+              onClick={() => void apiPost("/api/chat/regenerate")}
+              aria-label="Regenerate response"
+              title="Regenerate response"
+            >
+              <RefreshCw size={14} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
 /** Standalone reasoning block — collapsible, default collapsed. */
-function ReasoningBlockView({ text }: { text: string }) {
+function ReasoningBlockView({ text, original }: { text: string; original?: string }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <ReasoningCard
       text={text}
+      original={original}
       expanded={expanded}
       onToggle={() => setExpanded((e) => !e)}
     />
@@ -571,7 +596,13 @@ function ToolStepView({ step }: { step: ToolStep }) {
   if (step.kind === "reasoning") {
     const text = step.output || step.text;
     if (!text) return null;
-    return <ToolReasoningNote text={text} stepKey={`rs-${step.index}`} />;
+    return (
+      <ToolReasoningNote
+        text={text}
+        original={step.original}
+        stepKey={`rs-${step.index}`}
+      />
+    );
   }
 
   // Tool output step (done with output).
@@ -600,9 +631,20 @@ function ToolStepView({ step }: { step: ToolStep }) {
   );
 }
 
-function ToolReasoningNote({ text, stepKey }: { text: string; stepKey: string }) {
+function ToolReasoningNote({
+  text,
+  original,
+  stepKey,
+}: {
+  text: string;
+  original?: string | null;
+  stepKey: string;
+}) {
   const [expanded, setExpanded] = useState(false);
-  const normalized = normalizeReasoningText(text);
+  const [viewMode, setViewMode] = useState<"summary" | "original">("summary");
+  const hasOriginal = Boolean(original && original.trim());
+  const activeText = viewMode === "original" && hasOriginal ? original! : text;
+  const normalized = normalizeReasoningText(activeText);
   if (!normalized) return null;
   const lineCount = normalized.split("\n").filter((l) => l.trim()).length;
 
@@ -628,11 +670,37 @@ function ToolReasoningNote({ text, stepKey }: { text: string; stepKey: string })
         </button>
       </div>
       {expanded && (
-        <div className="tool-reasoning-body">
-          <div className="reasoning-md prose-chat">
-            <Markdown>{normalized}</Markdown>
+        <>
+          {hasOriginal && (
+            <div className="reasoning-view-toggle">
+              <button
+                type="button"
+                className={`reasoning-view-btn${viewMode === "summary" ? " is-active" : ""}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setViewMode("summary");
+                }}
+              >
+                Summary
+              </button>
+              <button
+                type="button"
+                className={`reasoning-view-btn${viewMode === "original" ? " is-active" : ""}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setViewMode("original");
+                }}
+              >
+                Original
+              </button>
+            </div>
+          )}
+          <div className="tool-reasoning-body">
+            <div className="reasoning-md prose-chat">
+              <Markdown>{normalized}</Markdown>
+            </div>
           </div>
-        </div>
+        </>
       )}
     </div>
   );

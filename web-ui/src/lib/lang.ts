@@ -1,11 +1,23 @@
 // Dependency-free language resolution. Kept in the main chunk (tiny) so
-// CodeBlock can decide synchronously whether a language is shiki-eligible
-// without pulling the heavy shiki core (which is lazy-loaded separately).
+// CodeBlock can decide synchronously whether a language is highlight-eligible
+// without pulling the heavy highlight.js core (which is lazy-loaded separately).
 
-export type ShikiTheme = "github-dark" | "github-light";
+export type HljsLang =
+  | "bash"
+  | "shell"
+  | "json"
+  | "rust"
+  | "javascript"
+  | "typescript"
+  | "python"
+  | "go"
+  | "yaml"
+  | "sql"
+  | "ini"
+  | "diff";
 
-// Languages we highlight with shiki. Others fall back to the regex highlighter.
-export const SHIKI_LANGS = [
+// Languages we highlight with highlight.js. Others fall back to the regex highlighter.
+export const HLJS_LANGS: readonly HljsLang[] = [
   "bash",
   "shell",
   "json",
@@ -16,12 +28,14 @@ export const SHIKI_LANGS = [
   "go",
   "yaml",
   "sql",
-  "toml",
+  "ini",
   "diff",
-] as const;
-export type ShikiLang = (typeof SHIKI_LANGS)[number];
+];
 
-const LANG_ALIASES: Record<string, ShikiLang | undefined> = {
+// User-facing language name → highlight.js language module name.
+// `toml` maps to `ini` (highlight.js has no standalone toml grammar; ini is
+// close enough for key-value highlighting).
+const LANG_ALIASES: Record<string, HljsLang | undefined> = {
   sh: "bash",
   zsh: "bash",
   rs: "rust",
@@ -30,12 +44,12 @@ const LANG_ALIASES: Record<string, ShikiLang | undefined> = {
   py: "python",
   yml: "yaml",
   golang: "go",
+  toml: "ini",
 };
 
-export function resolveLang(lang: string | undefined): ShikiLang | null {
+export function resolveLang(lang: string | undefined): HljsLang | null {
   if (!lang) return null;
   const l = lang.toLowerCase();
-  return (SHIKI_LANGS as readonly string[]).includes(l)
-    ? (l as ShikiLang)
-    : LANG_ALIASES[l] ?? null;
+  if ((HLJS_LANGS as readonly string[]).includes(l)) return l as HljsLang;
+  return LANG_ALIASES[l] ?? null;
 }

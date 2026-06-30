@@ -29,6 +29,8 @@ export interface ToolStep {
   ok?: boolean | null;
   ms?: string | null;
   output?: string | null;
+  /** Raw (uncompressed) reasoning trace, when LLM compression was applied. */
+  original?: string | null;
 }
 
 export interface ToolGroup {
@@ -53,6 +55,9 @@ export interface ChatBlock {
   reasoningText?: string;
   /** For reasoning blocks: the raw line text (before normalization). */
   reasoningRaw?: string;
+  /** For reasoning blocks: the raw (uncompressed) thinking trace, when
+   *  LLM compression was applied. `undefined` when no compression occurred. */
+  reasoningOriginal?: string;
   /** True on the last assistant message block — used for Regenerate button. */
   isLastAssistant?: boolean;
   key: string;
@@ -311,8 +316,10 @@ export function parseToolStep(
   line: string,
   index: number,
   outputs: Record<string, string>,
+  originals: Record<string, string> = {},
 ): ToolStep {
   const output = outputs[String(index)] ?? outputs[index] ?? null;
+  const original = originals[String(index)] ?? originals[index] ?? null;
   if (line.startsWith("  → ")) {
     const body = line.slice(4);
     return { kind: "start", text: body, index, ...splitToolCall(body) };
@@ -332,7 +339,7 @@ export function parseToolStep(
     return { kind: "warn", text: line.slice(4), index };
   }
   if (line.startsWith("  … ")) {
-    return { kind: "reasoning", text: line.slice(4), index, output };
+    return { kind: "reasoning", text: line.slice(4), index, output, original };
   }
   if (line.startsWith("chat> ")) {
     return { kind: "meta", text: line.slice(6), index };
@@ -406,6 +413,7 @@ type RawBlock =
   | {
       type: "reasoning";
       reasoningText: string;
+      reasoningOriginal?: string;
       index: number;
     }
   | {
@@ -418,7 +426,12 @@ type RawBlock =
       args: string | null;
     };
 
-function pushToolStepBlocks(blocks: RawBlock[], steps: ToolStep[], outputs: Record<string, string>) {
+function pushToolStepBlocks(
+  blocks: RawBlock[],
+  steps: ToolStep[],
+  outputs: Record<string, string>,
+  originals: Record<string, string>,
+) {
   if (!steps.length) return;
   if (steps.every((s) => s.kind === "reasoning")) {
     const fullText = steps
@@ -427,10 +440,13 @@ function pushToolStepBlocks(blocks: RawBlock[], steps: ToolStep[], outputs: Reco
       .map(normalizeReasoningText)
       .join("\n\n");
     if (fullText) {
+      const firstIndex = steps[0].index;
+      const original = getToolOutput(firstIndex, originals);
       blocks.push({
         type: "reasoning",
         reasoningText: fullText,
-        index: steps[0].index,
+        reasoningOriginal: original || undefined,
+        index: firstIndex,
       });
     }
     return;
@@ -457,10 +473,13 @@ function pushToolStepBlocks(blocks: RawBlock[], steps: ToolStep[], outputs: Reco
         .map(normalizeReasoningText)
         .join("\n\n");
       if (fullText) {
+        const firstIndex = groupSteps[0].index;
+        const original = getToolOutput(firstIndex, originals);
         blocks.push({
           type: "reasoning",
           reasoningText: fullText,
-          index: groupSteps[0].index,
+          reasoningOriginal: original || undefined,
+          index: firstIndex,
         });
       }
     } else if (groupSteps.length === 1 && groupSteps[0].kind === "meta") {
@@ -487,7 +506,11 @@ function pushToolStepBlocks(blocks: RawBlock[], steps: ToolStep[], outputs: Reco
 }
 
 /** Mirrors legacy app.js::buildMessageBlocks — one tool run per user turn. */
-function buildMessageBlocks(lines: string[], outputs: Record<string, string>): RawBlock[] {
+function buildMessageBlocks(
+  lines: string[],
+  outputs: Record<string, string>,
+  originals: Record<string, string>,
+): RawBlock[] {
   const blocks: RawBlock[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -536,7 +559,7 @@ function buildMessageBlocks(lines: string[], outputs: Record<string, string>): R
       if (l.startsWith("chat> ")) break;
       if (l.startsWith("system> ")) {
         if (steps.length) {
-          pushToolStepBlocks(blocks, steps, outputs);
+          pushToolStepBlocks(blocks, steps, outputs, originals);
           steps.length = 0;
         }
         blocks.push({
@@ -553,10 +576,10 @@ function buildMessageBlocks(lines: string[], outputs: Record<string, string>): R
         i++;
         continue;
       }
-      steps.push(parseToolStep(l, i, outputs));
+      steps.push(parseToolStep(l, i, outputs, originals));
       i++;
     }
-    pushToolStepBlocks(blocks, steps, outputs);
+    pushToolStepBlocks(blocks, steps, outputs, originals);
   }
   return blocks;
 }
@@ -606,6 +629,7 @@ function mergeConsecutiveToolGroups(blocks: RawBlock[]): ChatBlock[] {
         out.push({
           type: "reasoning",
           reasoningText: b.reasoningText,
+          reasoningOriginal: b.reasoningOriginal,
           key: `r-${b.index}-${key++}`,
         });
       } else if (b.type === "tool-group") {
@@ -626,8 +650,9 @@ function mergeConsecutiveToolGroups(blocks: RawBlock[]): ChatBlock[] {
 export function buildChatBlocks(
   lines: string[],
   outputs: Record<string, string>,
+  originals: Record<string, string> = {},
 ): ChatBlock[] {
-  return mergeConsecutiveToolGroups(buildMessageBlocks(lines, outputs));
+  return mergeConsecutiveToolGroups(buildMessageBlocks(lines, outputs, originals));
 }
 
 export interface MessageStats {

@@ -401,11 +401,9 @@ pub async fn materialize_reasoning_for_context(
         }
         tracing::warn!(
             reasoning_chars = trimmed.len(),
-            "reasoning summarizer failed; using local truncation"
+            "reasoning summarizer failed; using original (uncompressed)"
         );
-        return Ok(crate::agent::context::truncate_reasoning_local(
-            trimmed, 720,
-        ));
+        return Ok(trimmed.to_string());
     }
     Ok(trimmed.to_string())
 }
@@ -433,6 +431,17 @@ async fn maybe_compress_reasoning(
         .await
         {
             Ok(Ok(summary)) if !summary.trim().is_empty() => {
+                // Reject bloated summaries — if the summarizer produced output
+                // longer than the original, it failed to compress. Discard it
+                // so the caller falls back to local truncation.
+                if summary.len() > reasoning.len() {
+                    tracing::warn!(
+                        "reasoning compress produced longer output ({} > {} chars); discarding (attempt {attempt})",
+                        summary.len(),
+                        reasoning.len(),
+                    );
+                    continue;
+                }
                 return Ok(Some(summary));
             }
             Ok(Ok(_)) => {

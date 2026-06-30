@@ -1,91 +1,61 @@
-// Shiki-based async syntax highlighting. This module is deliberately heavy
-// (it imports shiki/core + the JS regex engine + vscode-textmate) and is
-// LAZY-LOADED by CodeBlock via a dynamic import() so none of it lands in the
-// main entry chunk. A single highlighter core is created lazily and reused;
-// per-(lang,theme) results are cached so repeated renders are instant.
+// highlight.js-based async syntax highlighting. This module is lazy-loaded by
+// CodeBlock via a dynamic import() so none of it lands in the main entry chunk.
+// A single hljs core is created lazily and reused; per-language results are
+// cached so repeated renders are instant.
 //
-// Theme follows next-themes: "github-dark" for dark, "github-light" for light.
+// Unlike shiki, highlight.js emits CSS classes (hljs-keyword, hljs-string, …)
+// rather than inline style attributes, so it is fully compatible with a strict
+// CSP of `style-src 'self'` (no 'unsafe-inline' needed). Colors come from the
+// .hljs-* rules in index.css, which reference our --tok-* theme variables.
 
-import { createHighlighterCore, type HighlighterCore } from "shiki/core";
-import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
-import type { ShikiLang, ShikiTheme } from "./lang";
+import hljs from "highlight.js/lib/core";
+import type { HljsLang } from "./lang";
 
 // Re-export so existing imports from "../lib/highlight" keep working.
-export type { ShikiLang, ShikiTheme } from "./lang";
+export type { HljsLang } from "./lang";
 
-// Dynamic imports — Vite code-splits each language/theme into its own chunk,
+// Dynamic imports — Vite code-splits each language into its own chunk,
 // loaded only when first needed.
-const LANG_LOADERS: Record<ShikiLang, () => Promise<unknown>> = {
-  bash: () => import("shiki/langs/bash.mjs"),
-  shell: () => import("shiki/langs/shell.mjs"),
-  json: () => import("shiki/langs/json.mjs"),
-  rust: () => import("shiki/langs/rust.mjs"),
-  javascript: () => import("shiki/langs/javascript.mjs"),
-  typescript: () => import("shiki/langs/typescript.mjs"),
-  python: () => import("shiki/langs/python.mjs"),
-  go: () => import("shiki/langs/go.mjs"),
-  yaml: () => import("shiki/langs/yaml.mjs"),
-  sql: () => import("shiki/langs/sql.mjs"),
-  toml: () => import("shiki/langs/toml.mjs"),
-  diff: () => import("shiki/langs/diff.mjs"),
+const LANG_LOADERS: Record<HljsLang, () => Promise<unknown>> = {
+  bash: () => import("highlight.js/lib/languages/bash"),
+  shell: () => import("highlight.js/lib/languages/shell"),
+  json: () => import("highlight.js/lib/languages/json"),
+  rust: () => import("highlight.js/lib/languages/rust"),
+  javascript: () => import("highlight.js/lib/languages/javascript"),
+  typescript: () => import("highlight.js/lib/languages/typescript"),
+  python: () => import("highlight.js/lib/languages/python"),
+  go: () => import("highlight.js/lib/languages/go"),
+  yaml: () => import("highlight.js/lib/languages/yaml"),
+  sql: () => import("highlight.js/lib/languages/sql"),
+  ini: () => import("highlight.js/lib/languages/ini"),
+  diff: () => import("highlight.js/lib/languages/diff"),
 };
 
-const THEME_LOADERS: Record<ShikiTheme, () => Promise<unknown>> = {
-  "github-dark": () => import("shiki/themes/github-dark.mjs"),
-  "github-light": () => import("shiki/themes/github-light.mjs"),
-};
-
-let corePromise: Promise<HighlighterCore> | null = null;
 const loadedLangs = new Set<string>();
-const loadedThemes = new Set<string>();
 
-async function getCore(): Promise<HighlighterCore> {
-  if (!corePromise) {
-    // Use the JS regex engine (no oniguruma wasm) to keep the bundle small
-    // and avoid a 600KB+ wasm chunk. Langs/themes are loaded on demand.
-    corePromise = createHighlighterCore({
-      engine: createJavaScriptRegexEngine(),
-    });
-  }
-  return corePromise;
-}
-
-async function ensureLang(core: HighlighterCore, lang: ShikiLang): Promise<void> {
+async function ensureLang(lang: HljsLang): Promise<void> {
   if (loadedLangs.has(lang)) return;
   const mod = (await LANG_LOADERS[lang]()) as { default: unknown };
-  await core.loadLanguage(mod.default as never);
+  hljs.registerLanguage(lang, mod.default as never);
   loadedLangs.add(lang);
 }
 
-async function ensureTheme(core: HighlighterCore, theme: ShikiTheme): Promise<void> {
-  if (loadedThemes.has(theme)) return;
-  const mod = (await THEME_LOADERS[theme]()) as { default: unknown };
-  await core.loadTheme(mod.default as never);
-  loadedThemes.add(theme);
-}
-
 const cache = new Map<string, string>();
-function keyOf(lang: ShikiLang, theme: ShikiTheme, code: string): string {
-  return `${lang}|${theme}|${code}`;
+function keyOf(lang: HljsLang, code: string): string {
+  return `${lang}|${code}`;
 }
 
-/** Highlight code with shiki. Returns the full `<pre class="shiki">…</pre>`
- * HTML (with inline styles for token colors AND the theme background). The
- * caller swaps this in for the fallback `<pre><code>` structure so shiki's
- * background and base foreground are preserved. Rejects if shiki isn't ready,
- * in which case the caller falls back to the regex highlighter. Results are
- * cached. */
-export async function highlightAsync(
-  code: string,
-  lang: ShikiLang,
-  theme: ShikiTheme,
-): Promise<string> {
-  const k = keyOf(lang, theme, code);
+/** Highlight code with highlight.js. Returns an HTML string of `<span
+ * class="hljs-…">` tokens (NO inline styles, NO wrapping `<pre>` — just the
+ * inner `<code>` content). The caller injects it into `<pre><code>` via
+ * dangerouslySetInnerHTML. Rejects if the language can't be loaded, in which
+ * case the caller falls back to the regex highlighter. Results are cached. */
+export async function highlightAsync(code: string, lang: HljsLang): Promise<string> {
+  const k = keyOf(lang, code);
   const cached = cache.get(k);
   if (cached !== undefined) return cached;
-  const core = await getCore();
-  await Promise.all([ensureLang(core, lang), ensureTheme(core, theme)]);
-  const html = core.codeToHtml(code, { lang, theme });
+  await ensureLang(lang);
+  const html = hljs.highlight(code, { language: lang }).value;
   cache.set(k, html);
   return html;
 }

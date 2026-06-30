@@ -235,6 +235,7 @@ pub(crate) async fn record_tool_outcome(
         &ctx,
         Some(&name),
         Some(args.to_string()),
+        None,
     )
     .await?;
     round.llm_messages.push(LlmTurnMessage::tool_result_with_id(
@@ -259,6 +260,7 @@ pub(crate) async fn record_tool_outcome(
             round.session_id,
             ChatRole::Harness,
             &nudge,
+            None,
             None,
             None,
         )

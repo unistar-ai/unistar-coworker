@@ -23,6 +23,9 @@ pub struct WebSnapshot {
     pub chat_lines: Vec<String>,
     /// Tool output bodies keyed by line index in `chat_lines` (expand in UI).
     pub chat_tool_outputs: std::collections::HashMap<String, String>,
+    /// Raw (uncompressed) reasoning traces keyed by line index in `chat_lines`.
+    /// Present only when LLM reasoning compression was applied for that line.
+    pub chat_reasoning_originals: std::collections::HashMap<String, String>,
     pub chat_history_revision: u64,
     pub chat_context_revision: u64,
     pub chat_streaming: Option<String>,
@@ -91,6 +94,7 @@ pub struct WebChatPatch {
     pub chat_session_id: Option<String>,
     pub chat_lines: Vec<String>,
     pub chat_tool_outputs: std::collections::HashMap<String, String>,
+    pub chat_reasoning_originals: std::collections::HashMap<String, String>,
     pub chat_history_revision: u64,
     pub chat_context_revision: u64,
     pub chat_streaming: Option<String>,
@@ -235,6 +239,11 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect(),
+        chat_reasoning_originals: s
+            .chat_reasoning_originals
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
         chat_history_revision: s.chat_history_revision,
         chat_context_revision: s.chat_context_revision,
         chat_streaming: s.chat_streaming.clone(),
@@ -321,11 +330,22 @@ fn build_chat_context_json(s: &AppState) -> Value {
             "input_budget": c.input_budget,
             "context_limit": c.context_limit,
             "message_count": c.message_count,
-            "messages": c.messages.iter().map(|m| json!({
-                "role": m.display_role,
-                "tokens": m.tokens,
-                "content": truncate_chars(&m.content, WEB_CONTEXT_MSG_CHARS),
-            })).collect::<Vec<_>>(),
+            "messages": c.messages.iter().map(|m| {
+                let mut row = json!({
+                    "role": m.display_role,
+                    "tokens": m.tokens,
+                    "content": truncate_chars(&m.content, WEB_CONTEXT_MSG_CHARS),
+                });
+                if let Some(ref orig) = m.reasoning_original {
+                    if let Some(obj) = row.as_object_mut() {
+                        obj.insert(
+                            "reasoning_original".into(),
+                            json!(truncate_chars(orig, WEB_CONTEXT_MSG_CHARS)),
+                        );
+                    }
+                }
+                row
+            }).collect::<Vec<_>>(),
             "runtime_context_revision": c.runtime_context_revision,
             "context_trimmed_turns": c.context_trimmed_turns,
             "context_summary_note": c.context_summary_note,
@@ -412,6 +432,16 @@ pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
         chat_lines: s.chat_lines.clone(),
         chat_tool_outputs: s
             .chat_tool_outputs
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    truncate_chars(v, WEB_CHAT_PATCH_TOOL_OUTPUT_CHARS),
+                )
+            })
+            .collect(),
+        chat_reasoning_originals: s
+            .chat_reasoning_originals
             .iter()
             .map(|(k, v)| {
                 (
@@ -519,6 +549,7 @@ repos: [acme/widget]
         "chat_session_id",
         "chat_lines",
         "chat_tool_outputs",
+        "chat_reasoning_originals",
         "chat_history_revision",
         "chat_context_revision",
         "chat_streaming",
@@ -662,6 +693,7 @@ repos: [acme/widget]
             "chat_busy",
             "chat_lines",
             "chat_tool_outputs",
+            "chat_reasoning_originals",
             "chat_history_revision",
             "chat_context_revision",
             "chat_streaming",

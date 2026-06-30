@@ -11,6 +11,8 @@ export interface ContextMessage {
   role: string;
   tokens: number;
   content: string;
+  /** Raw (uncompressed) thinking trace for reasoning rows. */
+  reasoning_original?: string;
 }
 
 export interface SkillBlock {
@@ -131,6 +133,7 @@ export interface WebSnapshot {
   chat_session_id: string | null;
   chat_lines: string[];
   chat_tool_outputs: Record<string, string>;
+  chat_reasoning_originals: Record<string, string>;
   chat_history_revision: number;
   chat_context_revision: number;
   chat_streaming: string | null;
@@ -191,6 +194,7 @@ export interface WebChatPatch {
   chat_session_id: string | null;
   chat_lines: string[];
   chat_tool_outputs: Record<string, string>;
+  chat_reasoning_originals: Record<string, string>;
   chat_history_revision: number;
   chat_context_revision: number;
   chat_streaming: string | null;

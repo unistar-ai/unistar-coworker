@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
+import EmptyState from "../../components/EmptyState";
 import ChatHistory from "./ChatHistory";
 import LiveZone, { useLiveZoneActive } from "./LiveZone";
 import LiveDivider from "./LiveDivider";
 import ContextPanel from "./ContextPanel";
 import SessionPicker from "./SessionPicker";
-import { PanelRightOpen } from "lucide-react";
+import { PanelRightOpen, Search, Download, Trash2, ChevronUp, ChevronDown, ArrowDown, MessageSquareOff } from "lucide-react";
 import {
   buildChatBlocks,
   messageStatsFromBlocks,
@@ -34,6 +35,7 @@ export default function ChatTab() {
   const chatBusy = useStore((s) => s.chat_busy);
   const chatLines = useStore((s) => s.chat_lines);
   const outputs = useStore((s) => s.chat_tool_outputs);
+  const reasoningOriginals = useStore((s) => s.chat_reasoning_originals);
   const autoApprove = useStore((s) => s.auto_approve_mutations);
   const chatTurnPhase = useStore((s) => s.chat_turn_phase);
 
@@ -76,9 +78,10 @@ export default function ChatTab() {
   const [mobileCtxOpen, setMobileCtxOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [activeMatchIdx, setActiveMatchIdx] = useState(0);
 
   const blocks = useMemo(() => {
-    const built = buildChatBlocks(chatLines, outputs);
+    const built = buildChatBlocks(chatLines, outputs, reasoningOriginals);
     // Mark the last assistant message block for the Regenerate button.
     for (let i = built.length - 1; i >= 0; i--) {
       if (built[i].type === "message" && built[i].message?.role === "assistant") {
@@ -91,8 +94,36 @@ export default function ChatTab() {
   const stats = useMemo(() => messageStatsFromBlocks(blocks), [blocks]);
   const countLabel = formatMessageCount(stats);
 
+  // Ordered list of block keys that match the search query.
+  const searchMatchKeys = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase();
+    return blocks.filter((b) => {
+      const text = b.message?.body || b.reasoningText || "";
+      return text.toLowerCase().includes(q);
+    }).map((b) => b.key);
+  }, [blocks, searchQuery]);
+
+  const activeMatchKey = searchMatchKeys[activeMatchIdx] || "";
+
+  const gotoMatch = (idx: number) => {
+    if (searchMatchKeys.length === 0) return;
+    const next = ((idx % searchMatchKeys.length) + searchMatchKeys.length) % searchMatchKeys.length;
+    setActiveMatchIdx(next);
+  };
+  const nextMatch = () => gotoMatch(activeMatchIdx + 1);
+  const prevMatch = () => gotoMatch(activeMatchIdx - 1);
+
   if (!chatEnabled) {
-    return <div className="p-4 text-text-muted">Chat is disabled in config.</div>;
+    return (
+      <div className="chat-shell">
+        <EmptyState
+          icon={MessageSquareOff}
+          title="Chat is disabled"
+          description="Enable chat in your config file to start conversing with the agent."
+        />
+      </div>
+    );
   }
 
   const phaseLabel = PHASE_LABELS[chatTurnPhase || ""] || (chatBusy ? "Working" : "");
@@ -145,7 +176,8 @@ export default function ChatTab() {
                 onClick={() => setSearchOpen((v) => !v)}
                 title="Search in chat (Ctrl/Cmd+F)"
               >
-                Search
+                <Search size={14} className="btn-header-icon" />
+                <span className="btn-header-label">Search</span>
               </button>
               <button
                 type="button"
@@ -153,7 +185,8 @@ export default function ChatTab() {
                 onClick={() => void apiFetchDownload("/api/chat/export")}
                 title="Export transcript"
               >
-                Export
+                <Download size={14} className="btn-header-icon" />
+                <span className="btn-header-label">Export</span>
               </button>
               <button
                 type="button"
@@ -161,7 +194,8 @@ export default function ChatTab() {
                 onClick={() => void apiPost("/api/chat/clear")}
                 title="Clear session"
               >
-                Clear
+                <Trash2 size={14} className="btn-header-icon" />
+                <span className="btn-header-label">Clear</span>
               </button>
               {!contextVisible && (
                 <button
@@ -193,21 +227,48 @@ export default function ChatTab() {
                 placeholder="Search in chat…"
                 value={searchQuery}
                 autoFocus
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setActiveMatchIdx(0);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Escape") {
                     setSearchOpen(false);
                     setSearchQuery("");
+                  } else if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (e.shiftKey) prevMatch();
+                    else nextMatch();
                   }
                 }}
               />
-              {searchQuery && (
-                <span className="chat-search-count">
-                  {blocks.filter((b) => {
-                    const text = b.message?.body || b.reasoningText || "";
-                    return text.toLowerCase().includes(searchQuery.toLowerCase());
-                  }).length} matches
-                </span>
+              {searchQuery && searchMatchKeys.length > 0 && (
+                <>
+                  <span className="chat-search-count">
+                    {activeMatchIdx + 1} / {searchMatchKeys.length}
+                  </span>
+                  <button
+                    type="button"
+                    className="chat-search-nav"
+                    onClick={prevMatch}
+                    aria-label="Previous match"
+                    title="Previous (Shift+Enter)"
+                  >
+                    <ChevronUp size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-search-nav"
+                    onClick={nextMatch}
+                    aria-label="Next match"
+                    title="Next (Enter)"
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                </>
+              )}
+              {searchQuery && searchMatchKeys.length === 0 && (
+                <span className="chat-search-count">No matches</span>
               )}
               <button
                 type="button"
@@ -229,6 +290,7 @@ export default function ChatTab() {
                 stickBottom={stickBottom}
                 onStickBottomChange={setStickBottom}
                 searchQuery={searchQuery}
+                activeMatchKey={activeMatchKey}
               />
             </div>
             <LiveDivider visible={liveActive} />
@@ -239,8 +301,9 @@ export default function ChatTab() {
             onClick={scrollToBottom}
             className={`scroll-fab${stickBottom ? " hidden" : ""}`}
             aria-label="Scroll to bottom"
+            title="Scroll to bottom"
           >
-            ↓ Bottom
+            <ArrowDown size={16} />
           </button>
           {/* Mobile-only floating button to reopen the context panel as a
            * drawer. Hidden on desktop (CSS .ctx-fab display:none) and when
@@ -314,8 +377,8 @@ function ChatInput({ busy }: { busy: boolean }) {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter sends, Shift+Enter inserts a newline.
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    // Enter inserts a newline; Shift+Enter sends.
+    if (e.key === "Enter" && e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       send();
       return;
@@ -363,7 +426,7 @@ function ChatInput({ busy }: { busy: boolean }) {
         placeholder={
           busy
             ? "Waiting for model…"
-            : "Message… (Enter send · Shift+Enter newline · /help · /clear · /new)"
+            : "Message… (Enter newline · Shift+Enter send · /help · /clear · /new)"
         }
         rows={1}
       />

@@ -40,6 +40,7 @@ pub(crate) async fn persist_interim_assistant_message(
             ts: Utc::now(),
             tool_name: None,
             tool_calls_json: None,
+            reasoning_original: None,
         })
         .await
 }

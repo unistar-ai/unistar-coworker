@@ -307,6 +307,10 @@ pub struct AppState {
     pub chat_lines: Vec<String>,
     /// Tool output keyed by index in `chat_lines` (for expand-on-o).
     pub chat_tool_outputs: std::collections::HashMap<usize, String>,
+    /// Raw (uncompressed) reasoning trace keyed by index in `chat_lines`.
+    /// Populated when LLM reasoning compression was applied; the summary is
+    /// in `chat_tool_outputs` at the same index. Absent when no compression.
+    pub chat_reasoning_originals: std::collections::HashMap<usize, String>,
     pub chat_expanded_tool_lines: std::collections::HashSet<usize>,
     pub chat_busy: bool,
     /// Partial assistant reply while LLM is streaming (shown in the tail status area).
@@ -399,6 +403,7 @@ impl AppState {
             chat_history_pos: None,
             chat_lines: vec![],
             chat_tool_outputs: std::collections::HashMap::new(),
+            chat_reasoning_originals: std::collections::HashMap::new(),
             chat_expanded_tool_lines: std::collections::HashSet::new(),
             chat_busy: false,
             chat_streaming: None,
@@ -504,6 +509,16 @@ impl AppState {
     pub fn record_chat_tool_output(&mut self, line_index: usize, output: String) {
         if !output.is_empty() {
             self.chat_tool_outputs.insert(line_index, output);
+            self.bump_chat_history();
+        }
+    }
+
+    /// Record the raw (uncompressed) reasoning trace for a transcript line.
+    /// Called when LLM reasoning compression was applied; the summary lives in
+    /// `chat_tool_outputs` at the same index.
+    pub fn record_chat_reasoning_original(&mut self, line_index: usize, original: String) {
+        if !original.is_empty() {
+            self.chat_reasoning_originals.insert(line_index, original);
             self.bump_chat_history();
         }
     }
@@ -705,6 +720,17 @@ impl AppState {
     fn reindex_chat_tool_outputs(&mut self, drained: usize) {
         self.chat_tool_outputs = self
             .chat_tool_outputs
+            .drain()
+            .filter_map(|(idx, body)| {
+                if idx >= drained {
+                    Some((idx - drained, body))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.chat_reasoning_originals = self
+            .chat_reasoning_originals
             .drain()
             .filter_map(|(idx, body)| {
                 if idx >= drained {
@@ -967,6 +993,7 @@ impl AppState {
     pub fn clear_chat_transcript(&mut self) {
         self.chat_lines.clear();
         self.chat_tool_outputs.clear();
+        self.chat_reasoning_originals.clear();
         self.chat_expanded_tool_lines.clear();
         self.chat_pending_approval = None;
         self.set_chat_streaming(None);
@@ -1124,6 +1151,9 @@ pub async fn load_chat_session_ui(
             let idx = state.chat_lines.len();
             state.push_chat_line(chat_message_display_line(msg));
             state.record_chat_tool_output(idx, body);
+            if let Some(original) = &msg.reasoning_original {
+                state.record_chat_reasoning_original(idx, original.clone());
+            }
             continue;
         }
         if msg.role == ChatRole::Tool {
@@ -1166,10 +1196,19 @@ pub async fn load_chat_session_ui(
     let llm_messages: Vec<_> = messages.iter().map(chat_message_to_llm).collect();
     let turn = llm_messages.len().max(1) as u32;
     let budget = TokenBudget::from_config(64_000);
+    let reasoning_originals = crate::agent::context::reasoning_originals_from_history(&messages);
 
     let merged = if let Some(prev) = prev_context {
         // Keep the previously discovered tools & skills; refresh the rest.
-        let fresh = build_context_snapshot(&llm_messages, turn, &budget, &[], &[], None);
+        let fresh = build_context_snapshot(
+            &llm_messages,
+            turn,
+            &budget,
+            &[],
+            &[],
+            None,
+            &reasoning_originals,
+        );
         ContextSnapshot {
             tools_body: prev.tools_body,
             tools_tokens: prev.tools_tokens,
@@ -1207,6 +1246,7 @@ pub async fn load_chat_session_ui(
             &native_tools,
             &loaded_skills,
             None,
+            &reasoning_originals,
         )
     };
     state.set_chat_context(merged);
@@ -1307,6 +1347,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: Some("pr_get_diff".into()),
             tool_calls_json: None,
+            reasoning_original: None,
         };
         let line = chat_message_display_line(&msg);
         assert!(
@@ -1331,6 +1372,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: Some("pr_get_diff".into()),
             tool_calls_json: None,
+            reasoning_original: None,
         };
         assert!(chat_message_display_line(&msg).starts_with("  ✗ "));
     }
@@ -1348,6 +1390,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: Some("skill_load".into()),
             tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),
+            reasoning_original: None,
         };
         assert_eq!(
             chat_message_display_line(&msg),
@@ -1369,6 +1412,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: None,
             tool_calls_json: None,
+            reasoning_original: None,
         };
         let line = chat_message_display_line(&msg);
         assert!(
@@ -1407,6 +1451,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: None,
             tool_calls_json: None,
+            reasoning_original: None,
         };
         let ai_msg = ChatMessage {
             id: Uuid::new_v4(),
@@ -1416,6 +1461,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: None,
             tool_calls_json: None,
+            reasoning_original: None,
         };
         store
             .append_chat_message(&user_msg)
@@ -1514,6 +1560,7 @@ repos: [acme/widget]
                 ts: Utc::now(),
                 tool_name: None,
                 tool_calls_json: None,
+                reasoning_original: None,
             })
             .await
             .expect("append");

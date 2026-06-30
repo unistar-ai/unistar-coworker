@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -50,6 +51,7 @@ pub(crate) struct MutatingToolContext<'a> {
     pub discovery: Arc<Mutex<ChatDiscoveryState>>,
     pub tool_mode: ChatToolMode,
     pub runtime_panel: (String, u64),
+    pub reasoning_originals: &'a HashMap<String, String>,
 }
 
 pub(crate) async fn handle_mutating_tool_call(
@@ -105,6 +107,7 @@ pub(crate) async fn handle_mutating_tool_call(
             &body,
             Some(tool_name),
             Some(tool_args.to_string()),
+            None,
         )
         .await?;
         return Ok(MutatingToolOutcome::Continue);
@@ -133,6 +136,7 @@ pub(crate) async fn handle_mutating_tool_call(
         &body,
         Some(tool_name),
         Some(tool_args.to_string()),
+        None,
     )
     .await?;
     emit_context_snapshot(
@@ -143,6 +147,7 @@ pub(crate) async fn handle_mutating_tool_call(
         &ctx.discovery,
         ctx.tool_mode,
         Some((ctx.runtime_panel.0.as_str(), ctx.runtime_panel.1)),
+        ctx.reasoning_originals,
     )
     .await;
     Ok(MutatingToolOutcome::AwaitingApproval)

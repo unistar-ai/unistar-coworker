@@ -1,5 +1,7 @@
 //! Token-aware chat context packing for 64K (and other) context windows.
 
+use std::collections::HashMap;
+
 use crate::agent::budget::TokenBudget;
 use crate::agent::parse::{parse_issue_line, parse_pr_line};
 use crate::error::Result;
@@ -1035,6 +1037,19 @@ pub fn strip_reasoning_summary_marker(content: &str) -> &str {
     rest.trim_start_matches('\n')
 }
 
+/// Map LLM reasoning message content → raw thinking trace, from persisted history.
+pub fn reasoning_originals_from_history(history: &[ChatMessage]) -> HashMap<String, String> {
+    history
+        .iter()
+        .filter(|m| m.role == ChatRole::Reasoning)
+        .filter_map(|m| {
+            m.reasoning_original
+                .as_ref()
+                .map(|orig| (m.content.clone(), orig.clone()))
+        })
+        .collect()
+}
+
 fn is_context_protected_content(content: &str) -> bool {
     is_harness_nudge_content(content)
         || is_rolling_summary_content(content)
@@ -1457,6 +1472,7 @@ mod tests {
                 content: format!("message {i} {}", "x".repeat(200)),
                 tool_name: None,
                 tool_calls_json: None,
+                reasoning_original: None,
                 ts: Utc::now(),
             })
             .collect()
@@ -1595,6 +1611,7 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
             ts: Utc::now(),
             tool_name: None,
             tool_calls_json: None,
+            reasoning_original: None,
         };
         let llm = chat_message_to_llm(&msg);
         assert_eq!(llm.role, "user");
@@ -1726,6 +1743,7 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
                 ts: Utc::now(),
                 tool_name: None,
                 tool_calls_json: None,
+                reasoning_original: None,
             },
             ChatMessage {
                 id: Uuid::new_v4(),
@@ -1735,6 +1753,7 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
                 ts: Utc::now(),
                 tool_name: None,
                 tool_calls_json: None,
+                reasoning_original: None,
             },
         ];
         let packed = pack_session_history(&history, 20, 64_000);

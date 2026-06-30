@@ -72,6 +72,9 @@ pub struct ContextLine {
     pub display_role: String,
     pub content: String,
     pub tokens: u32,
+    /// Raw (uncompressed) thinking trace for reasoning rows, when compression
+    /// was applied. The LLM only receives `content` (summary).
+    pub reasoning_original: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +201,9 @@ pub enum ChatProgress {
         preview: String,
         /// Full reasoning body for expandable transcript rows.
         body: String,
+        /// Raw (uncompressed) thinking trace, when it differs from `body`.
+        /// `None` when no LLM compression occurred (body == original).
+        original: Option<String>,
     },
     /// Transient skill / MCP flow in Messages (live only — like reasoning).
     ActivityFlow {
@@ -477,6 +483,7 @@ pub fn build_context_snapshot(
     native_tools: &[Value],
     loaded_skills: &[SkillSpec],
     runtime_panel: Option<(&str, u64)>,
+    reasoning_originals: &HashMap<String, String>,
 ) -> ContextSnapshot {
     let message_tokens = crate::agent::context::estimate_messages_tokens(messages);
     let tools_tokens = estimate_tools_tokens(native_tools);
@@ -525,6 +532,12 @@ pub fn build_context_snapshot(
                 display_role: context_display_role(m.role, &m.content),
                 content,
                 tokens: estimate_message_tokens(m),
+                reasoning_original: if crate::agent::context::is_reasoning_summary_content(&m.content)
+                {
+                    reasoning_originals.get(&m.content).cloned()
+                } else {
+                    None
+                },
             }
         })
         .collect();
@@ -615,6 +628,7 @@ pub(crate) async fn emit_context_snapshot(
     discovery: &Arc<Mutex<ChatDiscoveryState>>,
     tool_mode: ChatToolMode,
     runtime_panel: Option<(&str, u64)>,
+    reasoning_originals: &HashMap<String, String>,
 ) {
     let native_tools = native_tools_for_session(discovery, tool_mode).await;
     let loaded_skills = {
@@ -630,6 +644,7 @@ pub(crate) async fn emit_context_snapshot(
             &native_tools,
             &loaded_skills,
             runtime_panel,
+            reasoning_originals,
         )),
     );
 }
@@ -812,6 +827,7 @@ pub async fn run_chat_turn(
             user_message,
             None,
             None,
+            None,
         )
         .await?;
     }
@@ -962,6 +978,7 @@ pub async fn run_chat_turn(
     let mut llm_rounds = 0u32;
     let config_arc = Arc::new(config.clone());
     let hook_runner = HookRunner::builtin();
+    let mut reasoning_originals = crate::agent::context::reasoning_originals_from_history(&history);
 
     emit_context_snapshot(
         &progress,
@@ -971,6 +988,7 @@ pub async fn run_chat_turn(
         &discovery,
         tool_mode,
         Some((runtime_panel.0.as_str(), runtime_panel.1)),
+        &reasoning_originals,
     )
     .await;
 
@@ -1028,6 +1046,7 @@ pub async fn run_chat_turn(
             &discovery,
             tool_mode,
             Some((runtime_panel.0.as_str(), runtime_panel.1)),
+            &reasoning_originals,
         )
         .await;
         tracing::debug!(
@@ -1137,11 +1156,12 @@ pub async fn run_chat_turn(
             continue;
         };
         if let Some(raw) = &outcome.reasoning_for_context {
-            if crate::llm::chat::should_compress_reasoning(
+            let will_compress = crate::llm::chat::should_compress_reasoning(
                 config.chat.compress_reasoning,
                 raw,
                 config.chat.reasoning_compress_min_chars,
-            ) {
+            );
+            if will_compress {
                 emit_progress(&progress, ChatProgress::ReasoningCompressing);
             }
             let summary_body = crate::llm::chat::materialize_reasoning_for_context(
@@ -1154,7 +1174,22 @@ pub async fn run_chat_turn(
             if !summary_body.trim().is_empty() {
                 let content = format!("[agent reasoning summary]\n\n{summary_body}");
                 llm_messages.push(LlmTurnMessage::new("user", content.clone()));
-                persist_reasoning_summary(store.as_ref(), &session.id, &progress, &content).await?;
+                // Store the raw (uncompressed) thinking whenever compression was
+                // attempted — even if the summarizer failed and we fell back to
+                // the original verbatim (summary == raw), the user may still
+                // want to view the raw thinking trace.
+                let original = if will_compress { Some(raw.as_str()) } else { None };
+                persist_reasoning_summary(
+                    store.as_ref(),
+                    &session.id,
+                    &progress,
+                    &content,
+                    original,
+                )
+                .await?;
+                if let Some(orig) = original {
+                    reasoning_originals.insert(content, orig.to_string());
+                }
             }
             emit_context_snapshot(
                 &progress,
@@ -1164,6 +1199,7 @@ pub async fn run_chat_turn(
                 &discovery,
                 tool_mode,
                 Some((runtime_panel.0.as_str(), runtime_panel.1)),
+                &reasoning_originals,
             )
             .await;
         }
@@ -1226,6 +1262,7 @@ not a tool-result transcript. Synthesize from tool results already in context.";
                     &message,
                     None,
                     None,
+                    None,
                 )
                 .await?;
                 append_assistant_to_llm_context(&mut llm_messages, &message);
@@ -1237,6 +1274,7 @@ not a tool-result transcript. Synthesize from tool results already in context.";
                     &discovery,
                     tool_mode,
                     Some((runtime_panel.0.as_str(), runtime_panel.1)),
+                    &reasoning_originals,
                 )
                 .await;
                 return Ok(ChatTurnResult {
@@ -1516,6 +1554,7 @@ from tool results already in context.";
                         &discovery,
                         tool_mode,
                         Some((runtime_panel.0.as_str(), runtime_panel.1)),
+                        &reasoning_originals,
                     )
                     .await;
                 }
@@ -1547,6 +1586,7 @@ from tool results already in context.";
                             discovery: discovery.clone(),
                             tool_mode,
                             runtime_panel: runtime_panel.clone(),
+                            reasoning_originals: &reasoning_originals,
                         },
                         &mut_call,
                     )
@@ -1582,6 +1622,7 @@ from tool results already in context.";
         &fallback,
         None,
         None,
+        None,
     )
     .await?;
     append_assistant_to_llm_context(&mut llm_messages, &fallback);
@@ -1593,6 +1634,7 @@ from tool results already in context.";
         &discovery,
         tool_mode,
         Some((runtime_panel.0.as_str(), runtime_panel.1)),
+        &reasoning_originals,
     )
     .await;
     Ok(ChatTurnResult {
@@ -1610,6 +1652,7 @@ pub(crate) async fn append_message(
     content: &str,
     tool_name: Option<&str>,
     tool_calls_json: Option<String>,
+    reasoning_original: Option<&str>,
 ) -> Result<()> {
     store
         .append_chat_message(&ChatMessage {
@@ -1620,6 +1663,7 @@ pub(crate) async fn append_message(
             ts: Utc::now(),
             tool_name: tool_name.map(str::to_string),
             tool_calls_json,
+            reasoning_original: reasoning_original.map(str::to_string),
         })
         .await
 }
@@ -1646,6 +1690,7 @@ pub(crate) async fn persist_native_assistant_tool_call(
         &step.message,
         None,
         Some(tool_calls_json),
+        None,
     )
     .await
 }
@@ -2307,8 +2352,18 @@ async fn persist_reasoning_summary(
     session_id: &Uuid,
     progress: &Option<broadcast::Sender<AppEvent>>,
     content: &str,
+    original: Option<&str>,
 ) -> Result<()> {
-    append_message(store, session_id, ChatRole::Reasoning, content, None, None).await?;
+    append_message(
+        store,
+        session_id,
+        ChatRole::Reasoning,
+        content,
+        None,
+        None,
+        original,
+    )
+    .await?;
     let body = crate::agent::context::strip_reasoning_summary_marker(content);
     let preview = body
         .lines()
@@ -2319,6 +2374,7 @@ async fn persist_reasoning_summary(
         ChatProgress::ReasoningSummary {
             preview: crate::agent::context::truncate_chars(preview, 120),
             body: body.to_string(),
+            original: original.map(str::to_string),
         },
     );
     Ok(())
@@ -2493,6 +2549,7 @@ async fn handle_llm_review_rejection(
             &body,
             Some(tool_name),
             Some(tool_args.to_string()),
+            None,
         )
         .await?;
         push_harness_nudge(
@@ -2531,6 +2588,7 @@ async fn handle_llm_review_rejection(
         &body,
         Some(tool_name),
         Some(tool_args.to_string()),
+        None,
     )
     .await?;
     llm_messages.push(LlmTurnMessage::tool_result_with_id(
@@ -2751,7 +2809,7 @@ mod tests {
                 }],
             ),
         ];
-        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], None);
+        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], None, &HashMap::new());
         let assistant = snap.messages.last().expect("assistant line");
         assert_eq!(assistant.display_role, "assistant");
         assert!(assistant.content.contains("tool_call: ci_get_failed_logs"));
@@ -2766,7 +2824,7 @@ mod tests {
             LlmTurnMessage::new("user", "What failed in CI?"),
             LlmTurnMessage::new("assistant", "Run 123 failed due to a DB auth error."),
         ];
-        let snap = build_context_snapshot(&msgs, 3, &budget, &[], &[], None);
+        let snap = build_context_snapshot(&msgs, 3, &budget, &[], &[], None, &HashMap::new());
         let last = snap.messages.last().expect("assistant reply");
         assert_eq!(last.display_role, "assistant");
         assert!(last.content.contains("DB auth error"));
@@ -2780,7 +2838,7 @@ mod tests {
             LlmTurnMessage::new("system", "You are helpful."),
             LlmTurnMessage::tool_result("pr_list_open", "#1 title"),
         ];
-        let snap = build_context_snapshot(&msgs, 2, &budget, &[], &[], None);
+        let snap = build_context_snapshot(&msgs, 2, &budget, &[], &[], None, &HashMap::new());
         assert_eq!(snap.message_count, 2);
         assert_eq!(snap.messages.len(), 2);
         assert_eq!(snap.turn, 2);
@@ -2811,6 +2869,7 @@ mod tests {
             &tools,
             &[],
             None,
+            &HashMap::new(),
         );
         assert!(snap.tools_tokens > 0);
         assert!(snap.tools_body.contains("pr_get_overview"));
@@ -2839,6 +2898,7 @@ mod tests {
             &[],
             &skills,
             None,
+            &HashMap::new(),
         );
         assert_eq!(snap.skill_blocks.len(), 1);
         assert!(snap.skill_blocks[0].body.contains("classify CI"));
@@ -2858,7 +2918,7 @@ mod tests {
         let budget = TokenBudget::from_config(64_000);
         let body = "x".repeat(20_000);
         let msgs = vec![LlmTurnMessage::new("system", body.clone())];
-        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], None);
+        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], None, &HashMap::new());
         assert_eq!(snap.messages[0].content.len(), body.len());
         assert_eq!(snap.messages[0].content, body);
     }
@@ -2872,7 +2932,7 @@ mod tests {
             LlmTurnMessage::new("user", "[earlier context summary]\n- user asked about CI"),
             LlmTurnMessage::new("user", "latest question"),
         ];
-        let snap = build_context_snapshot(&msgs, 2, &budget, &[], &[], None);
+        let snap = build_context_snapshot(&msgs, 2, &budget, &[], &[], None, &HashMap::new());
         assert_eq!(snap.context_trimmed_turns, 0);
         assert_eq!(
             snap.context_summary_note.as_deref(),
@@ -2891,10 +2951,27 @@ mod tests {
             "user",
             format_session_context_message(delta),
         )];
-        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], Some((full, 2)));
+        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], Some((full, 2)), &HashMap::new());
         assert_eq!(snap.runtime_context_revision, Some(2));
         assert!(snap.messages[0].content.contains("Local store snapshot"));
         assert!(!snap.messages[0].content.contains("Store updates"));
+    }
+
+    #[test]
+    fn build_context_snapshot_attaches_reasoning_original() {
+        use crate::llm::LlmTurnMessage;
+        let budget = TokenBudget::from_config(64_000);
+        let content = "[agent reasoning summary]\n\n- bullet summary";
+        let msgs = vec![LlmTurnMessage::new("user", content)];
+        let mut originals = HashMap::new();
+        originals.insert(content.to_string(), "full raw thinking trace".into());
+        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], None, &originals);
+        assert_eq!(snap.messages[0].display_role, "reasoning");
+        assert_eq!(snap.messages[0].content, "- bullet summary");
+        assert_eq!(
+            snap.messages[0].reasoning_original.as_deref(),
+            Some("full raw thinking trace")
+        );
     }
 
     #[test]
@@ -2986,6 +3063,7 @@ mod tests {
         let reasoning = ChatProgress::ReasoningSummary {
             preview: "Checked CI on PR #42".into(),
             body: "Checked CI on PR #42".into(),
+            original: None,
         };
         assert_eq!(
             reasoning.display_line(),
@@ -3128,6 +3206,7 @@ mod tests {
             ts: Utc::now(),
             tool_name: Some("python_run".into()),
             tool_calls_json: Some(args.to_string()),
+            reasoning_original: None,
         };
         let from_history = rehydrate_tool_exec_records_from_messages(&[msg]);
         let fp = tool_call_fingerprint("python_run", &args);
@@ -3151,6 +3230,7 @@ mod tests {
             ts: Utc::now(),
             tool_name: Some("python_run".into()),
             tool_calls_json: Some(args.to_string()),
+            reasoning_original: None,
         };
         let records = rehydrate_tool_exec_records_from_messages(&[msg]);
         let fp = tool_call_fingerprint("python_run", &args);

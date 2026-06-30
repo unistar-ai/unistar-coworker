@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Brain } from "lucide-react";
 import Markdown from "./Markdown";
 import { normalizeReasoningText } from "../tabs/chat/parser";
@@ -17,6 +17,9 @@ export { reasoningLineCount, reasoningCharCount };
 
 export interface ReasoningCardProps {
   text: string;
+  /** Raw (uncompressed) thinking trace, when LLM compression was applied.
+   *  When present, a Summary/Original toggle is shown. */
+  original?: string;
   /** Live zone — expanded by default, pulse animation, plain-text stream. */
   live?: boolean;
   /** History — collapsed when false. */
@@ -27,11 +30,17 @@ export interface ReasoningCardProps {
 /** Reasoning / thinking card — mirrors legacy buildReasoningCard(). */
 export default function ReasoningCard({
   text,
+  original,
   live = false,
   expanded,
   onToggle,
 }: ReasoningCardProps) {
-  const normalized = useMemo(() => normalizeReasoningText(text), [text]);
+  const [viewMode, setViewMode] = useState<"summary" | "original">("summary");
+
+  const hasOriginal = Boolean(original && original.trim());
+  const activeText = viewMode === "original" && hasOriginal ? original! : text;
+
+  const normalized = useMemo(() => normalizeReasoningText(activeText), [activeText]);
   const hasContent = Boolean(normalized);
   const isExpanded = expanded ?? live;
   const showBody = live || isExpanded;
@@ -40,7 +49,7 @@ export default function ReasoningCard({
     ? live
       ? "streaming…"
       : ""
-    : `${reasoningLineCount(text)} lines · ${reasoningCharCount(text).toLocaleString()} chars`;
+    : `${reasoningLineCount(activeText)} lines · ${reasoningCharCount(activeText).toLocaleString()} chars`;
 
   const cardClass = [
     "activity-reasoning",
@@ -71,6 +80,30 @@ export default function ReasoningCard({
           </button>
         )}
       </div>
+      {showBody && hasOriginal && !live && (
+        <div className="reasoning-view-toggle">
+          <button
+            type="button"
+            className={`reasoning-view-btn${viewMode === "summary" ? " is-active" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setViewMode("summary");
+            }}
+          >
+            Summary
+          </button>
+          <button
+            type="button"
+            className={`reasoning-view-btn${viewMode === "original" ? " is-active" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setViewMode("original");
+            }}
+          >
+            Original
+          </button>
+        </div>
+      )}
       {showBody && (
         <div className={`activity-reasoning-body${live ? " is-live" : ""}`}>
           {!normalized ? (

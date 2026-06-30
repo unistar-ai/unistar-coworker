@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { apiFetch, apiPost } from "../../lib/api";
 import { useStore } from "../../store/wsStore";
 import Skeleton from "../../components/Skeleton";
@@ -112,8 +113,8 @@ export default function SessionPicker() {
         onKeyDown={onTriggerKeyDown}
       >
         <span className="session-picker-label">{label}</span>
-        <span className="session-picker-chevron" aria-hidden="true">
-          {menuOpen ? "▴" : "▾"}
+        <span className={`session-picker-chevron${menuOpen ? " is-open" : ""}`} aria-hidden="true">
+          <ChevronDown size={12} />
         </span>
       </button>
       {menuOpen && (

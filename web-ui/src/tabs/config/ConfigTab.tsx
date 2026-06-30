@@ -15,14 +15,14 @@ export default function ConfigTab() {
     <div className="panel">
       <div className="config-section">
         <div className="config-section-title">Config path</div>
-        <code style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}>
+        <code className="config-mono">
           {configPath || "(unknown)"}
         </code>
       </div>
 
       <div className="config-section">
         <div className="config-section-title">Repos</div>
-        <div className="flex flex-wrap gap-1">
+        <div className="ctx-chip-row">
           {repos.length ? (
             repos.map((r) => (
               <span key={r} className="ctx-tool-chip">
@@ -30,14 +30,14 @@ export default function ConfigTab() {
               </span>
             ))
           ) : (
-            <span className="text-text-muted">none</span>
+            <span className="config-muted">none</span>
           )}
         </div>
       </div>
 
       <div className="config-section">
         <div className="config-section-title">LLM model</div>
-        <code style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}>
+        <code className="config-mono">
           {llmModel || "(unset)"}
         </code>
       </div>
@@ -48,8 +48,7 @@ export default function ConfigTab() {
         <ProbeRow label="LLM" ok={llmOk} latency={llmLatency} />
         <button
           type="button"
-          className="btn btn-primary"
-          style={{ marginTop: "0.5rem" }}
+          className="btn btn-primary config-reprobe-btn"
           onClick={() => void apiPost("/api/config/probe")}
         >
           Re-probe
@@ -59,25 +58,25 @@ export default function ConfigTab() {
       <div className="config-section">
         <div className="config-section-title">MCP servers</div>
         {mcpServers.length === 0 ? (
-          <div className="text-text-muted">none configured</div>
+          <div className="config-muted">none configured</div>
         ) : (
           <div>
             {mcpServers.map((s) => (
               <div key={s.id} className="config-mcp-card">
-                <div className="flex items-center gap-2">
+                <div className="ctx-chip-row">
                   <span
                     className={`config-probe-dot ${s.connected ? "ok" : "dead"}`}
                   />
-                  <span style={{ fontFamily: "var(--font-mono)" }}>{s.id}</span>
+                  <span className="config-mono">{s.id}</span>
                   {s.tool_count > 0 && (
-                    <span className="text-text-muted">{s.tool_count} tools</span>
+                    <span className="config-muted">{s.tool_count} tools</span>
                   )}
                   {s.last_rpc_ms != null && (
-                    <span className="text-text-muted">{s.last_rpc_ms}ms</span>
+                    <span className="config-muted">{s.last_rpc_ms}ms</span>
                   )}
                 </div>
                 {s.last_error && (
-                  <div style={{ color: "var(--danger)", marginTop: "0.25rem" }}>
+                  <div className="config-mcp-error">
                     {s.last_error}
                   </div>
                 )}
@@ -92,8 +91,8 @@ export default function ConfigTab() {
         <div className="config-shortcuts">
           <ShortcutRow keys={["Ctrl/⌘", "1–6"]} desc="Switch to tab 1–6" />
           <ShortcutRow keys={["Ctrl/⌘", "K"]} desc="Focus chat input" />
-          <ShortcutRow keys={["Enter"]} desc="Send chat message" />
-          <ShortcutRow keys={["Shift", "Enter"]} desc="Insert newline" />
+          <ShortcutRow keys={["Enter"]} desc="Insert newline in chat input" />
+          <ShortcutRow keys={["Shift", "Enter"]} desc="Send chat message" />
           <ShortcutRow keys={["Esc"]} desc="Cancel generation / close dialog / context drawer" />
         </div>
       </div>
@@ -128,8 +127,8 @@ function ProbeRow({
   return (
     <div className="config-probe-row">
       <span className={`config-probe-dot ${ok ? "ok" : "dead"}`} />
-      <span style={{ width: "4rem" }}>{label}</span>
-      <span style={{ color: ok ? "var(--ok)" : "var(--danger)" }}>
+      <span className="config-probe-label">{label}</span>
+      <span className={`config-probe-status${ok ? " ok" : ""}`}>
         {ok ? (latency != null ? `${latency}ms` : "ok") : "offline"}
       </span>
     </div>

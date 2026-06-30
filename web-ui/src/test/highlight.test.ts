@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { resolveLang, SHIKI_LANGS } from "../lib/lang";
+import { resolveLang, HLJS_LANGS } from "../lib/lang";
 
 describe("highlight resolveLang", () => {
-  it("resolves canonical shiki languages", () => {
+  it("resolves canonical languages", () => {
     expect(resolveLang("bash")).toBe("bash");
     expect(resolveLang("json")).toBe("json");
     expect(resolveLang("rust")).toBe("rust");
@@ -11,7 +11,7 @@ describe("highlight resolveLang", () => {
     expect(resolveLang("shell")).toBe("shell");
   });
 
-  it("maps common aliases to a shiki language", () => {
+  it("maps common aliases to a language", () => {
     expect(resolveLang("sh")).toBe("bash");
     expect(resolveLang("zsh")).toBe("bash");
     expect(resolveLang("rs")).toBe("rust");
@@ -20,6 +20,7 @@ describe("highlight resolveLang", () => {
     expect(resolveLang("py")).toBe("python");
     expect(resolveLang("yml")).toBe("yaml");
     expect(resolveLang("golang")).toBe("go");
+    expect(resolveLang("toml")).toBe("ini");
   });
 
   it("is case-insensitive", () => {
@@ -37,8 +38,8 @@ describe("highlight resolveLang", () => {
     expect(resolveLang(undefined)).toBeNull();
   });
 
-  it("SHIKI_LANGS lists exactly the supported set", () => {
-    expect(SHIKI_LANGS).toEqual([
+  it("HLJS_LANGS lists exactly the supported set", () => {
+    expect(HLJS_LANGS).toEqual([
       "bash",
       "shell",
       "json",
@@ -49,7 +50,7 @@ describe("highlight resolveLang", () => {
       "go",
       "yaml",
       "sql",
-      "toml",
+      "ini",
       "diff",
     ]);
   });

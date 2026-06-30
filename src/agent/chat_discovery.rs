@@ -443,6 +443,7 @@ mod tests {
             ts: Utc::now(),
             tool_name: Some("skill_load".into()),
             tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),
+            reasoning_original: None,
         }];
         state.rehydrate_from_tool_history(&history);
         assert!(state.loaded_skills.contains("pr-review"));

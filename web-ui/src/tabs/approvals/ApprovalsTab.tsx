@@ -10,7 +10,7 @@ import {
 } from "./parser";
 import Skeleton from "../../components/Skeleton";
 import EmptyState from "../../components/EmptyState";
-import { Hand, History } from "lucide-react";
+import { Hand, History, AlertTriangle, Check, Ban } from "lucide-react";
 
 interface HistoryItem {
   id: string;
@@ -212,7 +212,7 @@ function ApprovalDetail({ parsed }: { parsed: ParsedApprovalDescription }) {
           className={`approval-verdict-banner verdict-${(parsed.verdict || "unknown").toLowerCase()}`}
         >
           <span className="approval-verdict-icon">
-            {parsed.verdict === "REJECT" ? "⛔" : parsed.verdict === "APPROVE" ? "✓" : "⚠"}
+            {parsed.verdict === "REJECT" ? <Ban size={16} /> : parsed.verdict === "APPROVE" ? <Check size={16} /> : <AlertTriangle size={16} />}
           </span>
           <div className="approval-verdict-text">
             <strong>LLM safety review · {parsed.verdict || "REVIEW"}</strong>

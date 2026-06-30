@@ -2,6 +2,7 @@ import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
 import Markdown from "../../components/Markdown";
 import EmptyState from "../../components/EmptyState";
+import Skeleton from "../../components/Skeleton";
 import { GitPullRequest, Inbox } from "lucide-react";
 import type { PrSnapshot } from "../../store/protocol";
 
@@ -73,10 +74,7 @@ export default function PrsTab() {
       </div>
       <div className="split-detail">
         {overviewLoading ? (
-          <div className="overview-loading">
-            <div className="spinner" />
-            <span>Loading overview…</span>
-          </div>
+          <Skeleton rows={6} className="overview-skeleton" />
         ) : overview ? (
           <Markdown>{overview}</Markdown>
         ) : prs.length ? (

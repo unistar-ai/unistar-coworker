@@ -183,7 +183,7 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                     s.close_approval_dialog();
                     s.resolve_chat_approval(*approval_id, *approved, detail);
                 }
-                ChatProgress::ReasoningSummary { body, .. } => {
+                ChatProgress::ReasoningSummary { body, original, .. } => {
                     s.set_chat_streaming(None);
                     s.set_chat_tool_pending(None);
                     s.set_chat_reasoning_compressing(false);
@@ -197,6 +197,11 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                             s.push_chat_line(line);
                             if !body.is_empty() {
                                 s.record_chat_tool_output(idx, body.clone());
+                            }
+                            if let Some(orig) = original {
+                                if !orig.is_empty() {
+                                    s.record_chat_reasoning_original(idx, orig.clone());
+                                }
                             }
                         }
                     }

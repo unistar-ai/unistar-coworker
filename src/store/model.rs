@@ -238,6 +238,11 @@ pub struct ChatMessage {
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_calls_json: Option<String>,
+    /// For `Reasoning` messages: the raw (uncompressed) thinking trace, when
+    /// it differs from `content` (which holds the LLM-compressed summary).
+    /// `None` for non-reasoning messages or when no compression occurred.
+    #[serde(default)]
+    pub reasoning_original: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

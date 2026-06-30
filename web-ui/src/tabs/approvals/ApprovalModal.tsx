@@ -1,5 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Check, Ban } from "lucide-react";
 import type { ApprovalDialog } from "../../store/protocol";
 import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
@@ -94,7 +95,7 @@ function ModalInner({ dialog }: { dialog: ApprovalDialog }) {
           >
             <div className="approval-head">
               <div className="approval-head-icon" aria-hidden>
-                ⚠
+                <AlertTriangle size={20} />
               </div>
               <div className="approval-head-text">
                 <Dialog.Title asChild>
@@ -132,10 +133,10 @@ function ModalInner({ dialog }: { dialog: ApprovalDialog }) {
                 >
                   <span className="approval-verdict-icon">
                     {parsed.verdict === "REJECT"
-                      ? "⛔"
+                      ? <Ban size={16} />
                       : parsed.verdict === "APPROVE"
-                        ? "✓"
-                        : "⚠"}
+                        ? <Check size={16} />
+                        : <AlertTriangle size={16} />}
                   </span>
                   <div className="approval-verdict-text">
                     <strong>LLM safety review · {parsed.verdict || "REVIEW"}</strong>

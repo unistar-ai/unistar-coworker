@@ -583,6 +583,7 @@ mod tests {
                 display_role: "user".into(),
                 content: "hello".into(),
                 tokens: 10,
+                reasoning_original: None,
             }],
             ..Default::default()
         };
@@ -627,6 +628,7 @@ mod tests {
                 display_role: "system".into(),
                 content: "Agent only".into(),
                 tokens: 20,
+                reasoning_original: None,
             }],
             ..Default::default()
         };
@@ -710,6 +712,7 @@ repos: [acme/widget]
                 display_role: "assistant".into(),
                 content: "**PR #19264** — CI failing\n- check logs\n- retry".into(),
                 tokens: 42,
+                reasoning_original: None,
             }],
             ..Default::default()
         };
@@ -754,6 +757,7 @@ repos: [acme/widget]
                 display_role: "system".into(),
                 content: "word ".repeat(60),
                 tokens: 10,
+                reasoning_original: None,
             }],
             ..Default::default()
         };
@@ -791,6 +795,7 @@ repos: [acme/widget]
                 display_role: "assistant".into(),
                 content: format!("**Summary:** {}", "detail ".repeat(40)),
                 tokens: 10,
+                reasoning_original: None,
             }],
             ..Default::default()
         };
@@ -822,6 +827,7 @@ repos: [acme/widget]
                 display_role: "tool".into(),
                 content: "| Tool | Notes |\n|------|-------|\n| pr_get_overview | snapshot |\n| pr_list_open | list |".into(),
                 tokens: 10,
+                reasoning_original: None,
             }],
             ..Default::default()
         };
@@ -868,6 +874,7 @@ repos: [acme/widget]
                 display_role: "tool".into(),
                 content: "tool_result(ci_get_failed_logs):\n##[error]Process completed with exit code 1.\nrun / unit tests / test\tUNKNOWN STEP\t        AssertionError: expected 1 to equal 2".into(),
                 tokens: 10,
+                reasoning_original: None,
             }],
             ..Default::default()
         };
@@ -901,6 +908,7 @@ repos: [acme/widget]
                 display_role: "reasoning".into(),
                 content: "- checked CI on PR #42\n- will fetch diff".into(),
                 tokens: 30,
+                reasoning_original: None,
             }],
             ..Default::default()
         };
@@ -946,6 +954,7 @@ repos: [acme/widget]
                 display_role: "user".into(),
                 content: "hello".into(),
                 tokens: 3,
+                reasoning_original: None,
             }],
             ..Default::default()
         });
@@ -969,6 +978,7 @@ repos: [acme/widget]
                 display_role: "user".into(),
                 content: "updated".into(),
                 tokens: 4,
+                reasoning_original: None,
             }],
             ..Default::default()
         });

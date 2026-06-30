@@ -237,7 +237,7 @@ async fn persist_harness_nudge(
     nudge: &str,
 ) -> Result<()> {
     let body = push_harness_nudge(llm_messages, nudge.to_string());
-    append_message(store, session_id, ChatRole::Harness, &body, None, None).await
+    append_message(store, session_id, ChatRole::Harness, &body, None, None, None).await
 }
 
 pub(crate) async fn harness_retry_or_stop(
@@ -306,6 +306,7 @@ pub(crate) async fn fulfill_duplicate_readonly_tool(
             &ctx,
             Some(&prep.name),
             Some(prep.args.to_string()),
+            None,
         )
         .await?;
         round.llm_messages.push(LlmTurnMessage::tool_result_with_id(

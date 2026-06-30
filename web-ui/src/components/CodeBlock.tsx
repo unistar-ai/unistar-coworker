@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { useTheme } from "next-themes";
 import { Check, Copy } from "lucide-react";
-import { resolveLang, type ShikiTheme } from "../lib/lang";
+import { resolveLang } from "../lib/lang";
 
 // Regex fallback highlighter — ported from legacy markdown.js::highlightCode.
-// Used for the first paint (instant) and for languages shiki doesn't load.
+// Used for the first paint (instant) and for languages highlight.js doesn't load.
 // Operates on already-escaped HTML text.
 
 function escapeHtml(s: string): string {
@@ -62,9 +61,7 @@ interface CodeBlockProps {
 }
 
 export default function CodeBlock({ code, lang }: CodeBlockProps) {
-  const { resolvedTheme } = useTheme();
-  const theme: ShikiTheme = resolvedTheme === "light" ? "github-light" : "github-dark";
-  const shikiLang = resolveLang(lang);
+  const hljsLang = resolveLang(lang);
 
   // First paint: regex highlight (or plain escaped text for unsupported langs).
   const fallbackHtml = useMemo(() => {
@@ -72,48 +69,37 @@ export default function CodeBlock({ code, lang }: CodeBlockProps) {
     return highlightCodeRegex(escaped, lang || "");
   }, [code, lang]);
 
-  // `html` holds either the regex fallback (inner <code> content) or the full
-  // shiki `<pre>` document. `isShiki` tells the render path which structure to
-  // emit so shiki's theme background + base foreground are preserved.
+  // `html` holds the inner `<code>` content (either regex fallback or
+  // highlight.js `<span class="hljs-…">` tokens). Always injected into
+  // `<pre><code>`, so there is no inline-style/CSP concern.
   const [html, setHtml] = useState(fallbackHtml);
-  const [isShiki, setIsShiki] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // When code/lang/theme changes, kick off shiki and swap in the full <pre>.
-  // The highlight module is dynamically imported so the heavy shiki core +
-  // regex engine land in a separate chunk, fetched only on first highlight.
+  // When code/lang changes, kick off highlight.js and swap in the result.
+  // The highlight module is dynamically imported so the heavy hljs core +
+  // language grammars land in a separate chunk, fetched only on first highlight.
   useEffect(() => {
     let cancelled = false;
-    if (!shikiLang) {
-      setIsShiki(false);
+    if (!hljsLang) {
       setHtml(fallbackHtml);
       return;
     }
     void import("../lib/highlight")
-      .then(({ highlightAsync }) =>
-        highlightAsync(code.replace(/\n$/, ""), shikiLang, theme),
-      )
-      .then((shikiHtml) => {
-        if (!cancelled) {
-          setIsShiki(true);
-          setHtml(shikiHtml);
-        }
+      .then(({ highlightAsync }) => highlightAsync(code.replace(/\n$/, ""), hljsLang))
+      .then((hljsHtml) => {
+        if (!cancelled) setHtml(hljsHtml);
       })
       .catch(() => {
-        if (!cancelled) {
-          setIsShiki(false);
-          setHtml(fallbackHtml);
-        }
+        if (!cancelled) setHtml(fallbackHtml);
       });
     return () => {
       cancelled = true;
     };
-  }, [code, lang, theme, shikiLang, fallbackHtml]);
+  }, [code, lang, hljsLang, fallbackHtml]);
 
   // Reset to fallback immediately when the input changes so we never show
-  // stale highlighted HTML for the previous content while shiki re-runs.
+  // stale highlighted HTML for the previous content while hljs re-runs.
   useEffect(() => {
-    setIsShiki(false);
     setHtml(fallbackHtml);
   }, [fallbackHtml]);
 
@@ -130,7 +116,7 @@ export default function CodeBlock({ code, lang }: CodeBlockProps) {
   };
 
   return (
-    <div className={`md-code-block${isShiki ? " is-shiki" : ""}`}>
+    <div className="md-code-block">
       {langLabel && <span className="md-code-lang">{langLabel}</span>}
       <button
         type="button"
@@ -141,16 +127,9 @@ export default function CodeBlock({ code, lang }: CodeBlockProps) {
       >
         {copied ? <Check size={13} /> : <Copy size={13} />}
       </button>
-      {isShiki ? (
-        // shiki emits a complete <pre class="shiki" style="background:...">…<code>…</code></pre>
-        // with per-token inline colors. Inject it verbatim so the theme palette
-        // (background + base foreground) is intact.
-        <div className="md-code-shiki" dangerouslySetInnerHTML={{ __html: html }} />
-      ) : (
-        <pre>
-          <code dangerouslySetInnerHTML={{ __html: html }} />
-        </pre>
-      )}
+      <pre>
+        <code dangerouslySetInnerHTML={{ __html: html }} />
+      </pre>
     </div>
   );
 }
