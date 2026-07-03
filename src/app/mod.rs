@@ -1207,6 +1207,10 @@ pub async fn load_chat_session_ui(
             &[],
             &[],
             None,
+            crate::agent::context::ContextPanelSources {
+                store_messages: Some(&messages),
+                skill_registry: None,
+            },
             &reasoning_originals,
         );
         ContextSnapshot {
@@ -1246,6 +1250,10 @@ pub async fn load_chat_session_ui(
             &native_tools,
             &loaded_skills,
             None,
+            crate::agent::context::ContextPanelSources {
+                store_messages: Some(&messages),
+                skill_registry: None,
+            },
             &reasoning_originals,
         )
     };

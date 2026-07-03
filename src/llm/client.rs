@@ -124,10 +124,6 @@ impl LlmClient {
         self.online
     }
 
-    pub(crate) fn uses_ollama_native_chat(&self) -> bool {
-        crate::llm::ollama::ollama_native_base(&self.cfg.base_url).is_some()
-    }
-
     /// Classify one page of CI logs. Each LLM call only sees this page plus `prior_summary`.
     #[allow(clippy::too_many_arguments)]
     pub async fn classify_log_page(
@@ -222,34 +218,7 @@ Failed logs (this page only):\n{logs}"
                 messages.clone()
             };
 
-            let think_override = if retried_without_think || !self.cfg.think {
-                Some(false)
-            } else {
-                None
-            };
-
-            let content = if let Some(ollama_base) =
-                crate::llm::ollama::ollama_native_base(&self.cfg.base_url)
-            {
-                match self
-                    .chat_ollama_native(&ollama_base, &msgs, think_override)
-                    .await
-                {
-                    Ok(c) => c,
-                    Err(e) if self.cfg.think && !retried_without_think => {
-                        tracing::warn!(
-                            "LLM classify page {page_num}: {e}, retrying with think=false"
-                        );
-                        retried_without_think = true;
-                        continue;
-                    }
-                    Err(e) => {
-                        return Err(CoworkerError::Other(anyhow::anyhow!("llm chat: {e}")));
-                    }
-                }
-            } else {
-                self.chat_openai_compatible(&msgs).await?
-            };
+            let content = self.chat_openai_compatible(&msgs).await?;
 
             if content.trim().is_empty() {
                 if self.cfg.think && !retried_without_think {
@@ -306,56 +275,7 @@ Failed logs (this page only):\n{logs}"
         self.cfg.max_output_tokens.max(256)
     }
 
-    /// Ollama native API — schema in `format` is enforced more reliably than on `/v1`.
-    async fn chat_ollama_native(
-        &self,
-        base: &str,
-        messages: &serde_json::Value,
-        think_override: Option<bool>,
-    ) -> Result<String> {
-        self.chat_ollama_structured(
-            base,
-            messages,
-            think_override,
-            &classify_response_schema(),
-            self.llm_output_limit(),
-        )
-        .await
-    }
-
-    async fn chat_ollama_structured(
-        &self,
-        base: &str,
-        messages: &serde_json::Value,
-        think_override: Option<bool>,
-        schema: &serde_json::Value,
-        num_predict: u32,
-    ) -> Result<String> {
-        let url = format!("{base}/api/chat");
-        let think = think_override.unwrap_or(self.cfg.think);
-        let mut body = serde_json::json!({
-            "model": self.cfg.model,
-            "messages": messages,
-            "stream": false,
-            "think": think,
-            "options": {
-                "temperature": 0,
-                "num_predict": num_predict,
-            },
-        });
-        apply_structured_format_named(
-            &mut body,
-            self.cfg.structured_output,
-            schema,
-            "structured_json",
-        );
-
-        let v = self.post_json(&url, &body).await?;
-        log_ollama_thinking_budget(&v, self.cfg.max_thinking_tokens, think);
-        extract_ollama_chat_content(&v)
-    }
-
-    /// OpenAI-compatible `/v1/chat/completions` (OpenAI, vLLM, or Ollama fallback).
+    /// OpenAI-compatible `/v1/chat/completions` (OpenAI, vLLM, oMLX, Ollama `/v1`, etc.).
     async fn chat_openai_compatible(&self, messages: &serde_json::Value) -> Result<String> {
         self.chat_openai_structured(
             messages,
@@ -368,13 +288,10 @@ Failed logs (this page only):\n{logs}"
     async fn chat_openai_structured(
         &self,
         messages: &serde_json::Value,
-        schema: &serde_json::Value,
+        _schema: &serde_json::Value,
         max_tokens: u32,
     ) -> Result<String> {
-        let url = format!(
-            "{}/chat/completions",
-            self.cfg.base_url.trim_end_matches('/')
-        );
+        let url = openai_chat_completions_url(&self.cfg.base_url);
         let mut body = serde_json::json!({
             "model": self.cfg.model,
             "messages": messages,
@@ -382,12 +299,7 @@ Failed logs (this page only):\n{logs}"
             "temperature": 0,
             "max_tokens": max_tokens,
         });
-        apply_structured_format_named(
-            &mut body,
-            self.cfg.structured_output,
-            schema,
-            "structured_json",
-        );
+        apply_openai_json_mode(&mut body);
 
         let v = self.post_json(&url, &body).await?;
         extract_openai_chat_content(&v)
@@ -467,6 +379,24 @@ Failed logs (this page only):\n{logs}"
         .await
     }
 
+    /// LLM gate for chat turn completion (think=false, JSON verdict).
+    pub async fn judge_chat_turn_complete_json(
+        &self,
+        prompt_template: &str,
+        payload: &str,
+        schema: &serde_json::Value,
+        max_tokens: u32,
+    ) -> Result<String> {
+        self.review_code_snippet_json(
+            prompt_template,
+            payload,
+            schema,
+            max_tokens,
+            "LLM offline — cannot judge chat turn completion",
+        )
+        .await
+    }
+
     async fn review_code_snippet_json(
         &self,
         prompt_template: &str,
@@ -489,11 +419,17 @@ Failed logs (this page only):\n{logs}"
         let think_override = Some(false);
         let tokens = max_tokens.clamp(256, 2048);
 
-        if let Some(ollama_base) = crate::llm::ollama::ollama_native_base(&self.cfg.base_url) {
-            self.chat_ollama_structured(&ollama_base, &messages, think_override, schema, tokens)
-                .await
-        } else {
-            self.chat_openai_structured(&messages, schema, tokens).await
+        let structured = self.chat_openai_structured(&messages, schema, tokens).await;
+        match structured {
+            Ok(content) => Ok(content),
+            Err(e) if llm_structured_output_unavailable(&e) => {
+                tracing::debug!(
+                    "structured JSON output unavailable ({e}) — retrying review call as plain text"
+                );
+                self.chat_plain_messages(&messages, tokens, think_override)
+                    .await
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -538,10 +474,15 @@ Failed logs (this page only):\n{logs}"
         let mut last = super::chat::ChatToolsTurn::default();
         for (i, (think_override, num_predict)) in attempts.into_iter().enumerate() {
             let mut msgs = messages.clone();
+            let think_was_on = think_override.unwrap_or(self.cfg.think);
             if i > 0 {
                 let nudge = if last.content.trim().is_empty() && last.tool_calls.is_empty() {
                     "Your last turn returned no assistant text and no tool_calls. \
 Call one or more tools or reply to the user in plain text."
+                        .to_string()
+                } else if last.tool_calls.is_empty() {
+                    "Your last turn was a status update without tool_calls. \
+Call tools to continue, or reply with a complete synthesis when the task is done."
                         .to_string()
                 } else {
                     "Your last turn was incomplete. Call tool(s) or reply with a complete answer."
@@ -552,55 +493,29 @@ Call one or more tools or reply to the user in plain text."
                     "content": nudge,
                 }));
             }
-            let turn = if let Some(ollama_base) =
-                crate::llm::ollama::ollama_native_base(&self.cfg.base_url)
+            let turn = match self
+                .chat_openai_with_tools_stream(
+                    &msgs,
+                    tools,
+                    num_predict,
+                    cancel.clone(),
+                    reasoning_only_warn_secs,
+                    &mut on_buffer,
+                )
+                .await
             {
-                match self
-                    .chat_ollama_with_tools_stream(
-                        &ollama_base,
-                        &msgs,
-                        tools,
-                        think_override,
-                        num_predict,
-                        cancel.clone(),
-                        reasoning_only_warn_secs,
-                        &mut on_buffer,
-                    )
-                    .await
-                {
-                    Ok(t) => t,
-                    Err(e) if i + 1 < attempt_count => {
-                        tracing::warn!("chat ollama tools stream failed ({e}); retrying");
-                        last = super::chat::ChatToolsTurn::default();
-                        continue;
-                    }
-                    Err(e) => return Err(e),
+                Ok(turn) => turn,
+                Err(e) if i + 1 < attempt_count => {
+                    tracing::warn!("chat tools stream failed ({e}); retrying");
+                    last = super::chat::ChatToolsTurn::default();
+                    continue;
                 }
-            } else {
-                match self
-                    .chat_openai_with_tools_stream(
-                        &msgs,
-                        tools,
-                        num_predict,
-                        cancel.clone(),
-                        reasoning_only_warn_secs,
-                        &mut on_buffer,
-                    )
-                    .await
-                {
-                    Ok(turn) => turn,
-                    Err(e) if i + 1 < attempt_count => {
-                        tracing::warn!("chat openai tools stream failed ({e}); retrying");
-                        last = super::chat::ChatToolsTurn::default();
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                }
+                Err(e) => return Err(e),
             };
             last = turn.clone();
-            let needs_retry = last.content.trim().is_empty() && last.tool_calls.is_empty();
+            let needs_retry = super::chat::agent_tools_turn_needs_retry(&last, think_was_on);
             if needs_retry && i + 1 < attempt_count {
-                tracing::warn!("chat tools turn empty; retrying without think");
+                tracing::warn!("chat tools turn incomplete; retrying without think");
                 continue;
             }
             if last.content.trim().is_empty() && last.tool_calls.is_empty() {
@@ -618,186 +533,6 @@ Call one or more tools or reply to the user in plain text."
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn chat_ollama_with_tools_stream<F>(
-        &self,
-        base: &str,
-        messages: &serde_json::Value,
-        tools: &[serde_json::Value],
-        think_override: Option<bool>,
-        num_predict: u32,
-        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-        reasoning_only_warn_secs: u64,
-        on_buffer: &mut F,
-    ) -> Result<super::chat::ChatToolsTurn>
-    where
-        F: FnMut(&str, &str, &[super::chat::LlmToolCall]) + Send,
-    {
-        use futures_util::StreamExt;
-
-        let url = format!("{base}/api/chat");
-        let think = think_override.unwrap_or(self.cfg.think);
-        let body = serde_json::json!({
-            "model": self.cfg.model,
-            "messages": messages,
-            "stream": true,
-            "think": think,
-            "tools": tools,
-            "options": {
-                "temperature": 0,
-                "num_predict": num_predict,
-            },
-        });
-
-        let resp = crate::llm::ollama::apply_llm_auth(self.http_stream.post(&url), &self.cfg)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm request: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(CoworkerError::Other(anyhow::anyhow!(
-                "llm HTTP {status}: {text}"
-            )));
-        }
-
-        let mut stream = resp.bytes_stream();
-        let mut full = String::new();
-        let mut thinking_full = String::new();
-        let mut tool_calls = Vec::new();
-        let mut done_reason = None;
-        let mut line_buf = String::new();
-        let idle_timeout = std::time::Duration::from_secs(30);
-        let stream_wall_limit = std::time::Duration::from_secs(CHAT_STREAM_WALL_SECS);
-        let stream_started = std::time::Instant::now();
-        let mut reasoning_only_since: Option<std::time::Instant> = None;
-        let mut stop_stream = false;
-        let mut thinking_soft_capped = false;
-
-        while !stop_stream {
-            if super::chat::chat_cancel_requested(&cancel) {
-                return Err(super::chat::chat_cancelled_error());
-            }
-            if stream_wall_exceeded(
-                stream_started.elapsed(),
-                reasoning_only_since.map(|t| t.elapsed()),
-                full.len(),
-                thinking_full.len(),
-                tool_calls.len(),
-                stream_wall_limit,
-                reasoning_only_warn_secs,
-            ) {
-                let reason = if full.trim().is_empty() && !thinking_full.trim().is_empty() {
-                    "reasoning-only cap"
-                } else {
-                    "stream wall"
-                };
-                tracing::warn!(
-                    "chat tools stream {reason} (thinking {} chars, content {} chars, tools {})",
-                    thinking_full.len(),
-                    full.len(),
-                    tool_calls.len()
-                );
-                break;
-            }
-            let chunk = match tokio::time::timeout(idle_timeout, stream.next()).await {
-                Ok(Some(Ok(chunk))) => chunk,
-                Ok(Some(Err(e))) => {
-                    return Err(CoworkerError::Other(anyhow::anyhow!("llm stream: {e}")));
-                }
-                Ok(None) => break,
-                Err(_) => {
-                    tracing::warn!(
-                        "ollama chat tools stream idle {}s (thinking {} chars, content {} chars)",
-                        idle_timeout.as_secs(),
-                        thinking_full.len(),
-                        full.len()
-                    );
-                    break;
-                }
-            };
-            line_buf.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = line_buf.find('\n') {
-                let line = line_buf[..pos].trim().to_string();
-                line_buf = line_buf[pos + 1..].to_string();
-                if line.is_empty() {
-                    continue;
-                }
-                let v: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
-                    CoworkerError::Other(anyhow::anyhow!("ollama stream json: {e}; line={line}"))
-                })?;
-                let mut changed = false;
-                if let Some(part) = v.pointer("/message/thinking").and_then(|t| t.as_str()) {
-                    if !part.is_empty() && !thinking_soft_capped {
-                        append_stream_text(&mut thinking_full, part);
-                        changed = true;
-                    }
-                }
-                if let Some(part) = v.pointer("/message/content").and_then(|c| c.as_str()) {
-                    if !part.is_empty() {
-                        append_stream_text(&mut full, part);
-                        changed = true;
-                    }
-                }
-                let parsed_calls = parse_native_tool_calls(&v);
-                if !parsed_calls.is_empty() {
-                    tool_calls = parsed_calls;
-                    changed = true;
-                }
-                if changed {
-                    on_buffer(&full, &thinking_full, &tool_calls);
-                }
-                if full.trim().is_empty() && !thinking_full.trim().is_empty() {
-                    if reasoning_only_since.is_none() {
-                        reasoning_only_since = Some(std::time::Instant::now());
-                    }
-                } else if !full.trim().is_empty() {
-                    reasoning_only_since = None;
-                }
-                if think && full.trim().is_empty() && !thinking_full.trim().is_empty() {
-                    if stream_text_appears_stuck(&thinking_full) {
-                        tracing::warn!(
-                            "chat tools stream aborted: thinking loop (~{} chars)",
-                            thinking_full.len()
-                        );
-                        stop_stream = true;
-                        break;
-                    }
-                    if !thinking_soft_capped
-                        && should_stop_chat_thinking_stream(
-                            true,
-                            thinking_full.len(),
-                            0,
-                            self.cfg.max_thinking_tokens,
-                        )
-                    {
-                        thinking_soft_capped = true;
-                        tracing::debug!(
-                            "chat tools thinking soft cap (~{} chars); waiting for content/tool_calls",
-                            thinking_full.len()
-                        );
-                    }
-                }
-                if v.get("done") == Some(&serde_json::Value::Bool(true)) {
-                    done_reason = v
-                        .get("done_reason")
-                        .and_then(|d| d.as_str())
-                        .map(str::to_string);
-                    log_ollama_thinking_budget(&v, self.cfg.max_thinking_tokens, think);
-                }
-            }
-        }
-
-        let _ = done_reason;
-        Ok(super::chat::ChatToolsTurn {
-            content: full,
-            reasoning: thinking_full,
-            tool_calls,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
     async fn chat_openai_with_tools_stream<F>(
         &self,
         messages: &serde_json::Value,
@@ -812,10 +547,7 @@ Call one or more tools or reply to the user in plain text."
     {
         use futures_util::StreamExt;
 
-        let url = format!(
-            "{}/chat/completions",
-            self.cfg.base_url.trim_end_matches('/')
-        );
+        let url = openai_chat_completions_url(&self.cfg.base_url);
         let body = serde_json::json!({
             "model": self.cfg.model,
             "messages": messages,
@@ -1102,43 +834,27 @@ COMPRESS: raw log excerpts and duplicate tool dumps. No preamble.",
         &self,
         messages: &serde_json::Value,
         num_predict: u32,
-        think: Option<bool>,
+        _think: Option<bool>,
     ) -> Result<String> {
-        if let Some(ollama_base) = crate::llm::ollama::ollama_native_base(&self.cfg.base_url) {
-            let url = format!("{ollama_base}/api/chat");
-            let mut body = serde_json::json!({
-                "model": self.cfg.model,
-                "messages": messages,
-                "stream": false,
-                "options": {
-                    "temperature": 0,
-                    "num_predict": num_predict,
-                },
-            });
-            if let Some(t) = think {
-                body.as_object_mut()
-                    .unwrap()
-                    .insert("think".into(), serde_json::Value::Bool(t));
-            }
-            let v = self.post_json(&url, &body).await?;
-            extract_ollama_plain_content(&v)
-        } else {
-            let url = format!(
-                "{}/chat/completions",
-                self.cfg.base_url.trim_end_matches('/')
-            );
-            let body = serde_json::json!({
-                "model": self.cfg.model,
-                "messages": messages,
-                "stream": false,
-                "temperature": 0,
-                "max_tokens": num_predict,
-                "tool_choice": "none",
-            });
-            let v = self.post_json(&url, &body).await?;
-            extract_openai_plain_content(&v)
-        }
+        let url = openai_chat_completions_url(&self.cfg.base_url);
+        let body = serde_json::json!({
+            "model": self.cfg.model,
+            "messages": messages,
+            "stream": false,
+            "temperature": 0,
+            "max_tokens": num_predict,
+            "tool_choice": "none",
+        });
+        let v = self.post_json(&url, &body).await?;
+        extract_openai_plain_content(&v)
     }
+}
+
+fn openai_chat_completions_url(base_url: &str) -> String {
+    format!(
+        "{}/chat/completions",
+        crate::llm::ollama::openai_v1_base(base_url)
+    )
 }
 
 fn thinking_prompt_suffix(cfg: &LlmConfig) -> String {
@@ -1152,75 +868,6 @@ Before answering, reason step-by-step internally, but keep reasoning under ~{} t
 Focus on log evidence and verdict choice; do not restate the reasoning in the JSON fields.\n",
         cfg.max_thinking_tokens, word_budget
     )
-}
-
-fn estimate_tokens(text: &str) -> u32 {
-    // Rough heuristic for Latin/mixed log text (~4 chars per token).
-    (text.len() as u32 / 4).max(1)
-}
-
-fn log_ollama_thinking_budget(v: &serde_json::Value, max_thinking_tokens: u32, think: bool) {
-    if !think {
-        return;
-    }
-    let Some(thinking) = v.pointer("/message/thinking").and_then(|t| t.as_str()) else {
-        return;
-    };
-    let est = estimate_tokens(thinking);
-    if est > max_thinking_tokens {
-        tracing::info!("ollama thinking ~{est} tokens (soft budget {max_thinking_tokens})");
-    } else {
-        tracing::debug!("ollama thinking ~{est} tokens");
-    }
-}
-
-fn extract_ollama_chat_content(v: &serde_json::Value) -> Result<String> {
-    if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_str()) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return Ok(content.to_string());
-        }
-    }
-
-    if let Some(thinking) = v.pointer("/message/thinking").and_then(|t| t.as_str()) {
-        if let Some(text) = non_empty_chat_fallback(thinking, "message.thinking") {
-            return Ok(text);
-        }
-    }
-
-    let done = v
-        .get("done_reason")
-        .and_then(|d| d.as_str())
-        .unwrap_or("unknown");
-    Err(CoworkerError::Other(anyhow::anyhow!(
-        "ollama empty message.content (done_reason={done})"
-    )))
-}
-
-/// Like [`extract_ollama_chat_content`] but accepts plain text in `message.thinking` (summaries).
-fn extract_ollama_plain_content(v: &serde_json::Value) -> Result<String> {
-    if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_str()) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-
-    if let Some(thinking) = v.pointer("/message/thinking").and_then(|t| t.as_str()) {
-        let trimmed = thinking.trim();
-        if !trimmed.is_empty() {
-            tracing::debug!("ollama plain reply recovered from message.thinking");
-            return Ok(trimmed.to_string());
-        }
-    }
-
-    let done = v
-        .get("done_reason")
-        .and_then(|d| d.as_str())
-        .unwrap_or("unknown");
-    Err(CoworkerError::Other(anyhow::anyhow!(
-        "ollama empty plain message (done_reason={done})"
-    )))
 }
 
 #[allow(dead_code)] // unit tests; non-stream OpenAI fallback helper
@@ -1408,10 +1055,6 @@ fn non_empty_chat_fallback(text: &str, field: &str) -> Option<String> {
     None
 }
 
-fn chat_thinking_char_cap(max_thinking_tokens: u32) -> usize {
-    (max_thinking_tokens as usize).saturating_mul(4).max(1024)
-}
-
 const CHAT_STREAM_WALL_SECS: u64 = 90;
 
 /// Stop streaming when the full wall is hit, or sooner when only reasoning grows.
@@ -1435,7 +1078,7 @@ pub fn stream_wall_exceeded(
         .is_some_and(|e| e >= std::time::Duration::from_secs(reasoning_only_warn_secs))
 }
 
-/// Merge Ollama stream chunks that may be delta or cumulative (full prefix) updates.
+/// Merge stream chunks that may be delta or cumulative (full prefix) updates.
 fn append_stream_text(acc: &mut String, part: &str) {
     if part.is_empty() {
         return;
@@ -1468,23 +1111,6 @@ fn stream_text_appears_stuck(text: &str) -> bool {
         }
     }
     false
-}
-
-/// Stop reading the Ollama stream when thinking grows without emitting JSON content.
-pub fn should_stop_chat_thinking_stream(
-    think: bool,
-    thinking_len: usize,
-    content_len: usize,
-    max_thinking_tokens: u32,
-) -> bool {
-    think && content_len == 0 && thinking_len > chat_thinking_char_cap(max_thinking_tokens)
-}
-
-fn parse_native_tool_calls(v: &serde_json::Value) -> Vec<super::chat::LlmToolCall> {
-    v.pointer("/message/tool_calls")
-        .and_then(|a| a.as_array())
-        .map(|arr| parse_native_tool_calls_from_array(arr))
-        .unwrap_or_default()
 }
 
 fn merge_openai_tool_call_deltas(acc: &mut Vec<serde_json::Value>, deltas: &[serde_json::Value]) {
@@ -1600,44 +1226,25 @@ fn classify_response_schema() -> serde_json::Value {
     })
 }
 
-/// Attach structured-output constraints for Ollama (`format`) and OpenAI (`response_format`).
-#[cfg(test)]
-fn apply_structured_format(body: &mut serde_json::Value, structured: bool) {
-    apply_structured_format_named(
-        body,
-        structured,
-        &classify_response_schema(),
-        "classify_ci_failure",
+/// OpenAI-compatible APIs: JSON mode via `response_format` (portable across DeepSeek, vLLM, OpenAI).
+fn apply_openai_json_mode(body: &mut serde_json::Value) {
+    let obj = body.as_object_mut().expect("request body object");
+    obj.remove("format");
+    obj.insert(
+        "response_format".into(),
+        serde_json::json!({ "type": "json_object" }),
     );
 }
 
-fn apply_structured_format_named(
-    body: &mut serde_json::Value,
-    structured: bool,
-    schema: &serde_json::Value,
-    schema_name: &str,
-) {
-    let obj = body.as_object_mut().expect("request body object");
-    if structured {
-        obj.insert("format".into(), schema.clone());
-        obj.insert(
-            "response_format".into(),
-            serde_json::json!({
-                "type": "json_schema",
-                "json_schema": {
-                    "name": schema_name,
-                    "strict": true,
-                    "schema": schema
-                }
-            }),
-        );
-    } else {
-        obj.insert("format".into(), serde_json::Value::String("json".into()));
-        obj.insert(
-            "response_format".into(),
-            serde_json::json!({ "type": "json_object" }),
-        );
-    }
+fn llm_structured_output_unavailable(err: &crate::error::CoworkerError) -> bool {
+    let crate::error::CoworkerError::Other(inner) = err else {
+        return false;
+    };
+    let msg = inner.to_string().to_ascii_lowercase();
+    msg.contains("response_format")
+        || msg.contains("json_schema")
+        || msg.contains("structured outputs")
+        || (msg.contains("json_object") && msg.contains("unavailable"))
 }
 
 /// Remove Gemma / template control tokens (`<|tool_response|>`, `<channel|>`, etc.).
@@ -2234,15 +1841,6 @@ mod tests {
     }
 
     #[test]
-    fn ollama_native_base_from_v1_url() {
-        assert_eq!(
-            crate::llm::ollama::ollama_native_base("http://localhost:11434/v1").as_deref(),
-            Some("http://localhost:11434")
-        );
-        assert!(crate::llm::ollama::ollama_native_base("http://localhost:12345/v1").is_none());
-    }
-
-    #[test]
     fn thinking_prompt_suffix_when_enabled() {
         let cfg = LlmConfig {
             base_url: "http://localhost:11434/v1".into(),
@@ -2262,19 +1860,6 @@ mod tests {
         let s = thinking_prompt_suffix(&cfg);
         assert!(s.contains("512"));
         assert!(s.contains("128"));
-    }
-
-    #[test]
-    fn extract_ollama_content_from_thinking_fallback() {
-        let v = serde_json::json!({
-            "message": {
-                "content": "",
-                "thinking": "analysis...\n{\"verdict\":\"policy\",\"reason\":\"missing label\",\"diagnosis\":\"x\",\"recommended_action\":\"add label\"}"
-            },
-            "done_reason": "length"
-        });
-        let text = extract_ollama_chat_content(&v).unwrap();
-        assert!(text.contains("\"verdict\":\"policy\""));
     }
 
     #[test]
@@ -2337,20 +1922,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_thinking_char_cap_scales_with_config() {
-        assert_eq!(chat_thinking_char_cap(512), 2048);
-        assert_eq!(chat_thinking_char_cap(4096), 16384);
-    }
-
-    #[test]
-    fn should_stop_chat_thinking_stream_when_over_cap() {
-        assert!(should_stop_chat_thinking_stream(true, 2500, 0, 512));
-        assert!(!should_stop_chat_thinking_stream(true, 100, 0, 512));
-        assert!(!should_stop_chat_thinking_stream(false, 4000, 0, 512));
-        assert!(!should_stop_chat_thinking_stream(true, 4104, 0, 4096));
-    }
-
-    #[test]
     fn append_stream_text_handles_cumulative_chunks() {
         let mut acc = String::from("Wait");
         append_stream_text(&mut acc, "Wait, next PR");
@@ -2365,19 +1936,6 @@ mod tests {
         let stuck = format!("{block}{block}");
         assert!(stream_text_appears_stuck(&stuck));
         assert!(!stream_text_appears_stuck("short"));
-    }
-
-    #[test]
-    fn extract_ollama_plain_content_from_thinking() {
-        let v = serde_json::json!({
-            "message": {
-                "content": "",
-                "thinking": "- PR #19240: ci_analyze pending\n- Next: ci_get_failed_logs"
-            },
-            "done_reason": "stop"
-        });
-        let text = extract_ollama_plain_content(&v).unwrap();
-        assert!(text.contains("#19240"));
     }
 
     #[test]
@@ -2538,15 +2096,35 @@ mod tests {
     }
 
     #[test]
-    fn structured_format_uses_schema() {
+    fn openai_chat_completions_url_normalizes_base() {
+        assert_eq!(
+            openai_chat_completions_url("http://localhost:11434"),
+            "http://localhost:11434/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_chat_completions_url("http://localhost:11434/v1"),
+            "http://localhost:11434/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn openai_json_mode_uses_json_object() {
         let mut body = serde_json::json!({"model": "m"});
-        apply_structured_format(&mut body, true);
-        assert!(body.get("format").unwrap().get("properties").is_some());
+        apply_openai_json_mode(&mut body);
         assert_eq!(
             body.pointer("/response_format/type")
                 .and_then(|v| v.as_str()),
-            Some("json_schema")
+            Some("json_object")
         );
+        assert!(body.get("format").is_none());
+    }
+
+    #[test]
+    fn structured_output_unavailable_detects_response_format_error() {
+        let err = crate::error::CoworkerError::Other(anyhow::anyhow!(
+            "llm HTTP 400 Bad Request: This response_format type is unavailable now"
+        ));
+        assert!(llm_structured_output_unavailable(&err));
     }
 
     #[test]

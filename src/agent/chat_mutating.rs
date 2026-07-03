@@ -147,6 +147,7 @@ pub(crate) async fn handle_mutating_tool_call(
         &ctx.discovery,
         ctx.tool_mode,
         Some((ctx.runtime_panel.0.as_str(), ctx.runtime_panel.1)),
+        Some((ctx.store, *ctx.session_id)),
         ctx.reasoning_originals,
     )
     .await;

@@ -22,7 +22,7 @@ pub async fn probe_latency_ms(cfg: &LlmConfig) -> Option<u128> {
         return Some(ms);
     }
 
-    if is_ollama_base_url(&cfg.base_url) {
+    if likely_ollama_host(&cfg.base_url) {
         let tags_url = format!("{root}/api/tags");
         if let Some(ms) = probe_get(&client, tags_url, timeout, None).await {
             return Some(ms);
@@ -52,18 +52,9 @@ pub fn openai_v1_base(base_url: &str) -> String {
     }
 }
 
-/// True when the URL should use Ollama's native `/api/chat` (not OpenAI `/v1/chat/completions`).
-pub fn is_ollama_base_url(base_url: &str) -> bool {
+fn likely_ollama_host(base_url: &str) -> bool {
     let root = server_root(base_url).to_ascii_lowercase();
     root.contains("11434") || root.contains("ollama")
-}
-
-/// Base URL for Ollama native API (`/api/chat`), if this host is Ollama.
-pub fn ollama_native_base(base_url: &str) -> Option<String> {
-    if !is_ollama_base_url(base_url) {
-        return None;
-    }
-    Some(server_root(base_url))
 }
 
 pub fn apply_llm_auth(builder: RequestBuilder, cfg: &LlmConfig) -> RequestBuilder {
@@ -142,21 +133,6 @@ mod tests {
         assert_eq!(
             server_root("http://localhost:12345/v1"),
             "http://localhost:12345"
-        );
-    }
-
-    #[test]
-    fn omlx_is_not_ollama_native() {
-        assert!(!is_ollama_base_url("http://localhost:12345/v1"));
-        assert!(ollama_native_base("http://localhost:12345/v1").is_none());
-    }
-
-    #[test]
-    fn ollama_default_port_uses_native_api() {
-        assert!(is_ollama_base_url("http://localhost:11434/v1"));
-        assert_eq!(
-            ollama_native_base("http://localhost:11434/v1").as_deref(),
-            Some("http://localhost:11434")
         );
     }
 

@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Copy, Check, RefreshCw, MessageSquare } from "lucide-react";
+import { Copy, Check, RefreshCw, MessageSquare, ChevronRight } from "lucide-react";
 import Markdown from "../../components/Markdown";
 import ReasoningCard from "../../components/ReasoningCard";
 import EmptyState from "../../components/EmptyState";
@@ -325,17 +325,40 @@ const STEP_ICON: Record<ToolStepKind, string> = {
   meta: "·",
 };
 
-/** Unified output preview label for a collapsed tool group: "N lines" when the
- * output spans multiple lines, "N chars" for a long single line, otherwise
- * null. Shared by ToolCompactChip and ToolGroupView so the folded preview
- * reads identically everywhere. */
+const STATUS_PILL: Record<string, string> = {
+  ok: "OK",
+  err: "Failed",
+  pending: "Pending",
+  running: "Running",
+  warn: "Warning",
+};
+
+function ToolStatusPill({ status }: { status: string }) {
+  const label = STATUS_PILL[status];
+  if (!label) return null;
+  return <span className={`tool-status-pill status-${status}`}>{label}</span>;
+}
+
+function primaryArgLine(args: string | null | undefined): string | null {
+  const pairs = parseToolArgsString(args);
+  if (!pairs.length) return null;
+  const { key, value } = pairs[0];
+  if (!value) return key;
+  const v = formatToolArgValue(key, value);
+  const text = `${key}=${v}`;
+  return text.length > 52 ? `${text.slice(0, 51)}…` : text;
+}
+
+/** Unified output preview for a collapsed tool group. */
 function outputPreview(group: ToolGroup): string | null {
   const step = group.steps.find((s) => s.output);
   if (!step?.output) return null;
   const lines = step.output.split("\n").length;
   if (lines > 1) return `${lines} lines`;
   if (step.output.length > 80) return `${step.output.length} chars`;
-  return null;
+  const oneLine = step.output.replace(/\s+/g, " ").trim();
+  if (!oneLine) return null;
+  return oneLine.length > 64 ? `${oneLine.slice(0, 63)}…` : oneLine;
 }
 
 function ToolBatchView({
@@ -374,7 +397,9 @@ function ToolBatchView({
           {okCount > 0 && <span className="ok">{okCount}✓</span>}
           {errCount > 0 && <span className="err">{errCount}✗</span>}
         </span>
-        <span className="tool-run-chevron" aria-hidden="true">▸</span>
+        <span className="tool-run-chevron" aria-hidden="true">
+          <ChevronRight size={12} />
+        </span>
       </button>
 
       {!expanded && (
@@ -453,7 +478,7 @@ function ToolCompactChip({
 }) {
   const meta = toolMeta(group.toolName, mcpPrefixes);
   const outHint = outputPreview(group);
-  const badge = group.status === "ok" ? "✓" : group.status === "err" ? "✗" : "⏳";
+  const argLine = primaryArgLine(group.args);
 
   return (
     <div
@@ -470,17 +495,22 @@ function ToolCompactChip({
         }
       }}
     >
-      <span className="tool-chip-icon">{meta.icon}</span>
+      <span className="tool-chip-icon" aria-hidden="true">
+        {meta.icon}
+      </span>
       <span className="tool-chip-main">
         <span className="tool-chip-name">{meta.label}</span>
-        {meta.source && (
-          <span className="tool-chip-detail">{meta.source.source}</span>
+        {(argLine || meta.source) && (
+          <span className="tool-chip-detail">
+            {argLine || meta.source?.source}
+          </span>
         )}
       </span>
       <span className="tool-chip-trail">
         {outHint && <span className="tool-chip-out">{outHint}</span>}
-        {group.ms && <span className="tool-chip-ms">{group.ms}ms</span>}
-        <span className={`tool-chip-badge status-${group.status}`}>{badge}</span>
+        {group.ms != null && <span className="tool-chip-ms">{group.ms}ms</span>}
+        <ToolStatusPill status={group.status} />
+        <ChevronRight size={12} className="tool-chip-chevron" aria-hidden="true" />
       </span>
     </div>
   );
@@ -503,6 +533,7 @@ function ToolGroupView({
   const hasOutput = group.steps.some((s) => s.output);
   const outputSummary = outputPreview(group);
   const argPairs = parseToolArgsString(group.args);
+  const argLine = primaryArgLine(group.args);
 
   // Inside an expanded batch, render without the outer .tool-card border to
   // avoid a "card-in-card" double border; a left status bar carries the
@@ -526,18 +557,25 @@ function ToolGroupView({
           }
         }}
       >
-        <span className="tool-card-icon">{meta.icon}</span>
+        <span className="tool-card-icon" aria-hidden="true">
+          {meta.icon}
+        </span>
         <div className="tool-card-title-wrap">
-          <span className="tool-card-title">{meta.label}</span>
-          {meta.label !== group.toolName && (
-            <span className="tool-card-fn">{group.toolName}</span>
+          <div className="tool-card-title-row">
+            <span className="tool-card-title">{meta.label}</span>
+            {meta.label !== group.toolName && (
+              <span className="tool-card-fn">{group.toolName}</span>
+            )}
+            {meta.source && (
+              <span className="tool-source-chip" title={`Tool backend: ${meta.source.source}`}>
+                {meta.source.source}
+              </span>
+            )}
+          </div>
+          {!expanded && argLine && (
+            <span className="tool-card-arg-line">{argLine}</span>
           )}
-          {meta.source && (
-            <span className="tool-source-chip" title={`Tool backend: ${meta.source.source}`}>
-              {meta.source.source}
-            </span>
-          )}
-          {argPairs.length > 0 && (
+          {expanded && argPairs.length > 0 && (
             <div className="tool-arg-chips">
               {argPairs.map((p, i) => (
                 <span key={i} className="tool-arg-chip">
@@ -551,18 +589,26 @@ function ToolGroupView({
           )}
         </div>
         <div className="tool-card-trail">
-          {group.ms && <span className="tool-card-ms">{group.ms}ms</span>}
+          {group.ms != null && <span className="tool-card-ms">{group.ms}ms</span>}
           {hasOutput && !expanded && outputSummary && (
-            <span className="tool-card-out">{outputSummary}</span>
+            <span className="tool-card-out" title={outputSummary}>
+              {outputSummary}
+            </span>
           )}
-          <span className="tool-card-chevron" aria-hidden="true">▸</span>
+          <ToolStatusPill status={group.status} />
+          <ChevronRight size={12} className="tool-card-chevron" aria-hidden="true" />
         </div>
       </div>
 
       {expanded && (
         <div className="tool-timeline">
           {group.steps.map((s, i) => (
-            <div key={i} className={`tool-timeline-node kind-${s.kind}`}>
+            <div
+              key={i}
+              className={`tool-timeline-node kind-${s.kind}${
+                s.kind === "done" ? (s.ok ? " is-ok" : " is-err") : ""
+              }`}
+            >
               <span className="tool-timeline-dot" />
               <div className="tool-timeline-content">
                 <ToolStepView step={s} />

@@ -10,7 +10,8 @@ use tokio::process::Command;
 use tokio::time;
 
 use crate::agent::bash_tool::{
-    bash_review_response_schema, parse_bash_review_response, BashCommandReview,
+    bash_review_response_schema, parse_bash_review_response_for_tool, BashCommandReview,
+    REVIEW_JSON_RETRY_SUFFIX,
 };
 use crate::agent::context::truncate_chars;
 use crate::agent::harness_errors::{
@@ -145,21 +146,24 @@ async fn run_python_code(
 }
 
 async fn review_code(llm: &LlmClient, code: &str) -> Result<BashCommandReview> {
+    let schema = bash_review_response_schema();
     let raw = llm
         .review_python_code_json(
             PYTHON_REVIEW_PROMPT,
             code,
-            &bash_review_response_schema(),
+            &schema,
             PYTHON_REVIEW_MAX_TOKENS,
         )
         .await?;
-    parse_bash_review_response(&raw).map_err(|e| match e {
-        CoworkerError::Workflow(msg) => CoworkerError::Workflow(
-            python_validation_envelope(&msg.replace("bash_run", "python_run"), Some(code))
-                .format_tool_error_body(),
-        ),
-        other => other,
-    })
+    if let Ok(review) = parse_bash_review_response_for_tool(&raw, PYTHON_RUN_TOOL) {
+        return Ok(review);
+    }
+    tracing::warn!("python_run review JSON parse failed, retrying with JSON-only nudge");
+    let retry_prompt = format!("{PYTHON_REVIEW_PROMPT}{REVIEW_JSON_RETRY_SUFFIX}");
+    let raw = llm
+        .review_python_code_json(&retry_prompt, code, &schema, PYTHON_REVIEW_MAX_TOKENS)
+        .await?;
+    parse_bash_review_response_for_tool(&raw, PYTHON_RUN_TOOL)
 }
 
 fn validate_code(code: &str) -> Result<()> {
@@ -371,7 +375,7 @@ mod tests {
     #[test]
     fn parse_review_accepts_plain_json() {
         let raw = r#"{"verdict":"APPROVE","reason_code":"SUCCESS","critical_issues":[],"suggestions":[]}"#;
-        let review = parse_bash_review_response(raw).unwrap();
+        let review = parse_bash_review_response_for_tool(raw, PYTHON_RUN_TOOL).unwrap();
         assert!(review.is_approved());
     }
 

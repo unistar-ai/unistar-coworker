@@ -125,6 +125,125 @@ pub fn estimate_message_tokens(msg: &LlmTurnMessage) -> u32 {
     n
 }
 
+/// Optional full transcripts / skill registry for the context panel UI.
+#[derive(Clone, Copy, Default)]
+pub struct ContextPanelSources<'a> {
+    /// Persisted session rows — tool bodies are shown verbatim (not compacted LLM text).
+    pub store_messages: Option<&'a [crate::store::ChatMessage]>,
+    /// Fallback to rebuild full `skill_load` bodies when the store row is unavailable.
+    pub skill_registry: Option<&'a crate::engine::SkillRegistry>,
+}
+
+/// True when this LLM turn row represents a tool result in the context panel.
+pub fn llm_turn_is_tool_result(msg: &LlmTurnMessage) -> bool {
+    llm_message_is_tool_result(msg)
+}
+
+/// Persisted tool rows aligned with [`llm_turn_is_tool_result`] in order.
+pub fn context_panel_store_tool_rows<'a>(
+    messages: &'a [crate::store::ChatMessage],
+) -> Vec<&'a crate::store::ChatMessage> {
+    use crate::store::ChatRole;
+    messages
+        .iter()
+        .filter(|m| {
+            m.role == ChatRole::Tool
+                && !m.tool_name.as_deref().is_some_and(|n| {
+                    matches!(
+                        n,
+                        "tool_list"
+                            | "tool_list_category"
+                            | "tool_search"
+                            | "tool_describe"
+                            | "tool_call"
+                            | "resource_read"
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Panel body for one LLM turn — prefers the persisted tool transcript, then a
+/// full skill_load rebuild from the registry, then the live LLM text.
+pub fn format_context_panel_line_content(
+    msg: &LlmTurnMessage,
+    store_tool: Option<&crate::store::ChatMessage>,
+    skill_registry: Option<&crate::engine::SkillRegistry>,
+    runtime_panel: Option<&str>,
+) -> String {
+    if let Some(row) = store_tool {
+        if crate::store::ChatRole::Tool == row.role && tool_context_message_has_args(&row.content) {
+            return row.content.clone();
+        }
+    }
+
+    let raw = format_llm_message_for_context_panel(msg);
+    let content = if msg.role == "system" {
+        format_system_for_context_panel(&raw)
+    } else if msg.role == "user"
+        && raw
+            .trim_start()
+            .starts_with(crate::engine::SESSION_CONTEXT_PREFIX)
+    {
+        if let Some(full) = runtime_panel {
+            crate::engine::format_session_context_message(full)
+        } else {
+            raw
+        }
+    } else if let Some(reg) = skill_registry {
+        enrich_skill_load_panel_content(msg, reg, &raw).unwrap_or(raw)
+    } else {
+        raw
+    };
+    content
+}
+
+fn enrich_skill_load_panel_content(
+    msg: &LlmTurnMessage,
+    registry: &crate::engine::SkillRegistry,
+    fallback: &str,
+) -> Option<String> {
+    let tool = if msg.role == "tool" {
+        msg.tool_name.as_deref()?.to_string()
+    } else if llm_message_is_tool_result(msg) {
+        llm_message_tool_label(msg)
+    } else {
+        return None;
+    };
+    enrich_skill_load_panel_content_by_name(registry, &tool, fallback)
+}
+
+fn enrich_skill_load_panel_content_by_name(
+    registry: &crate::engine::SkillRegistry,
+    tool: &str,
+    fallback: &str,
+) -> Option<String> {
+    if tool != "skill_load" {
+        return None;
+    }
+    let args = parse_tool_transcript_args(fallback)?;
+    let name = args.get("name").and_then(|v| v.as_str())?;
+    let skill = registry.get(name)?;
+    let body = crate::engine::SkillRegistry::format_skill_load(skill);
+    let body_only = body
+        .strip_prefix(&format!("### {name}\n"))
+        .unwrap_or(body.as_str());
+    Some(format_tool_context_message(
+        "skill_load",
+        &args,
+        true,
+        body_only,
+    ))
+}
+
+fn parse_tool_transcript_args(content: &str) -> Option<serde_json::Value> {
+    let marker = "\nargs: ";
+    let start = content.find(marker)? + marker.len();
+    let rest = &content[start..];
+    let end = rest.find("\n\n")?;
+    serde_json::from_str(rest[..end].trim()).ok()
+}
+
 /// Body text for the LLM context panel (includes native `tool_calls` when prose is empty).
 pub fn format_llm_message_for_context_panel(msg: &LlmTurnMessage) -> String {
     let prose = strip_reasoning_summary_marker(&msg.content);
@@ -910,6 +1029,29 @@ pub fn harness_nudge_base(content: &str) -> &str {
         .unwrap_or(content)
 }
 
+/// True when harness or a failed tool still expects a native `tool_calls` step.
+pub fn llm_context_awaits_tool_action(messages: &[LlmTurnMessage]) -> bool {
+    for m in messages.iter().rev() {
+        if m.role == "assistant" && !m.content.trim().is_empty() {
+            break;
+        }
+        if m.role == "tool" {
+            return m.content.trim_start().starts_with("tool_error(");
+        }
+        if m.role == "user" {
+            let c = m.content.trim();
+            if is_harness_nudge_content(c) {
+                return true;
+            }
+            if c.starts_with("[agent reasoning summary]") {
+                continue;
+            }
+            break;
+        }
+    }
+    false
+}
+
 /// True for harness corrective messages that must survive context trimming.
 pub fn is_harness_nudge_content(content: &str) -> bool {
     let trimmed = content.trim_start();
@@ -1400,6 +1542,29 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn llm_context_awaits_tool_after_harness_or_error() {
+        let harness =
+            LlmTurnMessage::new("user", "[Harness] Tool `bash_run` failed\n\nTry: fix flags");
+        assert!(llm_context_awaits_tool_action(std::slice::from_ref(
+            &harness
+        )));
+
+        let err = LlmTurnMessage::tool_result_with_id(
+            Some("c1".into()),
+            "bash_run",
+            "tool_error(bash_run):\nexit 1",
+        );
+        assert!(llm_context_awaits_tool_action(&[err]));
+
+        let ok = LlmTurnMessage::tool_result_with_id(
+            Some("c2".into()),
+            "bash_run",
+            "tool_result(bash_run):\nexit: 0",
+        );
+        assert!(!llm_context_awaits_tool_action(&[ok]));
+    }
+
+    #[test]
     fn format_system_for_context_panel_strips_techniques() {
         let raw = "Agent\n\n## Techniques\n### ci\nrules\n\n## Context\nrepos: x";
         let out = format_system_for_context_panel(raw);
@@ -1728,6 +1893,36 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
             "[agent reasoning summary]\n- bullet"
         ));
         assert!(!is_reasoning_summary_content("tool_result(x):\nok"));
+    }
+
+    #[test]
+    fn context_panel_tool_row_uses_full_store_transcript() {
+        use crate::store::{ChatMessage, ChatRole};
+        use chrono::Utc;
+        use uuid::Uuid;
+        let session_id = Uuid::new_v4();
+        let full_body = "x".repeat(12_000);
+        let full = format_tool_context_message(
+            "skill_load",
+            &serde_json::json!({"name": "ci-triage"}),
+            true,
+            &full_body,
+        );
+        let compact = format!("[summarized tool_result skill_load]\n{}", "y".repeat(200));
+        let store = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id,
+            role: ChatRole::Tool,
+            content: full.clone(),
+            ts: Utc::now(),
+            tool_name: Some("skill_load".into()),
+            tool_calls_json: None,
+            reasoning_original: None,
+        };
+        let llm = LlmTurnMessage::tool_result("skill_load", compact);
+        let panel = format_context_panel_line_content(&llm, Some(&store), None, None);
+        assert_eq!(panel, full);
+        assert!(panel.contains(&full_body));
     }
 
     #[test]

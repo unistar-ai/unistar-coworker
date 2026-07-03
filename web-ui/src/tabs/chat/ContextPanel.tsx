@@ -1,10 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
 import Markdown from "../../components/Markdown";
 import DetailModal from "../../components/DetailModal";
-import { formatTokens, reasoningHasDistinctOriginal } from "./parser";
+import { formatTokens, reasoningHasDistinctOriginal, toolMeta } from "./parser";
+import {
+  ContextToolResultView,
+  contextToolPreview,
+  parseContextToolTranscript,
+} from "./contextToolResult";
 import type { ChatContext, SkillBlock } from "../../store/protocol";
 
 function ctxInlineSummary(items: string[], max = 3): string {
@@ -465,23 +470,33 @@ function ContextReasoningToggle({
 }
 
 function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
+  const mcpServers = useStore((s) => s.mcp_servers);
+  const mcpPrefixes = useMemo(
+    () => mcpServers.map((s) => ({ id: s.id, prefix: s.prefix || `${s.id}_` })),
+    [mcpServers],
+  );
+
   const { collapsible, previewChars } = ctxCollapsePolicy(message);
   const [expanded, setExpanded] = useState(!collapsible);
   const [viewMode, setViewMode] = useState<"summary" | "original">("summary");
   const cls = roleClass(message.role);
   const isTool = (message.role || "").toLowerCase().includes("tool");
   const isReasoning = (message.role || "").toLowerCase() === "reasoning";
+  const toolParsed = isTool ? parseContextToolTranscript(message.content) : null;
   const hasOriginal = reasoningHasDistinctOriginal(message.content, message.reasoning_original);
   const activeContent =
     isReasoning && viewMode === "original" && hasOriginal
       ? message.reasoning_original!
       : message.content;
 
-  // Tool results are plain text / JSON — NOT Markdown. Rendering them as
-  // Markdown mangles JSON (e.g. `*` → italic, `#` → heading). Use a <pre>
-  // with whitespace-pre-wrap so the raw output is shown verbatim.
+  const roleLabel = (() => {
+    if (!isTool || !toolParsed?.toolName) return message.role;
+    const meta = toolMeta(toolParsed.toolName, mcpPrefixes);
+    return `tool · ${meta.label}`;
+  })();
+
   const contentEl = isTool ? (
-    <pre className="ctx-content-plain">{activeContent}</pre>
+    <ContextToolResultView content={activeContent} mcpPrefixes={mcpPrefixes} />
   ) : (
     <Markdown>{activeContent}</Markdown>
   );
@@ -493,26 +508,25 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
 
   if (!collapsible) {
     return (
-      <div className={`ctx-block ${cls}`}>
+      <div className={`ctx-block ${cls}${isTool ? " has-tool-result" : ""}`}>
         <div className="ctx-block-head">
-          <span className={`ctx-role ${cls}`}>{message.role}</span>
+          <span className={`ctx-role ${cls}`}>{roleLabel}</span>
           <span className="ctx-tokens">{message.tokens} tok</span>
         </div>
         {reasoningToggle}
-        <div className="ctx-content">
+        <div className={`ctx-content${isTool ? " ctx-content-tool" : ""}`}>
           {contentEl}
         </div>
       </div>
     );
   }
 
-  const preview = truncateMiddle(
-    activeContent.replace(/\s+/g, " ").trim(),
-    previewChars,
-  );
+  const preview = isTool
+    ? contextToolPreview(activeContent, previewChars)
+    : truncateMiddle(activeContent.replace(/\s+/g, " ").trim(), previewChars);
 
   return (
-    <div className={`ctx-block collapsible ${cls} ${expanded ? "" : "collapsed"}`}>
+    <div className={`ctx-block collapsible ${cls}${isTool ? " has-tool-result" : ""} ${expanded ? "" : "collapsed"}`}>
       <div
         className="ctx-block-head clickable"
         role="button"
@@ -526,7 +540,7 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
           }
         }}
       >
-        <span className={`ctx-role ${cls}`}>{message.role}</span>
+        <span className={`ctx-role ${cls}`}>{roleLabel}</span>
         <span className="ctx-tokens">{message.tokens} tok</span>
         <button type="button" className={`ctx-block-toggle${expanded ? " is-expanded" : ""}`}>
           <ChevronRight size={10} />
@@ -536,7 +550,7 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
       {expanded && (
         <>
           {reasoningToggle}
-          <div className="ctx-content">
+          <div className={`ctx-content${isTool ? " ctx-content-tool" : ""}`}>
             {contentEl}
           </div>
         </>

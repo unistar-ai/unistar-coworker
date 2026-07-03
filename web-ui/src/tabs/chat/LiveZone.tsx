@@ -3,28 +3,14 @@ import { useStore } from "../../store/wsStore";
 import Markdown from "../../components/Markdown";
 import ReasoningCard from "../../components/ReasoningCard";
 import { splitStreaming } from "./streamSplit";
-import { ArrowRight, BookOpen, Clock, Sparkles, Zap } from "lucide-react";
+import { toolMeta } from "./parser";
+import { BookOpen, Sparkles, Zap } from "lucide-react";
 
-interface LiveState {
-  chatBusy: boolean;
-  streaming: string | null;
-  reasoning: string | null;
-  toolRunning: string | null;
-  toolRunningDetail: string | null;
-  toolPending: string | null;
-  compressing: boolean;
-  activityFlow: { kind: string; text: string } | null;
-}
-
-/** Single store subscription for all live-zone fields. Both useLiveZoneActive
- * and LiveZone call this, so there's only one selector evaluation per render
- * instead of 15 separate useStore calls. */
-function useLiveState(): LiveState {
-  const streamingRaw = useStore((s) => s.chat_streaming);
-  const reasoningRaw = useStore((s) => s.chat_reasoning);
-  const streaming = useDeferredValue(streamingRaw);
-  const reasoning = useDeferredValue(reasoningRaw);
+/** Raw live fields — use for mount/visibility decisions (no deferred lag). */
+function useLiveVisibility() {
   const chatBusy = useStore((s) => s.chat_busy);
+  const streaming = useStore((s) => s.chat_streaming);
+  const reasoning = useStore((s) => s.chat_reasoning);
   const toolRunning = useStore((s) => s.chat_tool_running);
   const toolRunningDetail = useStore((s) => s.chat_tool_running_detail);
   const toolPending = useStore((s) => s.chat_tool_pending);
@@ -42,22 +28,23 @@ function useLiveState(): LiveState {
   };
 }
 
+/** Deferred streaming/reasoning for smoother in-turn rendering only. */
+function useLiveDisplayState() {
+  const raw = useLiveVisibility();
+  const streaming = useDeferredValue(raw.streaming);
+  const reasoning = useDeferredValue(raw.reasoning);
+  return { ...raw, streaming, reasoning };
+}
+
 export function useLiveZoneActive() {
-  const s = useLiveState();
-  return Boolean(
-    s.chatBusy ||
-      s.streaming ||
-      s.reasoning ||
-      s.toolRunning ||
-      s.toolPending ||
-      s.compressing ||
-      s.activityFlow,
-  );
+  // Live chrome only while a chat turn is in flight — avoids stale deferred
+  // streaming/reasoning keeping the zone mounted after chat_busy goes false.
+  return useStore((s) => s.chat_busy);
 }
 
 export default function LiveZone() {
+  const chatBusy = useStore((s) => s.chat_busy);
   const {
-    chatBusy,
     streaming,
     reasoning,
     toolRunning,
@@ -65,38 +52,46 @@ export default function LiveZone() {
     toolPending,
     compressing,
     activityFlow,
-  } = useLiveState();
+  } = useLiveDisplayState();
 
-  const hasAnything =
-    chatBusy ||
-    streaming ||
-    reasoning ||
-    toolRunning ||
-    toolPending ||
-    compressing ||
-    activityFlow;
-
-  if (!hasAnything) return null;
+  const mcpServers = useStore((s) => s.mcp_servers);
+  if (!chatBusy) return null;
+  const mcpPrefixes = mcpServers.map((s) => ({
+    id: s.id,
+    prefix: s.prefix || `${s.id}_`,
+  }));
+  const runningName = toolRunning || toolPending || "";
+  const runningMeta = runningName ? toolMeta(runningName, mcpPrefixes) : null;
 
   return (
     <div className="live-zone has-activity" aria-live="polite">
       <div className="activity-stack">
         {/* Running tool */}
         {(toolRunning || toolPending) && (
-          <div className={`tool-card status-running live-tool is-collapsed`}>
-            <div className="tool-card-header">
-              <span className="tool-card-icon">
-                {toolRunning ? <ArrowRight size={14} aria-hidden="true" /> : <Clock size={14} aria-hidden="true" />}
+          <div className="tool-card status-running live-tool is-collapsed">
+            <div className="tool-card-header tool-card-header-static">
+              <span className="tool-card-icon" aria-hidden="true">
+                {runningMeta?.icon ?? (toolRunning ? "→" : "⏳")}
               </span>
               <div className="tool-card-title-wrap">
-                <span className="tool-card-title">
-                  {toolRunning || toolPending}
-                </span>
+                <div className="tool-card-title-row">
+                  <span className="tool-card-title">
+                    {runningMeta?.label ?? runningName}
+                  </span>
+                  {runningMeta && runningMeta.label !== runningName && (
+                    <span className="tool-card-fn">{runningName}</span>
+                  )}
+                </div>
                 {toolRunningDetail && (
-                  <span className="tool-card-fn">{toolRunningDetail}</span>
+                  <span className="tool-card-arg-line">{toolRunningDetail}</span>
                 )}
               </div>
-              <span className="tool-spinner" />
+              <div className="tool-card-trail">
+                <span className="tool-status-pill status-running">
+                  {toolRunning ? "Running" : "Queued"}
+                </span>
+                <span className="tool-spinner" aria-hidden="true" />
+              </div>
             </div>
           </div>
         )}
@@ -134,8 +129,7 @@ export default function LiveZone() {
         {streaming && <StreamingReply text={streaming} />}
 
         {/* Thinking (no other activity) */}
-        {chatBusy &&
-          !streaming &&
+        {!streaming &&
           !reasoning &&
           !toolRunning &&
           !toolPending &&

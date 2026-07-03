@@ -10,6 +10,9 @@ use uuid::Uuid;
 
 use crate::agent::bash_tool;
 use crate::agent::budget::TokenBudget;
+use crate::agent::chat_completion_judge::{
+    completion_rejected_nudge, judge_turn_completion, ToolUseSummary,
+};
 use crate::agent::chat_discovery::ChatDiscoveryState;
 use crate::agent::chat_duplicate::{
     duplicate_tool_block_reason, fulfill_duplicate_readonly_tool, harness_retry_or_stop,
@@ -19,11 +22,10 @@ use crate::agent::chat_duplicate::{
 use crate::agent::chat_stream::persist_interim_assistant_message;
 
 use crate::agent::context::{
-    estimate_message_tokens, estimate_tools_tokens, format_system_for_context_panel,
-    format_tool_approval_pending_message, format_tool_context_message,
-    format_tools_for_context_panel, history_token_budget, message_budget_for_tools,
-    pack_session_history_with_llm, skill_body_for_context_panel, tool_names_from_definitions,
-    trim_llm_messages_with_llm, trim_system_content, truncate_chars,
+    estimate_message_tokens, estimate_tools_tokens, format_tool_approval_pending_message,
+    format_tool_context_message, format_tools_for_context_panel, history_token_budget,
+    message_budget_for_tools, pack_session_history_with_llm, skill_body_for_context_panel,
+    tool_names_from_definitions, trim_llm_messages_with_llm, trim_system_content, truncate_chars,
 };
 use crate::agent::file_tools;
 use crate::agent::hooks::{HookRunner, TurnContext};
@@ -42,9 +44,7 @@ use crate::engine::{
 };
 use crate::error::{CoworkerError, Result};
 use crate::github::{effective_chat_tool_mode, GithubHarness};
-use crate::llm::chat::{
-    reply_premature_for_task, reply_premature_nudge, ChatAgentStep, LlmToolCall, ResolvedToolCall,
-};
+use crate::llm::chat::{ChatAgentStep, LlmToolCall, ResolvedToolCall};
 use crate::llm::{ChatAgentAction, ChatStepOptions, LlmClient, LlmTurnMessage};
 use crate::mcp::McpPool;
 use crate::store::{ChatMessage, ChatRole, Store};
@@ -483,6 +483,7 @@ pub fn build_context_snapshot(
     native_tools: &[Value],
     loaded_skills: &[SkillSpec],
     runtime_panel: Option<(&str, u64)>,
+    panel_sources: crate::agent::context::ContextPanelSources<'_>,
     reasoning_originals: &HashMap<String, String>,
 ) -> ContextSnapshot {
     let message_tokens = crate::agent::context::estimate_messages_tokens(messages);
@@ -509,25 +510,28 @@ pub fn build_context_snapshot(
         })
         .collect();
     let skills_tokens = skill_blocks.iter().map(|s| s.tokens).sum();
+    let store_tools = panel_sources
+        .store_messages
+        .map(crate::agent::context::context_panel_store_tool_rows)
+        .unwrap_or_default();
+    let mut tool_idx = 0usize;
+    let runtime_body = runtime_panel.map(|(body, _)| body);
     let lines: Vec<ContextLine> = messages
         .iter()
         .map(|m| {
-            let raw = crate::agent::context::format_llm_message_for_context_panel(m);
-            let content = if m.role == "system" {
-                format_system_for_context_panel(&raw)
-            } else if m.role == "user"
-                && raw
-                    .trim_start()
-                    .starts_with(crate::engine::SESSION_CONTEXT_PREFIX)
-            {
-                if let Some((full, _)) = runtime_panel {
-                    crate::engine::format_session_context_message(full)
-                } else {
-                    raw
-                }
+            let store_tool = if crate::agent::context::llm_turn_is_tool_result(m) {
+                let row = store_tools.get(tool_idx).copied();
+                tool_idx += 1;
+                row
             } else {
-                raw
+                None
             };
+            let content = crate::agent::context::format_context_panel_line_content(
+                m,
+                store_tool,
+                panel_sources.skill_registry,
+                runtime_body,
+            );
             ContextLine {
                 display_role: context_display_role(m.role, &m.content),
                 content,
@@ -630,25 +634,30 @@ pub(crate) async fn emit_context_snapshot(
     discovery: &Arc<Mutex<ChatDiscoveryState>>,
     tool_mode: ChatToolMode,
     runtime_panel: Option<(&str, u64)>,
+    panel_store: Option<(&dyn crate::store::Store, uuid::Uuid)>,
     reasoning_originals: &HashMap<String, String>,
 ) {
-    let native_tools = native_tools_for_session(discovery, tool_mode).await;
-    let loaded_skills = {
-        let state = discovery.lock().await;
-        state.loaded_skill_specs()
+    let store_messages = match panel_store {
+        Some((store, session_id)) => store.list_chat_messages(&session_id, 300).await.ok(),
+        None => None,
     };
-    emit_progress(
-        progress,
-        ChatProgress::ContextSnapshot(build_context_snapshot(
-            messages,
-            turn,
-            token_budget,
-            &native_tools,
-            &loaded_skills,
-            runtime_panel,
-            reasoning_originals,
-        )),
+    let native_tools = native_tools_for_session(discovery, tool_mode).await;
+    let discovery_guard = discovery.lock().await;
+    let loaded_skills = discovery_guard.loaded_skill_specs();
+    let snap = build_context_snapshot(
+        messages,
+        turn,
+        token_budget,
+        &native_tools,
+        &loaded_skills,
+        runtime_panel,
+        crate::agent::context::ContextPanelSources {
+            store_messages: store_messages.as_deref(),
+            skill_registry: Some(&discovery_guard.skill_registry),
+        },
+        reasoning_originals,
     );
+    emit_progress(progress, ChatProgress::ContextSnapshot(snap));
 }
 
 fn append_assistant_to_llm_context(llm_messages: &mut Vec<LlmTurnMessage>, message: &str) {
@@ -967,7 +976,7 @@ pub async fn run_chat_turn(
     let max_turns = config.chat.max_turns;
     let max_tools = config.chat.max_tool_calls;
     let max_duration_secs = config.chat.max_duration_secs;
-    let mut tool_calls = Vec::new();
+    let mut tool_calls: Vec<ToolCallSummary> = Vec::new();
     let mut tools_used = 0u32;
     // Duplicate guard is scoped to this user-message turn only. Do not rehydrate from
     // session history — PR/CI snapshots go stale after pushes and users re-fetch.
@@ -990,6 +999,7 @@ pub async fn run_chat_turn(
         &discovery,
         tool_mode,
         Some((runtime_panel.0.as_str(), runtime_panel.1)),
+        Some((store.as_ref(), session.id)),
         &reasoning_originals,
     )
     .await;
@@ -1048,6 +1058,7 @@ pub async fn run_chat_turn(
             &discovery,
             tool_mode,
             Some((runtime_panel.0.as_str(), runtime_panel.1)),
+            Some((store.as_ref(), session.id)),
             &reasoning_originals,
         )
         .await;
@@ -1104,8 +1115,7 @@ pub async fn run_chat_turn(
                             timeout.as_secs()
                         );
                         let nudge = "Your LLM turn timed out (too much internal reasoning). \
-                             Call one tool via the native tool API, or reply with a short \
-                             natural-language answer. No extended thinking.";
+Call one tool via the native tool API, or reply with a short natural-language answer.";
                         if harness_retry_or_stop(
                             &mut harness_corrections,
                             &progress,
@@ -1204,6 +1214,7 @@ pub async fn run_chat_turn(
                 &discovery,
                 tool_mode,
                 Some((runtime_panel.0.as_str(), runtime_panel.1)),
+                Some((store.as_ref(), session.id)),
                 &reasoning_originals,
             )
             .await;
@@ -1214,12 +1225,7 @@ pub async fn run_chat_turn(
 
         match step.action {
             ChatAgentAction::Reply => {
-                let message = if step.message.trim().is_empty() {
-                    "Done.".into()
-                } else {
-                    step.message
-                };
-                if crate::agent::context::is_tool_result_transcript(&message) {
+                if crate::agent::context::is_tool_result_transcript(&step.message) {
                     let nudge = "Your reply must be a natural-language answer for the user, \
 not a tool-result transcript. Synthesize from tool results already in context.";
                     if harness_retry_or_stop(
@@ -1236,22 +1242,15 @@ not a tool-result transcript. Synthesize from tool results already in context.";
                     }
                     continue;
                 }
-                let tool_names = tool_call_names(&tool_calls);
-                if reply_premature_for_task(&message, user_task, &tool_names) {
-                    emit_progress(
-                        &progress,
-                        ChatProgress::TurnThinking {
-                            turn: llm_rounds,
-                            elapsed_secs: turn_started.elapsed().as_secs(),
-                        },
-                    );
-                    let nudge = reply_premature_nudge(&message, user_task);
+                if crate::agent::context::llm_context_awaits_tool_action(&llm_messages) {
+                    let nudge = "Harness or a failed tool is still open — call the next step via \
+native tool_calls. Do not end with assistant text alone.";
                     if harness_retry_or_stop(
                         &mut harness_corrections,
                         &progress,
                         store.as_ref(),
                         &session.id,
-                        &nudge,
+                        nudge,
                         &mut llm_messages,
                     )
                     .await?
@@ -1260,34 +1259,96 @@ not a tool-result transcript. Synthesize from tool results already in context.";
                     }
                     continue;
                 }
-                append_message(
-                    store.as_ref(),
-                    &session.id,
-                    ChatRole::Assistant,
-                    &message,
-                    None,
-                    None,
-                    None,
-                )
-                .await?;
-                append_assistant_to_llm_context(&mut llm_messages, &message);
-                emit_context_snapshot(
-                    &progress,
+                let message = if step.message.trim().is_empty() {
+                    "Done.".into()
+                } else {
+                    step.message.clone()
+                };
+                let tools_for_judge: Vec<ToolUseSummary> = tool_calls
+                    .iter()
+                    .map(|tc| ToolUseSummary {
+                        name: tc.tool_name.clone(),
+                        output_preview: tc.preview(200),
+                    })
+                    .collect();
+                let accept_reply = match judge_turn_completion(
+                    llm.as_ref(),
+                    user_task,
                     &llm_messages,
-                    llm_rounds,
-                    &token_budget,
-                    &discovery,
-                    tool_mode,
-                    Some((runtime_panel.0.as_str(), runtime_panel.1)),
-                    &reasoning_originals,
+                    &tools_for_judge,
+                    &message,
                 )
-                .await;
-                return Ok(ChatTurnResult {
-                    session_id: session.id,
-                    assistant_message: message,
-                    tool_calls,
-                    awaiting_approval: false,
-                });
+                .await
+                {
+                    Ok(verdict) if verdict.complete => true,
+                    Ok(verdict) => {
+                        let nudge = completion_rejected_nudge(&verdict.reason);
+                        if harness_retry_or_stop(
+                            &mut harness_corrections,
+                            &progress,
+                            store.as_ref(),
+                            &session.id,
+                            &nudge,
+                            &mut llm_messages,
+                        )
+                        .await?
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!("completion judge failed ({e}) — nudging agent to continue");
+                        let nudge = format!(
+                            "Completion check failed ({e}). Continue with tools or reply with a \
+complete answer when the task is truly done."
+                        );
+                        if harness_retry_or_stop(
+                            &mut harness_corrections,
+                            &progress,
+                            store.as_ref(),
+                            &session.id,
+                            &nudge,
+                            &mut llm_messages,
+                        )
+                        .await?
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                if accept_reply {
+                    append_message(
+                        store.as_ref(),
+                        &session.id,
+                        ChatRole::Assistant,
+                        &message,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    append_assistant_to_llm_context(&mut llm_messages, &message);
+                    emit_context_snapshot(
+                        &progress,
+                        &llm_messages,
+                        llm_rounds,
+                        &token_budget,
+                        &discovery,
+                        tool_mode,
+                        Some((runtime_panel.0.as_str(), runtime_panel.1)),
+                        Some((store.as_ref(), session.id)),
+                        &reasoning_originals,
+                    )
+                    .await;
+                    return Ok(ChatTurnResult {
+                        session_id: session.id,
+                        assistant_message: message,
+                        tool_calls,
+                        awaiting_approval: false,
+                    });
+                }
             }
             ChatAgentAction::Tool => {
                 if chat_limit_reached(max_tools, tools_used) {
@@ -1559,6 +1620,7 @@ from tool results already in context.";
                         &discovery,
                         tool_mode,
                         Some((runtime_panel.0.as_str(), runtime_panel.1)),
+                        Some((store.as_ref(), session.id)),
                         &reasoning_originals,
                     )
                     .await;
@@ -1639,6 +1701,7 @@ from tool results already in context.";
         &discovery,
         tool_mode,
         Some((runtime_panel.0.as_str(), runtime_panel.1)),
+        Some((store.as_ref(), session.id)),
         &reasoning_originals,
     )
     .await;
@@ -2109,7 +2172,9 @@ fn synthesize_turn_exhausted_reply(
             "{header}. Try a narrower question or raise chat.max_duration_secs / chat.max_turns in config."
         );
     }
-    let mut parts = vec![header];
+    let mut parts = vec![format!(
+        "{header}. If you have partial results, summarize them for the user."
+    )];
     for tc in tool_calls {
         parts.push(String::new());
         parts.push(format!("**{}**", tc.tool_name));
@@ -2158,10 +2223,6 @@ fn tool_requires_pr_number(tool_name: &str) -> bool {
 /// Live GitHub/CI reads can go stale; always execute fresh instead of replaying cache.
 fn tool_allows_repeat_fetch(tool_name: &str) -> bool {
     !is_mutating_tool(tool_name) && tool_requires_pr_number(tool_name)
-}
-
-fn tool_call_names(tool_calls: &[ToolCallSummary]) -> Vec<&str> {
-    tool_calls.iter().map(|tc| tc.tool_name.as_str()).collect()
 }
 
 pub(crate) fn tool_call_fingerprint(tool_name: &str, tool_args: &Value) -> String {
@@ -2814,7 +2875,16 @@ mod tests {
                 }],
             ),
         ];
-        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], None, &HashMap::new());
+        let snap = build_context_snapshot(
+            &msgs,
+            1,
+            &budget,
+            &[],
+            &[],
+            None,
+            crate::agent::context::ContextPanelSources::default(),
+            &HashMap::new(),
+        );
         let assistant = snap.messages.last().expect("assistant line");
         assert_eq!(assistant.display_role, "assistant");
         assert!(assistant.content.contains("tool_call: ci_get_failed_logs"));
@@ -2829,7 +2899,16 @@ mod tests {
             LlmTurnMessage::new("user", "What failed in CI?"),
             LlmTurnMessage::new("assistant", "Run 123 failed due to a DB auth error."),
         ];
-        let snap = build_context_snapshot(&msgs, 3, &budget, &[], &[], None, &HashMap::new());
+        let snap = build_context_snapshot(
+            &msgs,
+            3,
+            &budget,
+            &[],
+            &[],
+            None,
+            crate::agent::context::ContextPanelSources::default(),
+            &HashMap::new(),
+        );
         let last = snap.messages.last().expect("assistant reply");
         assert_eq!(last.display_role, "assistant");
         assert!(last.content.contains("DB auth error"));
@@ -2843,7 +2922,16 @@ mod tests {
             LlmTurnMessage::new("system", "You are helpful."),
             LlmTurnMessage::tool_result("pr_list_open", "#1 title"),
         ];
-        let snap = build_context_snapshot(&msgs, 2, &budget, &[], &[], None, &HashMap::new());
+        let snap = build_context_snapshot(
+            &msgs,
+            2,
+            &budget,
+            &[],
+            &[],
+            None,
+            crate::agent::context::ContextPanelSources::default(),
+            &HashMap::new(),
+        );
         assert_eq!(snap.message_count, 2);
         assert_eq!(snap.messages.len(), 2);
         assert_eq!(snap.turn, 2);
@@ -2874,6 +2962,7 @@ mod tests {
             &tools,
             &[],
             None,
+            crate::agent::context::ContextPanelSources::default(),
             &HashMap::new(),
         );
         assert!(snap.tools_tokens > 0);
@@ -2903,6 +2992,7 @@ mod tests {
             &[],
             &skills,
             None,
+            crate::agent::context::ContextPanelSources::default(),
             &HashMap::new(),
         );
         assert_eq!(snap.skill_blocks.len(), 1);
@@ -2923,7 +3013,16 @@ mod tests {
         let budget = TokenBudget::from_config(64_000);
         let body = "x".repeat(20_000);
         let msgs = vec![LlmTurnMessage::new("system", body.clone())];
-        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], None, &HashMap::new());
+        let snap = build_context_snapshot(
+            &msgs,
+            1,
+            &budget,
+            &[],
+            &[],
+            None,
+            crate::agent::context::ContextPanelSources::default(),
+            &HashMap::new(),
+        );
         assert_eq!(snap.messages[0].content.len(), body.len());
         assert_eq!(snap.messages[0].content, body);
     }
@@ -2937,7 +3036,16 @@ mod tests {
             LlmTurnMessage::new("user", "[earlier context summary]\n- user asked about CI"),
             LlmTurnMessage::new("user", "latest question"),
         ];
-        let snap = build_context_snapshot(&msgs, 2, &budget, &[], &[], None, &HashMap::new());
+        let snap = build_context_snapshot(
+            &msgs,
+            2,
+            &budget,
+            &[],
+            &[],
+            None,
+            crate::agent::context::ContextPanelSources::default(),
+            &HashMap::new(),
+        );
         assert_eq!(snap.context_trimmed_turns, 0);
         assert_eq!(
             snap.context_summary_note.as_deref(),
@@ -2963,6 +3071,7 @@ mod tests {
             &[],
             &[],
             Some((full, 2)),
+            crate::agent::context::ContextPanelSources::default(),
             &HashMap::new(),
         );
         assert_eq!(snap.runtime_context_revision, Some(2));
@@ -2978,7 +3087,16 @@ mod tests {
         let msgs = vec![LlmTurnMessage::new("user", content)];
         let mut originals = HashMap::new();
         originals.insert(content.to_string(), "full raw thinking trace".into());
-        let snap = build_context_snapshot(&msgs, 1, &budget, &[], &[], None, &originals);
+        let snap = build_context_snapshot(
+            &msgs,
+            1,
+            &budget,
+            &[],
+            &[],
+            None,
+            crate::agent::context::ContextPanelSources::default(),
+            &originals,
+        );
         assert_eq!(snap.messages[0].display_role, "reasoning");
         assert_eq!(snap.messages[0].content, "- bullet summary");
         assert_eq!(

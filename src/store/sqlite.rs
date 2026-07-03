@@ -400,6 +400,22 @@ impl Store for SqliteStore {
         })
     }
 
+    async fn delete_chat_session(&self, id: &Uuid) -> Result<()> {
+        let sid = id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM chat_messages WHERE session_id = ?1",
+                params![&sid],
+            )?;
+            let sessions =
+                conn.execute("DELETE FROM chat_sessions WHERE id = ?1", params![&sid])?;
+            if sessions == 0 {
+                return Err(CoworkerError::Store(format!("chat session {id} not found")));
+            }
+            Ok(())
+        })
+    }
+
     async fn append_chat_message(&self, msg: &ChatMessage) -> Result<()> {
         if msg.role == ChatRole::Harness {
             let sid = msg.session_id.to_string();

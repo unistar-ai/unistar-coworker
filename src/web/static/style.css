@@ -299,7 +299,6 @@ body {
 .live-zone.has-activity {
   padding: 0.35rem 0;
   border-radius: var(--radius);
-  background: var(--accent-glow);
 }
 .activity-model-output {
   display: flex;
@@ -330,7 +329,6 @@ body {
   height: 7px;
   border-radius: 50%;
   background: var(--accent);
-  animation: live-pulse 1.2s ease-in-out infinite;
 }
 .messages-live.phase-tool { color: var(--tool); border-color: color-mix(in srgb, var(--tool) 35%, transparent); }
 .messages-live.phase-tool .live-dot { background: var(--tool); }
@@ -342,10 +340,6 @@ body {
 .messages-live.phase-summarizing .live-dot { background: var(--warn); }
 .messages-live.phase-activity { color: var(--accent); }
 .messages-live.phase-model { color: var(--muted); }
-@keyframes live-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.45; transform: scale(0.85); }
-}
 
 .main {
   flex: 1;
@@ -1381,13 +1375,6 @@ body {
 .live-tool {
   box-shadow: 0 0 0 1px rgba(137, 180, 250, 0.12);
 }
-.live-tool.tool-card.status-running {
-  animation: tool-pulse 2s ease-in-out infinite;
-}
-@keyframes tool-pulse {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(137, 180, 250, 0.12); }
-  50% { box-shadow: 0 0 0 1px rgba(137, 180, 250, 0.35), 0 0 12px rgba(137, 180, 250, 0.08); }
-}
 .activity-reasoning {
   background: var(--reasoning-card-bg);
   border: 1px solid var(--reasoning-card-border);
@@ -1395,11 +1382,7 @@ body {
   overflow: hidden;
 }
 .activity-reasoning.is-live {
-  animation: reasoning-pulse 2.5s ease-in-out infinite;
-}
-@keyframes reasoning-pulse {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(203, 166, 247, 0.15); }
-  50% { box-shadow: 0 0 0 1px rgba(203, 166, 247, 0.4), 0 0 14px rgba(203, 166, 247, 0.1); }
+  box-shadow: 0 0 0 1px rgba(203, 166, 247, 0.15);
 }
 .activity-reasoning-head,
 .activity-streaming-head {

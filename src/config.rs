@@ -58,7 +58,7 @@ pub struct LlmConfig {
     /// Max concurrent in-flight requests to the LLM (Ollama typically handles ~2).
     #[serde(default = "default_llm_concurrency")]
     pub concurrency: u32,
-    /// Constrain LLM replies to a JSON schema (Ollama structured outputs / OpenAI json_schema).
+    /// Legacy config field (ignored). JSON sidecar calls always use OpenAI `json_object` mode.
     #[serde(default = "default_structured_output")]
     pub structured_output: bool,
     /// Max tokens for classify output (Ollama `num_predict` / OpenAI `max_tokens`).

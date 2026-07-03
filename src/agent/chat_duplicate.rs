@@ -52,7 +52,7 @@ pub(crate) fn forced_reply_after_duplicate_tools_nudge(
     if !tool_calls.is_empty() {
         return format!(
             "Same tool call repeated several times. User asked: \"{user_message}\"\n\
-             Reply with an answer from tool results already in context."
+             Reply with a complete answer from tool results already in context."
         );
     }
     format!(
@@ -65,7 +65,7 @@ pub(crate) fn duplicate_tool_nudge(tool_name: &str, block: DuplicateToolBlock) -
     match block {
         DuplicateToolBlock::AlreadySucceeded => format!(
             "Identical `{tool_name}` with the same args was already fetched in this turn. \
-             Use those results, call a different tool, or reply."
+             Use those results, call a different tool, or reply with a complete answer."
         ),
         DuplicateToolBlock::FailedTooMany => format!(
             "`{tool_name}` with the same args failed twice in this turn. \

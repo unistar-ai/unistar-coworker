@@ -1179,7 +1179,7 @@ fn json_type_for_arg(key: &str) -> &'static str {
     match key {
         "repo" | "author" | "branch" | "body" | "target_branch" | "since" | "name" | "query"
         | "category" | "uri" | "command" | "cwd" | "path" | "pattern" | "old_string"
-        | "new_string" | "content" | "url" | "mode" | "code" => "string",
+        | "new_string" | "content" | "url" | "mode" | "code" | "answer" => "string",
         "replace_all" | "create_only" | "browser" => "boolean",
         "args" => "object",
         _ => "integer",

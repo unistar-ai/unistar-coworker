@@ -20,7 +20,7 @@ export interface ReasoningCardProps {
   /** Raw (uncompressed) thinking trace, when LLM compression was applied.
    *  When present, a Summary/Original toggle is shown. */
   original?: string;
-  /** Live zone — expanded by default, pulse animation, plain-text stream. */
+  /** Live zone — expanded by default, plain-text stream. */
   live?: boolean;
   /** History — collapsed when false. */
   expanded?: boolean;

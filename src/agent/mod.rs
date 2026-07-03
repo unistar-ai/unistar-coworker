@@ -1,5 +1,6 @@
 pub mod bash_tool;
 pub mod budget;
+pub mod chat_completion_judge;
 pub mod chat_discovery;
 pub mod chat_duplicate;
 pub mod chat_loop;

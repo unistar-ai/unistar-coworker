@@ -5,7 +5,8 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::agent::bash_tool::{
-    bash_review_response_schema, parse_bash_review_response, BashCommandReview,
+    bash_review_response_schema, parse_bash_review_response_for_tool, BashCommandReview,
+    REVIEW_JSON_RETRY_SUFFIX,
 };
 use crate::agent::context::truncate_chars;
 use crate::agent::file_tools::{self, EDIT_FILE, WRITE_FILE};
@@ -29,7 +30,7 @@ pub async fn execute_mutating_file_tool_with_review(
         return Err(CoworkerError::Workflow(env.format_tool_error_body()));
     }
 
-    let review = review_file_edit(llm, &payload).await?;
+    let review = review_file_edit(llm, name, &payload).await?;
     if !review.is_approved() {
         return Ok(ReviewGateOutcome::LlmRejected(review));
     }
@@ -112,21 +113,29 @@ fn build_review_payload(name: &str, args: &Value) -> Result<String> {
     Ok(body)
 }
 
-async fn review_file_edit(llm: &LlmClient, payload: &str) -> Result<BashCommandReview> {
+async fn review_file_edit(
+    llm: &LlmClient,
+    tool_name: &str,
+    payload: &str,
+) -> Result<BashCommandReview> {
+    let schema = bash_review_response_schema();
     let raw = llm
         .review_file_edit_json(
             FILE_EDIT_REVIEW_PROMPT,
             payload,
-            &bash_review_response_schema(),
+            &schema,
             FILE_EDIT_REVIEW_MAX_TOKENS,
         )
         .await?;
-    parse_bash_review_response(&raw).map_err(|e| match e {
-        CoworkerError::Workflow(msg) => CoworkerError::Workflow(
-            file_edit_validation_envelope("file_edit", &msg, &Value::Null).format_tool_error_body(),
-        ),
-        other => other,
-    })
+    if let Ok(review) = parse_bash_review_response_for_tool(&raw, tool_name) {
+        return Ok(review);
+    }
+    tracing::warn!("{tool_name} review JSON parse failed, retrying with JSON-only nudge");
+    let retry_prompt = format!("{FILE_EDIT_REVIEW_PROMPT}{REVIEW_JSON_RETRY_SUFFIX}");
+    let raw = llm
+        .review_file_edit_json(&retry_prompt, payload, &schema, FILE_EDIT_REVIEW_MAX_TOKENS)
+        .await?;
+    parse_bash_review_response_for_tool(&raw, tool_name)
 }
 
 #[cfg(test)]

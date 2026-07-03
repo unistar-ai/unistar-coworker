@@ -223,6 +223,7 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
     let chat_context = Some(build_chat_context_json(s));
     let chat_pending_approval = build_chat_pending_approval_json(s);
     let approval_dialog = build_approval_dialog_json(s);
+    let live = web_live_transport_fields(s);
 
     WebSnapshot {
         tab: tab_name(s.tab).to_string(),
@@ -246,14 +247,14 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
             .collect(),
         chat_history_revision: s.chat_history_revision,
         chat_context_revision: s.chat_context_revision,
-        chat_streaming: s.chat_streaming.clone(),
-        chat_reasoning: s.chat_reasoning.clone(),
-        chat_tool_running: s.chat_tool_running.clone(),
-        chat_tool_running_detail: s.chat_tool_running_detail.clone(),
-        chat_tool_pending: s.chat_tool_pending.clone(),
-        chat_turn_phase: s.chat_turn_phase().map(str::to_string),
-        chat_reasoning_compressing: s.chat_reasoning_compressing,
-        chat_activity_flow: build_chat_activity_flow_json(s),
+        chat_streaming: live.chat_streaming,
+        chat_reasoning: live.chat_reasoning,
+        chat_tool_running: live.chat_tool_running,
+        chat_tool_running_detail: live.chat_tool_running_detail,
+        chat_tool_pending: live.chat_tool_pending,
+        chat_turn_phase: live.chat_turn_phase,
+        chat_reasoning_compressing: live.chat_reasoning_compressing,
+        chat_activity_flow: live.chat_activity_flow,
         chat_context_visible: s.chat_context_visible,
         chat_context,
         chat_pending_approval,
@@ -397,24 +398,64 @@ fn build_approval_dialog_json(s: &AppState) -> Option<Value> {
     })
 }
 
+struct WebLiveTransportFields {
+    chat_streaming: Option<String>,
+    chat_reasoning: Option<String>,
+    chat_tool_running: Option<String>,
+    chat_tool_running_detail: Option<String>,
+    chat_tool_pending: Option<String>,
+    chat_turn_phase: Option<String>,
+    chat_reasoning_compressing: bool,
+    chat_activity_flow: Option<Value>,
+}
+
+/// Live UI fields are only meaningful while `chat_busy`; strip them on the wire when idle
+/// so stale streaming/reasoning cannot keep the live zone visible after a turn ends.
+fn web_live_transport_fields(s: &AppState) -> WebLiveTransportFields {
+    if s.chat_busy {
+        WebLiveTransportFields {
+            chat_streaming: s.chat_streaming.clone(),
+            chat_reasoning: s.chat_reasoning.clone(),
+            chat_tool_running: s.chat_tool_running.clone(),
+            chat_tool_running_detail: s.chat_tool_running_detail.clone(),
+            chat_tool_pending: s.chat_tool_pending.clone(),
+            chat_turn_phase: s.chat_turn_phase().map(str::to_string),
+            chat_reasoning_compressing: s.chat_reasoning_compressing,
+            chat_activity_flow: build_chat_activity_flow_json(s),
+        }
+    } else {
+        WebLiveTransportFields {
+            chat_streaming: None,
+            chat_reasoning: None,
+            chat_tool_running: None,
+            chat_tool_running_detail: None,
+            chat_tool_pending: None,
+            chat_turn_phase: None,
+            chat_reasoning_compressing: false,
+            chat_activity_flow: None,
+        }
+    }
+}
+
 pub async fn build_live_patch(state: &crate::app::SharedState) -> WebLivePatch {
     let s = state.read().await;
     build_live_patch_from(&s)
 }
 
 pub fn build_live_patch_from(s: &AppState) -> WebLivePatch {
+    let live = web_live_transport_fields(s);
     WebLivePatch {
         patch_type: "live",
         status: s.status.clone(),
         chat_busy: s.chat_busy,
-        chat_streaming: s.chat_streaming.clone(),
-        chat_reasoning: s.chat_reasoning.clone(),
-        chat_tool_running: s.chat_tool_running.clone(),
-        chat_tool_running_detail: s.chat_tool_running_detail.clone(),
-        chat_tool_pending: s.chat_tool_pending.clone(),
-        chat_turn_phase: s.chat_turn_phase().map(str::to_string),
-        chat_reasoning_compressing: s.chat_reasoning_compressing,
-        chat_activity_flow: build_chat_activity_flow_json(s),
+        chat_streaming: live.chat_streaming,
+        chat_reasoning: live.chat_reasoning,
+        chat_tool_running: live.chat_tool_running,
+        chat_tool_running_detail: live.chat_tool_running_detail,
+        chat_tool_pending: live.chat_tool_pending,
+        chat_turn_phase: live.chat_turn_phase,
+        chat_reasoning_compressing: live.chat_reasoning_compressing,
+        chat_activity_flow: live.chat_activity_flow,
     }
 }
 
@@ -424,6 +465,7 @@ pub async fn build_chat_patch(state: &crate::app::SharedState) -> WebChatPatch {
 }
 
 pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
+    let live = web_live_transport_fields(s);
     WebChatPatch {
         patch_type: "chat",
         status: s.status.clone(),
@@ -452,14 +494,14 @@ pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
             .collect(),
         chat_history_revision: s.chat_history_revision,
         chat_context_revision: s.chat_context_revision,
-        chat_streaming: s.chat_streaming.clone(),
-        chat_reasoning: s.chat_reasoning.clone(),
-        chat_tool_running: s.chat_tool_running.clone(),
-        chat_tool_running_detail: s.chat_tool_running_detail.clone(),
-        chat_tool_pending: s.chat_tool_pending.clone(),
-        chat_turn_phase: s.chat_turn_phase().map(str::to_string),
-        chat_reasoning_compressing: s.chat_reasoning_compressing,
-        chat_activity_flow: build_chat_activity_flow_json(s),
+        chat_streaming: live.chat_streaming,
+        chat_reasoning: live.chat_reasoning,
+        chat_tool_running: live.chat_tool_running,
+        chat_tool_running_detail: live.chat_tool_running_detail,
+        chat_tool_pending: live.chat_tool_pending,
+        chat_turn_phase: live.chat_turn_phase,
+        chat_reasoning_compressing: live.chat_reasoning_compressing,
+        chat_activity_flow: live.chat_activity_flow,
         chat_context_visible: s.chat_context_visible,
         chat_context: Some(build_chat_context_json(s)),
         chat_pending_approval: build_chat_pending_approval_json(s),
@@ -670,11 +712,18 @@ repos: [acme/widget]
 
     #[test]
     fn live_patch_phase_is_none_when_not_busy() {
-        let app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        let mut app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        // Stale in-memory live fields must not leak on the wire when idle.
+        app.chat_streaming = Some("leftover".into());
+        app.chat_reasoning = Some("leftover".into());
+        app.chat_tool_running = Some("bash_run".into());
         let patch = build_live_patch_from(&app);
         let v = serde_json::to_value(&patch).expect("serialize");
         assert_eq!(v["chat_busy"], false);
         assert!(v["chat_turn_phase"].is_null());
+        assert!(v["chat_streaming"].is_null());
+        assert!(v["chat_reasoning"].is_null());
+        assert!(v["chat_tool_running"].is_null());
     }
 
     /// Sanity check: full snapshot exposes the full set of UI-relevant keys.

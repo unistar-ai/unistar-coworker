@@ -13,7 +13,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{header::AUTHORIZATION, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -104,6 +104,7 @@ pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>)
         .route("/api/chat/sessions", get(api_list_chat_sessions))
         .route("/api/chat/sessions/new", post(api_new_chat_session))
         .route("/api/chat/sessions/{id}", post(api_load_chat_session))
+        .route("/api/chat/sessions/{id}", delete(api_delete_chat_session))
         .route("/api/chat/context", post(api_toggle_context))
         .route("/api/chat/export", get(api_chat_export))
         .route("/api/approvals/{id}", post(api_approval))
@@ -542,6 +543,23 @@ async fn api_load_chat_session(
         s.status = format!("loaded session {id}");
     }
     publish_snapshot(&rt.state, &rt.snap_tx).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn api_delete_chat_session(
+    State(rt): State<Arc<WebRuntime>>,
+    Path(id): Path<Uuid>,
+) -> StatusCode {
+    if rt.state.read().await.chat_busy {
+        return StatusCode::CONFLICT;
+    }
+    let was_current = rt.state.read().await.chat_session_id == Some(id);
+    if rt.store.delete_chat_session(&id).await.is_err() {
+        return StatusCode::NOT_FOUND;
+    }
+    if was_current {
+        reset_web_chat_session(&rt).await;
+    }
     StatusCode::NO_CONTENT
 }
 

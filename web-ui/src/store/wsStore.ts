@@ -7,6 +7,36 @@ import type {
 } from "./protocol";
 import { isLivePatch, isChatPatch, isSnapshot } from "./protocol";
 
+type LiveTransportFields = Pick<
+  WebLivePatch,
+  | "chat_streaming"
+  | "chat_reasoning"
+  | "chat_tool_running"
+  | "chat_tool_running_detail"
+  | "chat_tool_pending"
+  | "chat_turn_phase"
+  | "chat_reasoning_compressing"
+  | "chat_activity_flow"
+>;
+
+/** Live transport fields are only meaningful while a chat turn is in flight. */
+function liveTransportFields(
+  chatBusy: boolean,
+  p: LiveTransportFields,
+): LiveTransportFields {
+  if (chatBusy) return p;
+  return {
+    chat_streaming: null,
+    chat_reasoning: null,
+    chat_tool_running: null,
+    chat_tool_running_detail: null,
+    chat_tool_pending: null,
+    chat_turn_phase: null,
+    chat_reasoning_compressing: false,
+    chat_activity_flow: null,
+  };
+}
+
 // Default snapshot used before the first WS message arrives. Mirrors the
 // shape of a fresh AppState on the Rust side.
 const DEFAULT_SNAPSHOT: WebSnapshot = {
@@ -113,14 +143,7 @@ export const useStore = create<Store>((set) => ({
     set(() => ({
       status: p.status,
       chat_busy: p.chat_busy,
-      chat_streaming: p.chat_streaming,
-      chat_reasoning: p.chat_reasoning,
-      chat_tool_running: p.chat_tool_running,
-      chat_tool_running_detail: p.chat_tool_running_detail,
-      chat_tool_pending: p.chat_tool_pending,
-      chat_turn_phase: p.chat_turn_phase,
-      chat_reasoning_compressing: p.chat_reasoning_compressing,
-      chat_activity_flow: p.chat_activity_flow,
+      ...liveTransportFields(p.chat_busy, p),
     })),
 
   applyChatPatch: (p) =>
@@ -133,14 +156,7 @@ export const useStore = create<Store>((set) => ({
       chat_reasoning_originals: p.chat_reasoning_originals,
       chat_history_revision: p.chat_history_revision,
       chat_context_revision: p.chat_context_revision,
-      chat_streaming: p.chat_streaming,
-      chat_reasoning: p.chat_reasoning,
-      chat_tool_running: p.chat_tool_running,
-      chat_tool_running_detail: p.chat_tool_running_detail,
-      chat_tool_pending: p.chat_tool_pending,
-      chat_turn_phase: p.chat_turn_phase,
-      chat_reasoning_compressing: p.chat_reasoning_compressing,
-      chat_activity_flow: p.chat_activity_flow,
+      ...liveTransportFields(p.chat_busy, p),
       chat_context_visible: p.chat_context_visible,
       chat_context: p.chat_context,
       chat_pending_approval: p.chat_pending_approval,

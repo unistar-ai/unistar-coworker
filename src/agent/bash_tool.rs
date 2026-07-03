@@ -11,7 +11,9 @@ use tokio::process::Command;
 use tokio::time;
 
 use crate::agent::context::truncate_chars;
-use crate::agent::harness_errors::{bash_preflight_envelope, bash_validation_envelope};
+use crate::agent::harness_errors::{
+    bash_preflight_envelope, bash_validation_envelope, review_gate_parse_envelope,
+};
 use crate::agent::review_gate::ReviewGateOutcome;
 use crate::config::BashToolConfig;
 use crate::error::{CoworkerError, Result};
@@ -21,6 +23,7 @@ pub const BASH_RUN_TOOL: &str = "bash_run";
 
 const BASH_REVIEW_PROMPT: &str = include_str!("../../prompts/bash-review.md");
 const BASH_REVIEW_MAX_TOKENS: u32 = 1024;
+pub(crate) const REVIEW_JSON_RETRY_SUFFIX: &str = "\n\nCRITICAL: Your previous reply was not parseable. Output ONLY one JSON object matching the schema. No markdown fences, no commentary before or after.";
 const MAX_COMMAND_LINES: usize = 200;
 const MAX_COMMAND_CHARS: usize = 32_768;
 
@@ -202,67 +205,164 @@ async fn run_bash_command(
 }
 
 async fn review_command(llm: &LlmClient, command: &str) -> Result<BashCommandReview> {
+    let schema = bash_review_response_schema();
     let raw = llm
-        .review_bash_command_json(
-            BASH_REVIEW_PROMPT,
-            command,
-            &bash_review_response_schema(),
-            BASH_REVIEW_MAX_TOKENS,
-        )
+        .review_bash_command_json(BASH_REVIEW_PROMPT, command, &schema, BASH_REVIEW_MAX_TOKENS)
         .await?;
-    parse_bash_review_response(&raw)
-}
-
-pub fn parse_bash_review_response(content: &str) -> Result<BashCommandReview> {
-    let trimmed = content.trim();
-    if let Ok(review) = serde_json::from_str::<BashCommandReview>(trimmed) {
+    if let Ok(review) = parse_bash_review_response_for_tool(&raw, BASH_RUN_TOOL) {
         return Ok(review);
     }
-    let unfenced = strip_json_fence(trimmed);
-    if unfenced != trimmed {
-        if let Ok(review) = serde_json::from_str::<BashCommandReview>(&unfenced) {
+    tracing::warn!("bash_run review JSON parse failed, retrying with JSON-only nudge");
+    let retry_prompt = format!("{BASH_REVIEW_PROMPT}{REVIEW_JSON_RETRY_SUFFIX}");
+    let raw = llm
+        .review_bash_command_json(&retry_prompt, command, &schema, BASH_REVIEW_MAX_TOKENS)
+        .await?;
+    parse_bash_review_response_for_tool(&raw, BASH_RUN_TOOL)
+}
+
+pub fn parse_bash_review_response_for_tool(
+    content: &str,
+    tool_name: &str,
+) -> Result<BashCommandReview> {
+    for candidate in review_json_candidates(content) {
+        if let Ok(review) = serde_json::from_str::<BashCommandReview>(&candidate) {
             return Ok(review);
         }
     }
-    if let Some(start) = trimmed.find('{') {
-        if let Some(end) = trimmed.rfind('}') {
-            if end > start {
-                let slice = &trimmed[start..=end];
-                if let Ok(review) = serde_json::from_str::<BashCommandReview>(slice) {
-                    return Ok(review);
-                }
-            }
+    let trimmed = content.trim();
+    Err(CoworkerError::Workflow(
+        review_gate_parse_envelope(tool_name, &truncate_chars(trimmed, 400))
+            .format_tool_error_body(),
+    ))
+}
+
+/// Collect likely review JSON blobs from noisy LLM output (fences, reasoning, echoed code).
+fn review_json_candidates(content: &str) -> Vec<String> {
+    let trimmed = content.trim();
+    let mut out = Vec::new();
+    let mut push = |s: &str| {
+        let s = s.trim();
+        if !s.is_empty() && !out.iter().any(|existing| existing == s) {
+            out.push(s.to_string());
+        }
+    };
+
+    for block in extract_fenced_json_blocks(trimmed) {
+        push(&block);
+    }
+
+    let mut verdict_first = Vec::new();
+    let mut other = Vec::new();
+    for (byte_idx, _) in trimmed.char_indices().filter(|(_, c)| *c == '{') {
+        let Some(obj) = extract_balanced_json_object(&trimmed[byte_idx..]) else {
+            continue;
+        };
+        if json_object_looks_like_review(&obj) {
+            verdict_first.push(obj);
+        } else {
+            other.push(obj);
         }
     }
-    Err(CoworkerError::Workflow(
-        bash_validation_envelope(
-            &format!(
-                "bash_run LLM review returned invalid JSON: {}",
-                truncate_chars(trimmed, 400)
-            ),
-            None,
-        )
-        .format_tool_error_body(),
-    ))
+    for obj in verdict_first {
+        push(&obj);
+    }
+
+    push(trimmed);
+    push(&strip_json_fence(trimmed));
+
+    for obj in other {
+        push(&obj);
+    }
+    out
+}
+
+fn json_object_looks_like_review(obj: &str) -> bool {
+    obj.to_ascii_lowercase().contains("\"verdict\"")
+}
+
+/// All ` ```json ` / ` ``` ` fenced blocks in the text (not only when the reply starts with a fence).
+fn extract_fenced_json_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let lower = text.to_ascii_lowercase();
+    let mut search_from = 0usize;
+    while search_from < text.len() {
+        let hay = &lower[search_from..];
+        let rel = hay
+            .find("```json")
+            .map(|i| (i, 7usize))
+            .or_else(|| hay.find("```").map(|i| (i, 3usize)));
+        let Some((rel, marker_len)) = rel else {
+            break;
+        };
+        let content_start = search_from + rel + marker_len;
+        let tail = text
+            .get(content_start..)
+            .unwrap_or("")
+            .trim_start_matches('\n');
+        let skip = text[content_start..].len().saturating_sub(tail.len());
+        let body_start = content_start + skip;
+        let Some(close_rel) = tail.find("```") else {
+            break;
+        };
+        let body = tail[..close_rel].trim();
+        if !body.is_empty() {
+            blocks.push(body.to_string());
+        }
+        search_from = body_start + close_rel + 3;
+    }
+    blocks
+}
+
+/// First top-level `{…}` object using brace matching (respects JSON strings).
+fn extract_balanced_json_object(s: &str) -> Option<String> {
+    let start = s.find('{')?;
+    let bytes = s.as_bytes();
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (offset, &byte) in bytes[start..].iter().enumerate() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if byte == b'\\' {
+                escape = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(s[start..start + offset + 1].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn strip_json_fence(text: &str) -> String {
     let trimmed = text.trim();
-    if let Some(rest) = trimmed.strip_prefix("```json") {
-        return rest
-            .trim_start_matches('\n')
-            .trim_end_matches("```")
-            .trim()
-            .to_string();
+    let rest = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```JSON"))
+        .or_else(|| trimmed.strip_prefix("```"));
+    let Some(rest) = rest else {
+        return trimmed.to_string();
+    };
+    let rest = rest.trim_start_matches('\n');
+    if let Some(end) = rest.find("\n```") {
+        return rest[..end].trim().to_string();
     }
-    if let Some(rest) = trimmed.strip_prefix("```") {
-        return rest
-            .trim_start_matches('\n')
-            .trim_end_matches("```")
-            .trim()
-            .to_string();
+    if let Some(end) = rest.rfind("```") {
+        return rest[..end].trim().to_string();
     }
-    trimmed.to_string()
+    rest.trim().to_string()
 }
 
 fn validate_command(command: &str) -> Result<()> {
@@ -489,16 +589,73 @@ mod tests {
     #[test]
     fn parse_bash_review_accepts_plain_json() {
         let raw = r#"{"verdict":"APPROVE","reason_code":"SUCCESS","critical_issues":[],"suggestions":[]}"#;
-        let review = parse_bash_review_response(raw).unwrap();
+        let review = parse_bash_review_response_for_tool(raw, BASH_RUN_TOOL).unwrap();
         assert!(review.is_approved());
     }
 
     #[test]
     fn parse_bash_review_accepts_markdown_fence() {
         let raw = "```json\n{\"verdict\":\"REJECT\",\"reason_code\":\"RISK_FOUND\",\"critical_issues\":[{\"line_number\":1,\"code_snippet\":\"rm -rf /\",\"risk_type\":\"HIGH_RISK_COMMAND\",\"description\":\"危险删除\"}],\"suggestions\":[\"不要删除根目录\"]}\n```";
-        let review = parse_bash_review_response(raw).unwrap();
+        let review = parse_bash_review_response_for_tool(raw, BASH_RUN_TOOL).unwrap();
         assert!(!review.is_approved());
         assert_eq!(review.critical_issues.len(), 1);
+    }
+
+    #[test]
+    fn parse_bash_review_accepts_json_with_trailing_fence_and_prose() {
+        let raw = r#"{
+  "verdict": "APPROVE",
+  "reason_code": "SUCCESS",
+  "critical_issues": [],
+  "suggestions": []
+}
+```
+
+Wait, should I add a suggestion?"#;
+        let review = parse_bash_review_response_for_tool(raw, BASH_RUN_TOOL).unwrap();
+        assert!(review.is_approved());
+    }
+
+    #[test]
+    fn parse_bash_review_prefers_verdict_object_over_echoed_code() {
+        let raw = r#"The command uses jq '.[:5] | .[] | {sha: .sha[0:7], message: .commit.message}'.
+
+{
+  "verdict": "APPROVE",
+  "reason_code": "SUCCESS",
+  "critical_issues": [],
+  "suggestions": []
+}"#;
+        let review = parse_bash_review_response_for_tool(raw, BASH_RUN_TOOL).unwrap();
+        assert!(review.is_approved());
+    }
+
+    #[test]
+    fn parse_bash_review_prefers_verdict_over_python_dict_in_code_echo() {
+        let raw = r#"Reviewing code:
+params = {"per_page": 5}
+
+{
+  "verdict": "APPROVE",
+  "reason_code": "SUCCESS",
+  "critical_issues": [],
+  "suggestions": []
+}"#;
+        let review = parse_bash_review_response_for_tool(raw, BASH_RUN_TOOL).unwrap();
+        assert!(review.is_approved());
+    }
+
+    #[test]
+    fn parse_bash_review_extracts_json_from_mid_response_fence() {
+        let raw = r#"Let me analyze the command.
+
+```json
+{"verdict":"APPROVE","reason_code":"SUCCESS","critical_issues":[],"suggestions":[]}
+```
+
+Looks safe."#;
+        let review = parse_bash_review_response_for_tool(raw, BASH_RUN_TOOL).unwrap();
+        assert!(review.is_approved());
     }
 
     #[test]

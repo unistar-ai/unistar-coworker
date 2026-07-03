@@ -57,3 +57,7 @@ export async function apiPost(url: string, body?: unknown): Promise<ApiResult<un
     body: body != null ? JSON.stringify(body) : undefined,
   });
 }
+
+export async function apiDelete(url: string): Promise<ApiResult<unknown>> {
+  return apiFetch(url, { method: "DELETE" });
+}

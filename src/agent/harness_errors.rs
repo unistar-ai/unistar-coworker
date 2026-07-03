@@ -595,6 +595,39 @@ pub fn bash_validation_envelope(message: &str, command: Option<&str>) -> ErrorEn
     }
 }
 
+pub fn review_gate_parse_envelope(tool_name: &str, detail: &str) -> ErrorEnvelope {
+    let why = format!("{tool_name} LLM review returned invalid JSON: {detail}");
+    match tool_name {
+        PYTHON_RUN_TOOL => ErrorEnvelope {
+            code: "PYTHON_REVIEW_GATE".into(),
+            tool_name: PYTHON_RUN_TOOL.into(),
+            what: "python_run safety review gate failed".into(),
+            why,
+            try_steps: vec![
+                "Retry python_run once with a simpler script".into(),
+                "If it persists, use read_file/grep/web_fetch or ask the user".into(),
+            ],
+            example: Some(python_run_tool_example(
+                "import json\nprint(json.dumps({'ok': True}))",
+                None,
+            )),
+            detail: Some(detail.to_string()),
+        },
+        _ => ErrorEnvelope {
+            code: "BASH_REVIEW_GATE".into(),
+            tool_name: BASH_RUN_TOOL.into(),
+            what: "bash_run safety review gate failed".into(),
+            why,
+            try_steps: vec![
+                "Retry bash_run once with a simpler command".into(),
+                "If it persists, use read_file/grep or ask the user".into(),
+            ],
+            example: None,
+            detail: Some(detail.to_string()),
+        },
+    }
+}
+
 /// Build envelope when bash ran but exited non-zero (tool_result body is formatted output).
 pub fn bash_exit_failure_envelope(command: &str, tool_output: &str) -> ErrorEnvelope {
     let exit_code = parse_bash_exit_code(tool_output).unwrap_or_else(|| "?".into());
@@ -816,6 +849,10 @@ pub fn python_preflight_envelope(code: &str) -> Option<ErrorEnvelope> {
 }
 
 pub fn python_validation_envelope(message: &str, code: Option<&str>) -> ErrorEnvelope {
+    let low = message.to_ascii_lowercase();
+    if low.contains("llm review returned invalid json") || low.contains("llm offline") {
+        return python_review_gate_envelope(message, code);
+    }
     ErrorEnvelope {
         code: "PYTHON_VALIDATION".into(),
         tool_name: PYTHON_RUN_TOOL.into(),
@@ -824,6 +861,24 @@ pub fn python_validation_envelope(message: &str, code: Option<&str>) -> ErrorEnv
         try_steps: vec![
             "Pass multiline Python in the `code` field".into(),
             "Optional `cwd` is relative to chat.workspace".into(),
+        ],
+        example: Some(python_run_tool_example(
+            "import json\nprint(json.dumps({'ok': True}))",
+            None,
+        )),
+        detail: code.map(|c| crate::agent::context::truncate_chars(c, 400)),
+    }
+}
+
+pub fn python_review_gate_envelope(message: &str, code: Option<&str>) -> ErrorEnvelope {
+    ErrorEnvelope {
+        code: "PYTHON_REVIEW_GATE".into(),
+        tool_name: PYTHON_RUN_TOOL.into(),
+        what: "python_run safety review gate failed".into(),
+        why: message.into(),
+        try_steps: vec![
+            "Retry python_run once with a simpler script".into(),
+            "If it persists, use read_file/grep/web_fetch or ask the user".into(),
         ],
         example: Some(python_run_tool_example(
             "import json\nprint(json.dumps({'ok': True}))",

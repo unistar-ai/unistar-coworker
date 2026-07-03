@@ -352,6 +352,19 @@ impl Store for JsonStore {
         Self::write_json(&path, session)
     }
 
+    async fn delete_chat_session(&self, id: &Uuid) -> Result<()> {
+        let path = self.root.join("chat/sessions").join(format!("{id}.json"));
+        if !path.exists() {
+            return Err(CoworkerError::Store(format!("chat session {id} not found")));
+        }
+        fs::remove_file(&path)?;
+        let msg_path = self.root.join("chat/messages").join(format!("{id}.jsonl"));
+        if msg_path.exists() {
+            fs::remove_file(&msg_path)?;
+        }
+        Ok(())
+    }
+
     async fn append_chat_message(&self, msg: &ChatMessage) -> Result<()> {
         if msg.role == ChatRole::Harness {
             let path = self
@@ -559,5 +572,34 @@ mod tests {
         assert_eq!(history[0].status, ApprovalStatus::Approved);
         assert_eq!(history[1].id, older.id);
         assert_eq!(history[1].status, ApprovalStatus::Denied);
+    }
+
+    #[tokio::test]
+    async fn delete_chat_session_removes_session_and_messages() {
+        use crate::store::{ChatMessage, ChatRole};
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonStore::open(dir.path().to_path_buf()).unwrap();
+        let session = store.create_chat_session(Some("bye"), None).await.unwrap();
+        let sid = session.id;
+        store
+            .append_chat_message(&ChatMessage {
+                id: Uuid::new_v4(),
+                session_id: sid,
+                role: ChatRole::User,
+                content: "hello".into(),
+                ts: Utc::now(),
+                tool_name: None,
+                tool_calls_json: None,
+                reasoning_original: None,
+            })
+            .await
+            .unwrap();
+
+        store.delete_chat_session(&sid).await.unwrap();
+        assert!(store.get_chat_session(&sid).await.unwrap().is_none());
+        assert!(store.list_chat_messages(&sid, 10).await.unwrap().is_empty());
+
+        let missing = Uuid::new_v4();
+        assert!(store.delete_chat_session(&missing).await.is_err());
     }
 }

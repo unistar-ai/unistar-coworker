@@ -93,51 +93,13 @@ impl LlmTurnMessage {
     }
 }
 
-/// Serialize chat turns for Ollama native `/api/chat` (incl. `tool_name` on tool results).
-pub fn llm_messages_to_api_value(messages: &[LlmTurnMessage]) -> Value {
-    messages
-        .iter()
-        .map(ollama_api_message)
-        .collect::<Vec<_>>()
-        .into()
-}
-
-/// Serialize chat turns for OpenAI-compatible `/v1/chat/completions` (oMLX, vLLM, etc.).
+/// Serialize chat turns for OpenAI-compatible `/v1/chat/completions` (oMLX, vLLM, Ollama `/v1`, etc.).
 pub fn llm_messages_to_openai_api_value(messages: &[LlmTurnMessage]) -> Value {
     messages
         .iter()
         .map(openai_api_message)
         .collect::<Vec<_>>()
         .into()
-}
-
-fn ollama_api_message(m: &LlmTurnMessage) -> Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert("role".into(), Value::String(m.role.to_string()));
-    obj.insert("content".into(), Value::String(m.content.clone()));
-    if let Some(name) = &m.tool_name {
-        obj.insert("tool_name".into(), Value::String(name.clone()));
-    }
-    if let Some(id) = &m.tool_call_id {
-        obj.insert("tool_call_id".into(), Value::String(id.clone()));
-    }
-    if let Some(calls) = &m.tool_calls {
-        let api_calls: Vec<Value> = calls
-            .iter()
-            .map(|tc| {
-                serde_json::json!({
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": tc.arguments,
-                    }
-                })
-            })
-            .collect();
-        obj.insert("tool_calls".into(), Value::Array(api_calls));
-    }
-    Value::Object(obj)
 }
 
 fn openai_api_message(m: &LlmTurnMessage) -> Value {
@@ -325,11 +287,7 @@ impl LlmClient {
     where
         F: FnMut(ChatStreamUpdate) + Send,
     {
-        let msgs = if self.uses_ollama_native_chat() {
-            llm_messages_to_api_value(messages)
-        } else {
-            llm_messages_to_openai_api_value(messages)
-        };
+        let msgs = llm_messages_to_openai_api_value(messages);
 
         let mut last_reasoning = String::new();
         let turn = self
@@ -537,116 +495,63 @@ pub fn reply_looks_like_planning(message: &str) -> bool {
     PHRASES.iter().any(|phrase| lower.contains(phrase))
 }
 
-/// Model pasted `<tool_code>` / Python instead of native `tool_calls`.
-pub fn reply_contains_fake_tool_invocation(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("<tool_code>")
-        || lower.contains("</tool_code>")
-        || lower.contains("import subprocess")
-        || lower.contains("subprocess.run")
-        || lower.contains("def write_file_bash")
-        || (lower.contains("import os") && lower.contains("makedirs"))
-}
-
-/// User asked to build or change code/files in the workspace.
-pub fn user_implies_implementation(user_message: &str) -> bool {
-    let lower = user_message.trim().to_ascii_lowercase();
-    if lower.is_empty() {
+/// Final synthesis for the user (tables, sections, or long prose).
+pub fn reply_looks_like_substantive_answer(message: &str) -> bool {
+    let t = message.trim();
+    if t.is_empty() {
         return false;
     }
-    const EN: &[&str] = &[
-        "implement",
-        "create ",
-        "rewrite",
-        "build ",
-        "write a",
-        "write the",
-        "start implementing",
-        "scaffold",
-        "add a",
-        "set up",
-        "setup ",
-    ];
-    if EN.iter().any(|p| lower.contains(p)) {
+    if t.chars().count() >= 320 {
         return true;
     }
-    user_message.contains("实现")
-        || user_message.contains("写")
-        || user_message.contains("创建")
-        || user_message.contains("改成")
-        || user_message.contains("重新")
-        || user_message.contains("开始")
-}
-
-/// Reply claims files/code exist without a tool result in this turn.
-pub fn reply_claims_implementation_done(message: &str) -> bool {
-    let lower = message.trim().to_ascii_lowercase();
-    const PHRASES: &[&str] = &[
-        "i have created",
-        "i've created",
-        "files have been created",
-        "following files have been created",
-        "the following files have been created",
-        "all files created",
-        "have been created in",
-        "have been created inside",
-        "project structure",
-    ];
-    PHRASES.iter().any(|p| lower.contains(p)) || message.contains("✅")
-}
-
-/// Model deflects without calling change tools — often hallucinated paths follow.
-pub fn reply_claims_cannot_see_changes(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    message.contains("系统限制")
-        || message.contains("无法直接查看")
-        || message.contains("无法查看")
-        || message.contains("没有摘要信息")
-        || lower.contains("system limitation")
-        || lower.contains("cannot view") && lower.contains("detail")
-        || lower.contains("unable to") && lower.contains("see")
-}
-
-/// Reply ends the turn too early — plan/fake tools/claimed work without tool_calls this turn.
-pub fn reply_premature_for_task(message: &str, user_message: &str, tool_names: &[&str]) -> bool {
-    if reply_looks_like_planning(message)
-        || reply_claims_cannot_see_changes(message)
-        || reply_contains_fake_tool_invocation(message)
-    {
+    if t.contains("\n## ") || t.starts_with("## ") {
         return true;
     }
-    if tool_names.is_empty() && user_implies_implementation(user_message) {
-        return reply_claims_implementation_done(message) || reply_looks_like_planning(message);
+    if t.contains("\n|---|") {
+        return true;
+    }
+    if t.ends_with('?') || t.ends_with('？') {
+        return true;
     }
     false
 }
 
-/// Harness nudge when a premature reply is rejected before ending the turn.
-pub fn reply_premature_nudge(message: &str, user_task: &str) -> String {
-    if reply_contains_fake_tool_invocation(message) {
-        return format!(
-            "Your reply embedded <tool_code> or simulated Python/shell instead of native tool_calls. \
-User asked: \"{user_task}\"\n\
-Call write_file, bash_run, python_run, or edit_file via the native tool API — not prose scripts. \
-After tool results are in context, reply in natural language."
-        );
+/// Short status line ("let me check…") — not a deliverable answer.
+pub fn reply_looks_like_progress_narration(message: &str) -> bool {
+    let t = message.trim();
+    if t.is_empty() || reply_looks_like_substantive_answer(t) {
+        return false;
     }
-    if reply_claims_cannot_see_changes(message) {
-        return format!(
-            "You replied without file/diff data. User asked: \"{user_task}\"\n\
-pr_list_changed_files then pr_get_diff with path=<file> (one file per call) may help on large PRs."
-        );
+    if t.chars().count() > 220 {
+        return false;
     }
-    if reply_claims_implementation_done(message) {
-        return format!(
-            "You claimed files were created but no tool ran this turn. User asked: \"{user_task}\"\n\
-Call write_file / bash_run / python_run via native tool_calls first, then summarize tool output."
-        );
+    if reply_looks_like_planning(t) {
+        return true;
     }
-    format!(
-        "Your reply looked like a plan or incomplete answer. User asked: \"{user_task}\"\n\
-Call tools via the native tool API before replying."
-    )
+    t.ends_with('…')
+        || t.ends_with("...")
+        || (t.contains('：') && t.chars().count() < 140)
+        || t.contains("让我")
+        || t.contains("现在")
+        || t.contains("接下来")
+        || t.contains("修正")
+        || t.contains("重新获取")
+        || t.contains("重新运行")
+        || t.contains("重新查询")
+        || t.contains("确保没有遗漏")
+        || t.contains("检查其")
+        || t.contains("检查 #")
+}
+
+/// Agent step returned user-visible text but no native `tool_calls`.
+pub fn agent_tools_turn_needs_retry(turn: &ChatToolsTurn, think_was_on: bool) -> bool {
+    if !turn.tool_calls.is_empty() {
+        return false;
+    }
+    if turn.content.trim().is_empty() {
+        return true;
+    }
+    think_was_on && reply_looks_like_progress_narration(&turn.content)
 }
 
 /// User-facing reply ends mid-thought (model stopped early or ran out of tokens).
@@ -744,42 +649,31 @@ mod tests {
     fn planning_reply_detected() {
         let msg = "Since I cannot access #19242, I will investigate #19238.";
         assert!(reply_looks_like_planning(msg));
-        assert!(reply_premature_for_task(
-            msg,
-            "tell me why CI fails",
-            &["pr_get_overview"],
-        ));
     }
 
     #[test]
-    fn fake_tool_code_reply_rejected() {
-        let msg = "I'll start by creating files.\n\n<tool_code>\nimport os\nos.makedirs(\"go-pro-server\")\n</tool_code>";
-        assert!(reply_contains_fake_tool_invocation(msg));
-        assert!(reply_premature_for_task(msg, "重新用golang实现", &[]));
-        assert!(reply_premature_nudge(msg, "重新用golang实现").contains("tool_code"));
+    fn progress_narration_detected() {
+        let msg = "修正查询语法，重新获取 PR 详情。";
+        assert!(reply_looks_like_progress_narration(msg));
+        assert!(!reply_looks_like_substantive_answer(msg));
     }
 
     #[test]
-    fn claimed_implementation_without_tools_rejected() {
-        let msg = "I have created a Python web server using **Flask** inside the `tmp-web-server/` directory.";
-        assert!(reply_claims_implementation_done(msg));
-        assert!(reply_premature_for_task(msg, "用 python 写。", &[]));
+    fn substantive_pr_report_not_progress() {
+        let msg = "## PR #18325 CI 状态分析\n\n| 状态 | 数量 |\n|------|------|\n| pass | 80 |";
+        assert!(reply_looks_like_substantive_answer(msg));
+        assert!(!reply_looks_like_progress_narration(msg));
     }
 
     #[test]
-    fn implementation_reply_ok_after_tools() {
-        let msg = "I have created a Python web server using Flask.";
-        assert!(!reply_premature_for_task(
-            msg,
-            "用 python 写。",
-            &["write_file", "bash_run"],
-        ));
-    }
-
-    #[test]
-    fn go_rewrite_plan_rejected() {
-        let msg = "I will rewrite the web server using **Go** (Golang). I'll start by creating the directory.";
-        assert!(reply_premature_for_task(msg, "改成用 go 语言实现。", &[]));
+    fn agent_tools_turn_retry_on_progress_only() {
+        let turn = ChatToolsTurn {
+            content: "用 `-L 100` 获取所有结果，确保没有遗漏。".into(),
+            reasoning: String::new(),
+            tool_calls: Vec::new(),
+        };
+        assert!(agent_tools_turn_needs_retry(&turn, true));
+        assert!(!agent_tools_turn_needs_retry(&turn, false));
     }
 
     #[test]
