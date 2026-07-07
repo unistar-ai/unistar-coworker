@@ -152,9 +152,7 @@ workflows:
 schedule:
   daily_digest: "0 6 * * *"
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let mut config = config;
-        config.finalize();
+        let config = Config::load_from_str(yaml).unwrap();
         let sched = Scheduler::from_config(&config);
         assert!(!sched.jobs.is_empty());
         assert!(

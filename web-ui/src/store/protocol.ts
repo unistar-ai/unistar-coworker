@@ -122,6 +122,12 @@ export interface McpServerStatus {
   prefix: string;
 }
 
+export interface LlmProfileOption {
+  id: string;
+  model: string;
+  base_url: string;
+}
+
 export interface WebSnapshot {
   tab: string;
   tabs: string[];
@@ -163,6 +169,8 @@ export interface WebSnapshot {
   config_path: string;
   repos: string[];
   llm_model: string;
+  llm_profile: string | null;
+  llm_profile_options: LlmProfileOption[];
   github_ok: boolean;
   llm_ok: boolean;
   github_latency_ms: number | null;

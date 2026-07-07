@@ -1,8 +1,23 @@
+# Named LLM endpoints under `llm`; pick the active one with `llm_profile`.
+# Switch presets in Web UI (Config tab). Last choice is saved to `coworker.llm-profile`.
+# llm_profile: local-ollama
+# llm:
+#   local-ollama:
+#     base_url: http://localhost:11434/v1
+#     model: gemma4:26b-a4b-it-qat
+#     context_limit: 64000
+#   deepseek:
+#     base_url: https://api.deepseek.com/v1
+#     model: deepseek-chat
+#     context_limit: 128000
+#     api_key: ${DEEPSEEK_API_KEY}
+
 llm:
-  base_url: http://localhost:11434/v1
-  model: gemma4:26b-a4b-it-qat
-  context_limit: 64000
-  # api_key: ollama
+  default:
+    base_url: http://localhost:11434/v1
+    model: gemma4:26b-a4b-it-qat
+    context_limit: 64000
+    # api_key: ollama
 
 # GitHub/CI tools run in-process via `gh` (GithubHarness) — no MCP subprocess required.
 github:

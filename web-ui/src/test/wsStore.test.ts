@@ -64,6 +64,8 @@ function snap(overrides: Partial<WebSnapshot> = {}): WebSnapshot {
     config_path: "",
     repos: [],
     llm_model: "",
+    llm_profile: null,
+    llm_profile_options: [],
     github_ok: false,
     llm_ok: false,
     github_latency_ms: null,

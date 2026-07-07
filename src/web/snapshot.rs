@@ -11,6 +11,13 @@ const WEB_CONTEXT_MSG_CHARS: usize = 4_000;
 const WEB_CHAT_PATCH_TOOL_OUTPUT_CHARS: usize = 8_000;
 
 #[derive(Serialize)]
+pub struct LlmProfileOption {
+    pub id: String,
+    pub model: String,
+    pub base_url: String,
+}
+
+#[derive(Serialize)]
 pub struct WebSnapshot {
     pub tab: String,
     pub tabs: Vec<String>,
@@ -55,6 +62,10 @@ pub struct WebSnapshot {
     pub config_path: String,
     pub repos: Vec<String>,
     pub llm_model: String,
+    /// Active named preset from `llm_profiles`, if any.
+    pub llm_profile: Option<String>,
+    /// Selectable LLM presets (no secrets).
+    pub llm_profile_options: Vec<LlmProfileOption>,
     pub github_ok: bool,
     pub llm_ok: bool,
     pub github_latency_ms: Option<u128>,
@@ -274,6 +285,8 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
         config_path: s.config_path.clone(),
         repos: s.config.repos.clone(),
         llm_model: s.config.llm.model.clone(),
+        llm_profile: s.config.llm_profile.clone(),
+        llm_profile_options: build_llm_profile_options(s),
         github_ok: s.github_ok,
         llm_ok: s.llm_ok,
         github_latency_ms: s.github_latency_ms,
@@ -396,6 +409,23 @@ fn build_approval_dialog_json(s: &AppState) -> Option<Value> {
             "approve_arm_ms_remaining": d.approve_arm_ms_remaining(),
         })
     })
+}
+
+fn build_llm_profile_options(s: &AppState) -> Vec<LlmProfileOption> {
+    let names = s.config.llm_profile_names();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    names
+        .into_iter()
+        .filter_map(|id| {
+            s.config.llm_profiles.get(&id).map(|cfg| LlmProfileOption {
+                id,
+                model: cfg.model.clone(),
+                base_url: cfg.base_url.clone(),
+            })
+        })
+        .collect()
 }
 
 struct WebLiveTransportFields {
@@ -527,7 +557,7 @@ storage: {{ backend: json, path: ./data }}
 repos: [acme/widget]
 "#
         );
-        serde_yaml::from_str(&yaml).unwrap()
+        Config::load_from_str(&yaml).unwrap()
     }
 
     #[test]
@@ -760,6 +790,8 @@ repos: [acme/widget]
             "approvals",
             "logs",
             "mcp_servers",
+            "llm_profile",
+            "llm_profile_options",
             "auto_approve_mutations",
             "ui_theme",
         ] {

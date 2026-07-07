@@ -4591,6 +4591,35 @@ html.theme-transition * {
 .config-reprobe-btn {
   margin-top: 0.5rem;
 }
+.config-llm-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+.config-llm-select {
+  width: 100%;
+  max-width: 28rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.config-llm-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.config-llm-hint {
+  font-size: 11px;
+  margin-bottom: 0.35rem;
+}
+.config-llm-model {
+  display: block;
+  margin-top: 0.25rem;
+}
 .config-probe-row {
   display: flex;
   align-items: center;

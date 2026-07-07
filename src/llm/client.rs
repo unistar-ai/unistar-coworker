@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
+use std::sync::{Arc, RwLock};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -94,11 +95,11 @@ pub struct ClassifyResult {
 }
 
 pub struct LlmClient {
-    cfg: LlmConfig,
+    cfg: RwLock<LlmConfig>,
     http: reqwest::Client,
     /// Longer timeout for Ollama chat streaming (thinking models can run for minutes).
     http_stream: reqwest::Client,
-    online: bool,
+    online: AtomicBool,
     concurrency: Arc<Semaphore>,
 }
 
@@ -106,8 +107,8 @@ impl LlmClient {
     pub fn new(cfg: LlmConfig, online: bool) -> Self {
         let permits = cfg.concurrency.max(1) as usize;
         Self {
-            cfg,
-            online,
+            cfg: RwLock::new(cfg),
+            online: AtomicBool::new(online),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
@@ -120,8 +121,17 @@ impl LlmClient {
         }
     }
 
+    pub fn reconfigure(&self, cfg: LlmConfig, online: bool) {
+        *self.cfg.write().expect("llm cfg lock") = cfg;
+        self.online.store(online, Ordering::Release);
+    }
+
+    fn cfg_snapshot(&self) -> LlmConfig {
+        self.cfg.read().expect("llm cfg lock").clone()
+    }
+
     pub fn is_online(&self) -> bool {
-        self.online
+        self.online.load(Ordering::Acquire)
     }
 
     /// Classify one page of CI logs. Each LLM call only sees this page plus `prior_summary`.
@@ -138,7 +148,7 @@ impl LlmClient {
         page_num: u32,
         max_pages: u32,
     ) -> Result<ClassifyResult> {
-        if self.online {
+        if self.is_online() {
             match self
                 .classify_with_llm(
                     skill_body,
@@ -187,7 +197,10 @@ impl LlmClient {
             .await
             .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm concurrency: {e}")))?;
 
-        let system = format!("{skill_body}{}", thinking_prompt_suffix(&self.cfg));
+        let system = format!(
+            "{skill_body}{}",
+            thinking_prompt_suffix(&self.cfg_snapshot())
+        );
         let concise_suffix = "\n\nIMPORTANT: Keep JSON compact. Do not exceed field length limits or the response will be truncated.";
         let prior = if prior_summary.is_empty() {
             "(none)".into()
@@ -221,7 +234,7 @@ Failed logs (this page only):\n{logs}"
             let content = self.chat_openai_compatible(&msgs).await?;
 
             if content.trim().is_empty() {
-                if self.cfg.think && !retried_without_think {
+                if self.cfg_snapshot().think && !retried_without_think {
                     tracing::warn!(
                         "LLM classify page {page_num}: empty LLM output, retrying with think=false"
                     );
@@ -235,7 +248,7 @@ Failed logs (this page only):\n{logs}"
 
             match parse_classify_response(&content) {
                 Ok(parsed) => {
-                    if retried_without_think && self.cfg.think {
+                    if retried_without_think && self.cfg_snapshot().think {
                         tracing::info!(
                             "LLM classify page {page_num}: succeeded after think=false retry"
                         );
@@ -249,7 +262,7 @@ Failed logs (this page only):\n{logs}"
                         );
                         return Ok(parsed.into_classify_result(page_num, true));
                     }
-                    if self.cfg.think && !retried_without_think {
+                    if self.cfg_snapshot().think && !retried_without_think {
                         tracing::warn!(
                             "LLM classify page {page_num} parse failed, retrying with think=false: {e}"
                         );
@@ -272,7 +285,7 @@ Failed logs (this page only):\n{logs}"
     }
 
     fn llm_output_limit(&self) -> u32 {
-        self.cfg.max_output_tokens.max(256)
+        self.cfg_snapshot().max_output_tokens.max(256)
     }
 
     /// OpenAI-compatible `/v1/chat/completions` (OpenAI, vLLM, oMLX, Ollama `/v1`, etc.).
@@ -291,9 +304,9 @@ Failed logs (this page only):\n{logs}"
         _schema: &serde_json::Value,
         max_tokens: u32,
     ) -> Result<String> {
-        let url = openai_chat_completions_url(&self.cfg.base_url);
+        let url = openai_chat_completions_url(&self.cfg_snapshot().base_url);
         let mut body = serde_json::json!({
-            "model": self.cfg.model,
+            "model": self.cfg_snapshot().model,
             "messages": messages,
             "stream": false,
             "temperature": 0,
@@ -306,7 +319,7 @@ Failed logs (this page only):\n{logs}"
     }
 
     async fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
-        let resp = crate::llm::ollama::apply_llm_auth(self.http.post(url), &self.cfg)
+        let resp = crate::llm::ollama::apply_llm_auth(self.http.post(url), &self.cfg_snapshot())
             .json(body)
             .send()
             .await
@@ -405,7 +418,7 @@ Failed logs (this page only):\n{logs}"
         max_tokens: u32,
         offline_message: &str,
     ) -> Result<String> {
-        if !self.online {
+        if !self.is_online() {
             return Err(CoworkerError::Other(anyhow::anyhow!("{offline_message}")));
         }
         let _permit = self
@@ -445,7 +458,7 @@ Failed logs (this page only):\n{logs}"
     where
         F: FnMut(&str, &str, &[super::chat::LlmToolCall]) + Send,
     {
-        if !self.online {
+        if !self.is_online() {
             return Err(CoworkerError::Other(anyhow::anyhow!(
                 "LLM offline — check llm.base_url and that the server is running \
                  (set llm.api_key for LLM Provider)"
@@ -465,7 +478,14 @@ Failed logs (this page only):\n{logs}"
 
         let base_limit = self.chat_output_limit();
         let attempts: [(Option<bool>, u32); 3] = [
-            (if self.cfg.think { None } else { Some(false) }, base_limit),
+            (
+                if self.cfg_snapshot().think {
+                    None
+                } else {
+                    Some(false)
+                },
+                base_limit,
+            ),
             (Some(false), base_limit.saturating_mul(2).min(8192)),
             (Some(false), 8192),
         ];
@@ -474,7 +494,7 @@ Failed logs (this page only):\n{logs}"
         let mut last = super::chat::ChatToolsTurn::default();
         for (i, (think_override, num_predict)) in attempts.into_iter().enumerate() {
             let mut msgs = messages.clone();
-            let think_was_on = think_override.unwrap_or(self.cfg.think);
+            let think_was_on = think_override.unwrap_or(self.cfg_snapshot().think);
             if i > 0 {
                 let nudge = if last.content.trim().is_empty() && last.tool_calls.is_empty() {
                     "Your last turn returned no assistant text and no tool_calls. \
@@ -529,7 +549,7 @@ Call tools to continue, or reply with a complete synthesis when the task is done
     }
 
     fn chat_output_limit(&self) -> u32 {
-        self.cfg.max_output_tokens.clamp(2048, 8192)
+        self.cfg_snapshot().max_output_tokens.clamp(2048, 8192)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -547,9 +567,9 @@ Call tools to continue, or reply with a complete synthesis when the task is done
     {
         use futures_util::StreamExt;
 
-        let url = openai_chat_completions_url(&self.cfg.base_url);
+        let url = openai_chat_completions_url(&self.cfg_snapshot().base_url);
         let body = serde_json::json!({
-            "model": self.cfg.model,
+            "model": self.cfg_snapshot().model,
             "messages": messages,
             "stream": true,
             "temperature": 0,
@@ -558,11 +578,12 @@ Call tools to continue, or reply with a complete synthesis when the task is done
             "tool_choice": "auto",
         });
 
-        let resp = crate::llm::ollama::apply_llm_auth(self.http_stream.post(&url), &self.cfg)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm request: {e}")))?;
+        let resp =
+            crate::llm::ollama::apply_llm_auth(self.http_stream.post(&url), &self.cfg_snapshot())
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm request: {e}")))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -718,7 +739,7 @@ No preamble or markdown fences.";
             "Summarize this past agent reasoning trace (read-only):\n\n---\n{}\n---",
             trimmed.chars().take(12_000).collect::<String>()
         );
-        if !self.online {
+        if !self.is_online() {
             return Err(CoworkerError::Other(anyhow::anyhow!(
                 "LLM offline — cannot compress reasoning"
             )));
@@ -733,7 +754,11 @@ No preamble or markdown fences.";
             { "role": "system", "content": SYSTEM },
             { "role": "user", "content": user },
         ]);
-        let limit = self.cfg.reasoning_summary_tokens.clamp(256, 768).max(512);
+        let limit = self
+            .cfg_snapshot()
+            .reasoning_summary_tokens
+            .clamp(256, 768)
+            .max(512);
         match self
             .chat_plain_messages(&messages, limit, Some(false))
             .await
@@ -790,7 +815,7 @@ COMPRESS: raw log excerpts and duplicate tool dumps. No preamble.",
         if user.trim().is_empty() {
             return Ok(String::new());
         }
-        if !self.online {
+        if !self.is_online() {
             return Ok(crate::agent::context::truncate_reasoning_local(&user, 320));
         }
         let _permit = self
@@ -802,7 +827,7 @@ COMPRESS: raw log excerpts and duplicate tool dumps. No preamble.",
             { "role": "system", "content": system },
             { "role": "user", "content": user },
         ]);
-        let limit = self.cfg.history_summary_tokens.clamp(128, 400);
+        let limit = self.cfg_snapshot().history_summary_tokens.clamp(128, 400);
         match self
             .chat_plain_messages(&messages, limit, Some(false))
             .await
@@ -836,9 +861,9 @@ COMPRESS: raw log excerpts and duplicate tool dumps. No preamble.",
         num_predict: u32,
         _think: Option<bool>,
     ) -> Result<String> {
-        let url = openai_chat_completions_url(&self.cfg.base_url);
+        let url = openai_chat_completions_url(&self.cfg_snapshot().base_url);
         let body = serde_json::json!({
-            "model": self.cfg.model,
+            "model": self.cfg_snapshot().model,
             "messages": messages,
             "stream": false,
             "temperature": 0,

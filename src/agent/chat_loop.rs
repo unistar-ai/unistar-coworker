@@ -484,7 +484,6 @@ pub fn build_context_snapshot(
     loaded_skills: &[SkillSpec],
     runtime_panel: Option<(&str, u64)>,
     panel_sources: crate::agent::context::ContextPanelSources<'_>,
-    reasoning_originals: &HashMap<String, String>,
 ) -> ContextSnapshot {
     let message_tokens = crate::agent::context::estimate_messages_tokens(messages);
     let tools_tokens = estimate_tools_tokens(native_tools);
@@ -539,7 +538,9 @@ pub fn build_context_snapshot(
                 reasoning_original: if crate::agent::context::is_reasoning_summary_content(
                     &m.content,
                 ) {
-                    reasoning_originals.get(&m.content).cloned()
+                    panel_sources
+                        .reasoning_originals
+                        .and_then(|originals| originals.get(&m.content).cloned())
                 } else {
                     None
                 },
@@ -654,8 +655,8 @@ pub(crate) async fn emit_context_snapshot(
         crate::agent::context::ContextPanelSources {
             store_messages: store_messages.as_deref(),
             skill_registry: Some(&discovery_guard.skill_registry),
+            reasoning_originals: Some(reasoning_originals),
         },
-        reasoning_originals,
     );
     emit_progress(progress, ChatProgress::ContextSnapshot(snap));
 }
@@ -2883,7 +2884,6 @@ mod tests {
             &[],
             None,
             crate::agent::context::ContextPanelSources::default(),
-            &HashMap::new(),
         );
         let assistant = snap.messages.last().expect("assistant line");
         assert_eq!(assistant.display_role, "assistant");
@@ -2907,7 +2907,6 @@ mod tests {
             &[],
             None,
             crate::agent::context::ContextPanelSources::default(),
-            &HashMap::new(),
         );
         let last = snap.messages.last().expect("assistant reply");
         assert_eq!(last.display_role, "assistant");
@@ -2930,7 +2929,6 @@ mod tests {
             &[],
             None,
             crate::agent::context::ContextPanelSources::default(),
-            &HashMap::new(),
         );
         assert_eq!(snap.message_count, 2);
         assert_eq!(snap.messages.len(), 2);
@@ -2963,7 +2961,6 @@ mod tests {
             &[],
             None,
             crate::agent::context::ContextPanelSources::default(),
-            &HashMap::new(),
         );
         assert!(snap.tools_tokens > 0);
         assert!(snap.tools_body.contains("pr_get_overview"));
@@ -2993,7 +2990,6 @@ mod tests {
             &skills,
             None,
             crate::agent::context::ContextPanelSources::default(),
-            &HashMap::new(),
         );
         assert_eq!(snap.skill_blocks.len(), 1);
         assert!(snap.skill_blocks[0].body.contains("classify CI"));
@@ -3021,7 +3017,6 @@ mod tests {
             &[],
             None,
             crate::agent::context::ContextPanelSources::default(),
-            &HashMap::new(),
         );
         assert_eq!(snap.messages[0].content.len(), body.len());
         assert_eq!(snap.messages[0].content, body);
@@ -3044,7 +3039,6 @@ mod tests {
             &[],
             None,
             crate::agent::context::ContextPanelSources::default(),
-            &HashMap::new(),
         );
         assert_eq!(snap.context_trimmed_turns, 0);
         assert_eq!(
@@ -3072,7 +3066,6 @@ mod tests {
             &[],
             Some((full, 2)),
             crate::agent::context::ContextPanelSources::default(),
-            &HashMap::new(),
         );
         assert_eq!(snap.runtime_context_revision, Some(2));
         assert!(snap.messages[0].content.contains("Local store snapshot"));
@@ -3094,8 +3087,10 @@ mod tests {
             &[],
             &[],
             None,
-            crate::agent::context::ContextPanelSources::default(),
-            &originals,
+            crate::agent::context::ContextPanelSources {
+                reasoning_originals: Some(&originals),
+                ..Default::default()
+            },
         );
         assert_eq!(snap.messages[0].display_role, "reasoning");
         assert_eq!(snap.messages[0].content, "- bullet summary");

@@ -119,6 +119,7 @@ pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>)
         .route("/api/logs/filter", post(api_logs_filter))
         .route("/api/digest/{index}/select", post(api_digest_select))
         .route("/api/config/probe", post(api_config_probe))
+        .route("/api/config/llm-profile", post(api_config_llm_profile))
         .route("/ws", get(ws_handler));
 
     let protected = if let Some(token) = effective_auth_token(auth_token.as_ref()) {
@@ -778,6 +779,27 @@ async fn api_config_probe(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
     rt.engine.refresh_connectivity_probes().await;
     publish_snapshot(&rt.state, &rt.snap_tx).await;
     StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct LlmProfileBody {
+    profile: String,
+}
+
+async fn api_config_llm_profile(
+    State(rt): State<Arc<WebRuntime>>,
+    Json(body): Json<LlmProfileBody>,
+) -> StatusCode {
+    match rt.engine.switch_llm_profile(&body.profile).await {
+        Ok(()) => {
+            publish_snapshot(&rt.state, &rt.snap_tx).await;
+            StatusCode::NO_CONTENT
+        }
+        Err(e) => {
+            tracing::warn!("llm profile switch: {e}");
+            StatusCode::BAD_REQUEST
+        }
+    }
 }
 
 #[derive(Serialize)]

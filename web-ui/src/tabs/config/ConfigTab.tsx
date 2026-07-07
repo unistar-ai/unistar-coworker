@@ -5,11 +5,23 @@ export default function ConfigTab() {
   const configPath = useStore((s) => s.config_path);
   const repos = useStore((s) => s.repos);
   const llmModel = useStore((s) => s.llm_model);
+  const llmProfile = useStore((s) => s.llm_profile);
+  const llmProfiles = useStore((s) => s.llm_profile_options);
+  const chatBusy = useStore((s) => s.chat_busy);
+  const engineBusy = useStore((s) => s.engine_busy);
   const githubOk = useStore((s) => s.github_ok);
   const llmOk = useStore((s) => s.llm_ok);
   const githubLatency = useStore((s) => s.github_latency_ms);
   const llmLatency = useStore((s) => s.llm_latency_ms);
   const mcpServers = useStore((s) => s.mcp_servers);
+
+  const profileBusy = chatBusy || engineBusy;
+  const activeProfile = llmProfile ?? "";
+
+  const onProfileChange = (profile: string) => {
+    if (!profile || profile === activeProfile || profileBusy) return;
+    void apiPost("/api/config/llm-profile", { profile });
+  };
 
   return (
     <div className="panel">
@@ -36,8 +48,42 @@ export default function ConfigTab() {
       </div>
 
       <div className="config-section">
-        <div className="config-section-title">LLM model</div>
-        <code className="config-mono">
+        <div className="config-section-title">LLM</div>
+        {llmProfiles.length > 0 ? (
+          <>
+            <label className="config-llm-picker">
+              <span className="config-muted">Profile</span>
+              <select
+                className="config-llm-select"
+                value={activeProfile}
+                disabled={profileBusy}
+                onChange={(e) => onProfileChange(e.target.value)}
+                title={
+                  profileBusy
+                    ? "Wait for chat/workflow to finish before switching"
+                    : "Switch LLM preset"
+                }
+              >
+                {llmProfiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.id} — {p.model}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {profileBusy && (
+              <div className="config-muted config-llm-hint">
+                Switching disabled while agent is busy.
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="config-muted config-llm-hint">
+            Add named endpoints under <code>llm</code> in coworker.yaml to enable
+            quick switching.
+          </div>
+        )}
+        <code className="config-mono config-llm-model">
           {llmModel || "(unset)"}
         </code>
       </div>

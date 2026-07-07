@@ -132,6 +132,8 @@ pub struct ContextPanelSources<'a> {
     pub store_messages: Option<&'a [crate::store::ChatMessage]>,
     /// Fallback to rebuild full `skill_load` bodies when the store row is unavailable.
     pub skill_registry: Option<&'a crate::engine::SkillRegistry>,
+    /// Raw reasoning traces keyed by summarized reasoning content.
+    pub reasoning_originals: Option<&'a std::collections::HashMap<String, String>>,
 }
 
 /// True when this LLM turn row represents a tool result in the context panel.
@@ -140,9 +142,9 @@ pub fn llm_turn_is_tool_result(msg: &LlmTurnMessage) -> bool {
 }
 
 /// Persisted tool rows aligned with [`llm_turn_is_tool_result`] in order.
-pub fn context_panel_store_tool_rows<'a>(
-    messages: &'a [crate::store::ChatMessage],
-) -> Vec<&'a crate::store::ChatMessage> {
+pub fn context_panel_store_tool_rows(
+    messages: &[crate::store::ChatMessage],
+) -> Vec<&crate::store::ChatMessage> {
     use crate::store::ChatRole;
     messages
         .iter()

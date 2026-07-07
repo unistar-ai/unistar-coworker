@@ -1210,8 +1210,8 @@ pub async fn load_chat_session_ui(
             crate::agent::context::ContextPanelSources {
                 store_messages: Some(&messages),
                 skill_registry: None,
+                reasoning_originals: Some(&reasoning_originals),
             },
-            &reasoning_originals,
         );
         ContextSnapshot {
             tools_body: prev.tools_body,
@@ -1253,8 +1253,8 @@ pub async fn load_chat_session_ui(
             crate::agent::context::ContextPanelSources {
                 store_messages: Some(&messages),
                 skill_registry: None,
+                reasoning_originals: Some(&reasoning_originals),
             },
-            &reasoning_originals,
         )
     };
     state.set_chat_context(merged);

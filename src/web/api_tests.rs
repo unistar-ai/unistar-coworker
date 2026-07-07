@@ -37,6 +37,8 @@ const SNAPSHOT_KEYS: &[&str] = &[
     "config_path",
     "repos",
     "llm_model",
+    "llm_profile",
+    "llm_profile_options",
     "github_ok",
     "llm_ok",
     "ui_theme",
@@ -47,8 +49,7 @@ async fn test_runtime() -> Arc<WebRuntime> {
     let store =
         Arc::new(JsonStore::open(dir.path().to_path_buf()).expect("json store")) as Arc<dyn Store>;
     std::mem::forget(dir);
-    let mut config = Config::load_from_str(MINIMAL_CONFIG).expect("config");
-    config.finalize();
+    let config = Config::load_from_str(MINIMAL_CONFIG).expect("config");
     let (events_tx, _) = event_channel();
     let state: SharedState = Arc::new(tokio::sync::RwLock::new(AppState::new(
         config.clone(),

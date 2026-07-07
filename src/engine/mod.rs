@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::sync::broadcast;
 
@@ -36,7 +36,7 @@ pub use prompt::{
 pub use skill::{load_markdown_spec, load_skill_with_base, SkillSpec};
 
 pub struct Engine {
-    config: Config,
+    config: RwLock<Config>,
     store: Arc<dyn Store>,
     github: Arc<GithubHarness>,
     mcp: Arc<McpPool>,
@@ -72,7 +72,7 @@ impl Engine {
             s.mcp_servers = mcp.status_snapshot().await;
         }
         let engine = Self {
-            config,
+            config: RwLock::new(config),
             store,
             github,
             mcp,
@@ -133,7 +133,7 @@ impl Engine {
 
     pub async fn run_workflow(&self, workflow_id: &str) -> Result<String> {
         let agent = AgentLoop::new(
-            self.config.clone(),
+            self.config.read().expect("config lock").clone(),
             Arc::clone(&self.store),
             Arc::clone(&self.github),
             Arc::clone(&self.llm),
@@ -288,8 +288,9 @@ impl Engine {
                 })?
         };
 
+        let config = self.config.read().expect("config lock").clone();
         triage_pr(
-            &self.config,
+            &config,
             self.github.as_ref(),
             self.llm.as_ref(),
             self.store.as_ref(),
@@ -310,13 +311,23 @@ impl Engine {
     }
 
     pub fn spawn_scheduler(self: Arc<Self>) {
-        let scheduler = scheduler::Scheduler::from_config(&self.config);
+        let scheduler =
+            scheduler::Scheduler::from_config(&self.config.read().expect("config lock"));
         scheduler.spawn(self);
     }
 
     /// Re-measure GitHub harness / LLM latency and reload MCP servers from disk config.
     pub async fn refresh_connectivity_probes(&self) {
-        let llm_latency_ms = crate::llm::ollama::probe_latency_ms(&self.config.llm).await;
+        let config_path = {
+            let s = self.state.read().await;
+            s.config_path.clone()
+        };
+        if let Ok(new_cfg) = Config::load(&config_path) {
+            self.apply_config_reload(new_cfg).await;
+            return;
+        }
+        let llm = self.config.read().expect("config lock").llm.clone();
+        let llm_latency_ms = crate::llm::ollama::probe_latency_ms(&llm).await;
         let llm_online = llm_latency_ms.is_some();
         let github_latency_ms = if self.github.is_available() {
             crate::github::helpers::probe_github_latency_ms(self.github.as_ref()).await
@@ -324,15 +335,58 @@ impl Engine {
             None
         };
         let github_ok = self.github.is_available();
-        let config_path = {
-            let s = self.state.read().await;
-            s.config_path.clone()
-        };
-        if let Ok(new_cfg) = Config::load(&config_path) {
-            self.mcp.reload_from_config(new_cfg.mcp.clone()).await;
-        }
         let mcp_servers = self.mcp.status_snapshot().await;
         let mut s = self.state.write().await;
+        s.github_ok = github_ok;
+        s.llm_ok = llm_online;
+        s.github_latency_ms = github_latency_ms;
+        s.llm_latency_ms = llm_latency_ms;
+        s.mcp_servers = mcp_servers;
+    }
+
+    /// Switch the active LLM preset at runtime (persists to `{config}.llm-profile` sidecar).
+    pub async fn switch_llm_profile(&self, name: &str) -> Result<()> {
+        {
+            let s = self.state.read().await;
+            if s.chat_busy {
+                return Err(crate::error::CoworkerError::Config(
+                    "cannot switch LLM profile while chat is busy".into(),
+                ));
+            }
+            if s.engine_busy {
+                return Err(crate::error::CoworkerError::Config(
+                    "cannot switch LLM profile while a workflow is running".into(),
+                ));
+            }
+        }
+        let config_path = self.state.read().await.config_path.clone();
+        let mut new_cfg = self.config.read().expect("config lock").clone();
+        new_cfg.switch_llm_profile(name)?;
+        Config::write_llm_profile_sidecar(std::path::Path::new(&config_path), name)?;
+        self.apply_config_reload(new_cfg).await;
+        let model = self.config.read().expect("config lock").llm.model.clone();
+        self.emit_log("info", format!("LLM profile → {name} ({model})"));
+        Ok(())
+    }
+
+    async fn apply_config_reload(&self, new_cfg: Config) {
+        let llm_latency_ms = crate::llm::ollama::probe_latency_ms(&new_cfg.llm).await;
+        let llm_online = llm_latency_ms.is_some();
+        self.llm.reconfigure(new_cfg.llm.clone(), llm_online);
+        self.mcp.reload_from_config(new_cfg.mcp.clone()).await;
+        let github_latency_ms = if self.github.is_available() {
+            crate::github::helpers::probe_github_latency_ms(self.github.as_ref()).await
+        } else {
+            None
+        };
+        let github_ok = self.github.is_available();
+        let mcp_servers = self.mcp.status_snapshot().await;
+        self.config
+            .write()
+            .expect("config lock")
+            .clone_from(&new_cfg);
+        let mut s = self.state.write().await;
+        s.config = new_cfg;
         s.github_ok = github_ok;
         s.llm_ok = llm_online;
         s.github_latency_ms = github_latency_ms;

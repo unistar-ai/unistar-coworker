@@ -28,8 +28,9 @@ impl Engine {
         self.reset_chat_cancel();
         let progress = Some(self.events.clone());
         let cancel = self.chat_cancel_flag();
+        let config = self.config.read().expect("config lock").clone();
         let result = run_chat_turn(
-            &self.config,
+            &config,
             Arc::clone(&self.store),
             Arc::clone(&self.github),
             Arc::clone(&self.mcp),
@@ -74,8 +75,9 @@ impl Engine {
         self.reset_chat_cancel();
         let progress = Some(self.events.clone());
         let cancel = self.chat_cancel_flag();
+        let config = self.config.read().expect("config lock").clone();
         let result = resume_chat_after_approval(
-            &self.config,
+            &config,
             Arc::clone(&self.store),
             Arc::clone(&self.github),
             Arc::clone(&self.mcp),

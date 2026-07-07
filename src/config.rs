@@ -1,13 +1,23 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_yaml::Value;
 
 use crate::error::{CoworkerError, Result};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    /// Active resolved LLM — populated in `finalize()` from `llm` + `llm_profile`.
+    #[serde(skip)]
     pub llm: LlmConfig,
+    /// Active preset name under YAML `llm`.
+    #[serde(default)]
+    pub llm_profile: Option<String>,
+    /// Named LLM endpoints (YAML key `llm`).
+    #[serde(default, rename = "llm", deserialize_with = "deserialize_llm_profiles")]
+    pub llm_profiles: HashMap<String, LlmConfig>,
     #[serde(default)]
     pub github: GithubConfig,
     #[serde(default)]
@@ -80,6 +90,59 @@ pub struct LlmConfig {
     /// Bearer token for OpenAI-compatible servers (oMLX, vLLM, etc.). Optional for Ollama.
     #[serde(default)]
     pub api_key: Option<String>,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "unknown".into(),
+            context_limit: 64_000,
+            log_page_lines: default_log_page_lines(),
+            max_log_pages: default_max_log_pages(),
+            concurrency: default_llm_concurrency(),
+            structured_output: default_structured_output(),
+            max_output_tokens: default_max_output_tokens(),
+            think: default_llm_think(),
+            max_thinking_tokens: default_max_thinking_tokens(),
+            reasoning_summary_tokens: default_reasoning_summary_tokens(),
+            history_summary_tokens: default_history_summary_tokens(),
+            api_key: None,
+        }
+    }
+}
+
+/// YAML `llm` is either a profile map (`ollama-qwen: {…}`) or a legacy single endpoint.
+fn deserialize_llm_profiles<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<String, LlmConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(HashMap::new());
+    };
+    let Value::Mapping(map) = value else {
+        return Err(D::Error::custom("llm must be a YAML mapping"));
+    };
+    if map.contains_key(Value::String("base_url".into())) {
+        let cfg: LlmConfig = serde_yaml::from_value(Value::Mapping(map))
+            .map_err(|e| D::Error::custom(format!("invalid llm endpoint: {e}")))?;
+        let mut profiles = HashMap::new();
+        profiles.insert("default".into(), cfg);
+        return Ok(profiles);
+    }
+    let mut profiles = HashMap::new();
+    for (key, val) in map {
+        let name = key.as_str().ok_or_else(|| {
+            D::Error::custom("llm profile names must be strings (e.g. ollama-qwen)")
+        })?;
+        let cfg: LlmConfig = serde_yaml::from_value(val)
+            .map_err(|e| D::Error::custom(format!("invalid llm profile `{name}`: {e}")))?;
+        profiles.insert(name.to_string(), cfg);
+    }
+    Ok(profiles)
 }
 
 fn default_history_summary_tokens() -> u32 {
@@ -901,11 +964,15 @@ impl Default for HygieneConfig {
 
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let raw = std::fs::read_to_string(path.as_ref())?;
+        let path = path.as_ref();
+        let raw = std::fs::read_to_string(path)?;
         let mut cfg: Config = serde_yaml::from_str(&raw)?;
         cfg.resolve_env_in_github();
         cfg.resolve_env_in_mcp();
-        cfg.finalize();
+        if let Some(name) = Config::read_llm_profile_sidecar(path) {
+            cfg.llm_profile = Some(name);
+        }
+        cfg.finalize()?;
         Ok(cfg)
     }
 
@@ -914,11 +981,73 @@ impl Config {
         let mut cfg: Config = serde_yaml::from_str(raw)?;
         cfg.resolve_env_in_github();
         cfg.resolve_env_in_mcp();
+        cfg.finalize()?;
         Ok(cfg)
     }
 
+    /// Sidecar next to `coworker.yaml` — stores last-selected profile without rewriting YAML comments.
+    pub fn llm_profile_sidecar_path(config_path: &Path) -> PathBuf {
+        config_path.with_extension("llm-profile")
+    }
+
+    pub fn read_llm_profile_sidecar(config_path: &Path) -> Option<String> {
+        let path = Self::llm_profile_sidecar_path(config_path);
+        let raw = std::fs::read_to_string(path).ok()?;
+        let name = raw.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+
+    pub fn write_llm_profile_sidecar(config_path: &Path, profile: &str) -> Result<()> {
+        let path = Self::llm_profile_sidecar_path(config_path);
+        std::fs::write(path, format!("{profile}\n"))?;
+        Ok(())
+    }
+
+    /// Sorted profile names for UI pickers.
+    pub fn llm_profile_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.llm_profiles.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    pub fn apply_llm_profile(&mut self) {
+        if self.llm_profiles.is_empty() {
+            tracing::warn!("coworker.yaml has no `llm` profiles configured");
+            return;
+        }
+        let name = self
+            .llm_profile
+            .clone()
+            .filter(|n| self.llm_profiles.contains_key(n))
+            .or_else(|| self.llm_profile_names().into_iter().next());
+        let Some(name) = name else {
+            return;
+        };
+        let Some(profile) = self.llm_profiles.get(&name).cloned() else {
+            return;
+        };
+        self.llm_profile = Some(name);
+        self.llm = profile;
+    }
+
+    pub fn switch_llm_profile(&mut self, name: &str) -> Result<()> {
+        if !self.llm_profiles.contains_key(name) {
+            return Err(CoworkerError::Config(format!(
+                "unknown llm profile `{name}` (available: {})",
+                self.llm_profile_names().join(", ")
+            )));
+        }
+        self.llm_profile = Some(name.to_string());
+        self.apply_llm_profile();
+        Ok(())
+    }
+
     /// Reserved for derived fields after YAML deserialization.
-    pub fn finalize(&mut self) {
+    pub fn finalize(&mut self) -> Result<()> {
         self.chat.workspace = expand_tilde(&self.chat.workspace.to_string_lossy());
         if let Ok(canonical) = self.chat.workspace.canonicalize() {
             self.chat.workspace = canonical;
@@ -928,6 +1057,13 @@ impl Config {
                 "coworker.yaml sets both `theme` and `tui.theme` — using top-level `theme`"
             );
         }
+        if self.llm_profiles.is_empty() {
+            return Err(CoworkerError::Config(
+                "coworker.yaml must define at least one LLM under `llm`".into(),
+            ));
+        }
+        self.apply_llm_profile();
+        Ok(())
     }
 
     /// Resolved UI theme (`theme` overrides deprecated `tui.theme`).
@@ -1093,8 +1229,7 @@ repos:
 workflows:
   daily-work: {}
 "#;
-        let mut cfg = Config::load_from_str(yaml).unwrap();
-        cfg.finalize();
+        let cfg = Config::load_from_str(yaml).unwrap();
         assert_eq!(cfg.github.gh_command, "gh");
         assert!(cfg.workflows.get("daily-work").unwrap().enabled);
         assert_eq!(cfg.storage.backend, StorageBackend::Json);
@@ -1178,5 +1313,42 @@ repos: [acme/widget]
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.web.auth_token.is_none());
         assert!(!cfg.web.auth_enabled());
+    }
+
+    #[test]
+    fn llm_profile_resolves_active_config() {
+        let yaml = r#"
+llm_profile: fast
+llm:
+  fast:
+    base_url: http://127.0.0.1:11434/v1
+    model: qwen-fast
+    context_limit: 32000
+  slow:
+    base_url: http://127.0.0.1:11434/v1
+    model: qwen-slow
+    context_limit: 128000
+repos: [acme/widget]
+"#;
+        let mut cfg = Config::load_from_str(yaml).unwrap();
+        assert_eq!(cfg.llm.model, "qwen-fast");
+        assert_eq!(cfg.llm_profile.as_deref(), Some("fast"));
+        cfg.switch_llm_profile("slow").unwrap();
+        assert_eq!(cfg.llm.model, "qwen-slow");
+    }
+
+    #[test]
+    fn legacy_single_llm_block_becomes_default_profile() {
+        let yaml = r#"
+llm:
+  base_url: http://localhost:11434/v1
+  model: gemma
+  context_limit: 64000
+repos: [acme/widget]
+"#;
+        let cfg = Config::load_from_str(yaml).unwrap();
+        assert_eq!(cfg.llm.model, "gemma");
+        assert_eq!(cfg.llm_profile.as_deref(), Some("default"));
+        assert!(cfg.llm_profiles.contains_key("default"));
     }
 }
