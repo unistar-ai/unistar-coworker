@@ -86,6 +86,9 @@ pub fn build_approval_payload_sections_with_approval(
         return Vec::new();
     };
 
+    // Redact secrets for display only — execution uses the raw stored payload.
+    let raw_json = crate::agent::redact::redact_json_str(&raw_json);
+
     if name == "pr_post_comment" && serde_json::from_str::<Value>(&raw_json).is_err() {
         return vec![section("Comment body", &raw_json)];
     }

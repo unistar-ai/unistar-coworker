@@ -1,4 +1,4 @@
-mod snapshot;
+pub(crate) mod snapshot;
 mod ui;
 
 #[cfg(test)]
@@ -120,6 +120,8 @@ pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>)
         .route("/api/digest/{index}/select", post(api_digest_select))
         .route("/api/config/probe", post(api_config_probe))
         .route("/api/config/llm-profile", post(api_config_llm_profile))
+        .route("/api/reload", post(api_reload))
+        .route("/api/doctor", get(api_doctor))
         .route("/ws", get(ws_handler));
 
     let protected = if let Some(token) = effective_auth_token(auth_token.as_ref()) {
@@ -461,10 +463,15 @@ async fn api_chat_clear(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-/// Re-run the last user message — finds the most recent `ChatRole::User` in
-/// the session history and calls `run_chat` with it.
-async fn api_chat_regenerate(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
-    let (session_id, last_user_msg) = {
+/// Regenerate an assistant reply as a new branch (Pi-style session tree).
+/// Body may include `message_id` to fork from a specific assistant message;
+/// when omitted, regenerates the last assistant in the active branch.
+async fn api_chat_regenerate(
+    State(rt): State<Arc<WebRuntime>>,
+    body: Option<Json<RegenerateBody>>,
+) -> StatusCode {
+    let requested_id = body.and_then(|b| b.message_id);
+    let (session_id, assistant_id) = {
         let s = rt.state.read().await;
         if s.chat_busy || !s.config.chat.enabled {
             return StatusCode::CONFLICT;
@@ -473,25 +480,54 @@ async fn api_chat_regenerate(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
             Some(id) => id,
             None => return StatusCode::NOT_FOUND,
         };
-        // Find the last user message from the store.
-        let msgs = match rt.store.list_chat_messages(&sid, 100).await {
+        let session = match rt.store.get_chat_session(&sid).await {
+            Ok(Some(session)) => session,
+            _ => return StatusCode::NOT_FOUND,
+        };
+        let branch = match rt.store.list_active_branch_messages(&session, 100).await {
             Ok(m) => m,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let last = msgs.iter().rev().find(|m| m.role == ChatRole::User);
-        match last {
-            Some(m) => (Some(sid), m.content.clone()),
-            None => return StatusCode::NOT_FOUND,
-        }
+        let assistant_id = if let Some(id) = requested_id {
+            match branch
+                .iter()
+                .find(|m| m.id == id && m.role == ChatRole::Assistant)
+            {
+                Some(m) => m.id,
+                None => return StatusCode::NOT_FOUND,
+            }
+        } else {
+            match branch.iter().rev().find(|m| m.role == ChatRole::Assistant) {
+                Some(m) => m.id,
+                None => return StatusCode::NOT_FOUND,
+            }
+        };
+        (sid, assistant_id)
     };
     let engine = Arc::clone(&rt.engine);
     let state = rt.state.clone();
     let snap_tx = rt.snap_tx.clone();
     tokio::spawn(async move {
-        let _ = engine.run_chat(session_id, &last_user_msg).await;
+        let _ = engine.regenerate_chat(session_id, assistant_id).await;
         publish_snapshot(&state, &snap_tx).await;
     });
     StatusCode::ACCEPTED
+}
+
+#[derive(Deserialize, Default)]
+struct RegenerateBody {
+    message_id: Option<Uuid>,
+}
+
+async fn api_doctor(State(rt): State<Arc<WebRuntime>>) -> Json<crate::diagnostics::DoctorReport> {
+    let config_path = rt.state.read().await.config_path.clone();
+    let override_path = if config_path.is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(config_path))
+    };
+    let report = crate::diagnostics::run_checks(override_path).await;
+    Json(report)
 }
 
 #[derive(Serialize)]
@@ -588,7 +624,64 @@ async fn api_toggle_context(
     StatusCode::NO_CONTENT
 }
 
-async fn api_chat_export(State(rt): State<Arc<WebRuntime>>) -> impl IntoResponse {
+async fn api_chat_export(
+    State(rt): State<Arc<WebRuntime>>,
+    Query(params): Query<ExportQuery>,
+) -> impl IntoResponse {
+    if params.format.as_deref() == Some("jsonl") {
+        let sid = { rt.state.read().await.chat_session_id };
+        if let Some(sid) = sid {
+            if let Ok(Some(session)) = rt.store.get_chat_session(&sid).await {
+                if let Ok(messages) = rt
+                    .store
+                    .list_active_branch_messages(&session, usize::MAX)
+                    .await
+                {
+                    let mut out = String::new();
+                    let meta = serde_json::json!({
+                        "type": "session",
+                        "id": session.id.to_string(),
+                        "title": session.title,
+                        "created_at": session.created_at.to_rfc3339(),
+                        "repo_scope": session.repo_scope,
+                        "active_leaf_message_id": session.active_leaf_message_id.map(|u| u.to_string()),
+                    });
+                    out.push_str(&serde_json::to_string(&meta).unwrap());
+                    out.push('\n');
+                    for m in &messages {
+                        let line = serde_json::json!({
+                            "type": "message",
+                            "id": m.id.to_string(),
+                            "parent_message_id": m.parent_message_id.map(|u| u.to_string()),
+                            "branch_index": m.branch_index,
+                            "role": serde_json::to_value(m.role).unwrap(),
+                            "content": m.content,
+                            "ts": m.ts.to_rfc3339(),
+                            "tool_name": m.tool_name,
+                            "tool_calls_json": m.tool_calls_json,
+                            "reasoning_original": m.reasoning_original,
+                        });
+                        out.push_str(&serde_json::to_string(&line).unwrap());
+                        out.push('\n');
+                    }
+                    return (
+                        [
+                            (
+                                axum::http::header::CONTENT_TYPE,
+                                "application/x-ndjson; charset=utf-8",
+                            ),
+                            (
+                                axum::http::header::CONTENT_DISPOSITION,
+                                "attachment; filename=\"chat-transcript.jsonl\"",
+                            ),
+                        ],
+                        out,
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     let s = rt.state.read().await;
     let md = export_chat_transcript_markdown(&s);
     (
@@ -604,6 +697,13 @@ async fn api_chat_export(State(rt): State<Arc<WebRuntime>>) -> impl IntoResponse
         ],
         md,
     )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct ExportQuery {
+    #[serde(default)]
+    format: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -800,6 +900,13 @@ async fn api_config_llm_profile(
             StatusCode::BAD_REQUEST
         }
     }
+}
+
+/// Hot-reload config, LLM, and MCP servers from disk (Pi-style `/reload`).
+async fn api_reload(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
+    rt.engine.reload_all().await;
+    publish_snapshot(&rt.state, &rt.snap_tx).await;
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Serialize)]

@@ -233,6 +233,7 @@ function BlockRenderer({
 function MessageView({ msg, isLastAssistant }: { msg: ChatMessage; isLastAssistant?: boolean }) {
   const [copied, setCopied] = useState(false);
   const chatBusy = useStore((s) => s.chat_busy);
+  const assistantId = useStore((s) => s.chat_assistant_ids[String(msg.lineIndex)]);
 
   // System/meta messages get a centered pill style.
   if (msg.role === "system" || msg.role === "meta") {
@@ -284,13 +285,23 @@ function MessageView({ msg, isLastAssistant }: { msg: ChatMessage; isLastAssista
           >
             {copied ? <Check size={14} /> : <Copy size={14} />}
           </button>
-          {isLastAssistant && !chatBusy && (
+          {msg.role === "assistant" && assistantId && !chatBusy && (
             <button
               type="button"
               className="msg-regenerate"
-              onClick={() => void apiPost("/api/chat/regenerate")}
-              aria-label="Regenerate response"
-              title="Regenerate response"
+              onClick={() =>
+                void apiPost("/api/chat/regenerate", { message_id: assistantId })
+              }
+              aria-label={
+                isLastAssistant
+                  ? "Regenerate response"
+                  : "Branch from this response"
+              }
+              title={
+                isLastAssistant
+                  ? "Regenerate response"
+                  : "Branch from this response"
+              }
             >
               <RefreshCw size={14} />
             </button>

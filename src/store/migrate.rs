@@ -200,14 +200,3 @@ fn read_json_glob<T: serde::de::DeserializeOwned>(dir: &Path, ext: &str) -> Resu
     }
     Ok(out)
 }
-
-pub fn format_migrate_summary(stats: &MigrateStats) -> String {
-    format!(
-        "migrated: {} digests, {} PR snapshots, {} approvals, {} backport items, {} chat messages",
-        stats.digests,
-        stats.pr_snapshots,
-        stats.approvals,
-        stats.backport_items,
-        stats.chat_messages
-    )
-}

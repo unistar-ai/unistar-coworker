@@ -110,6 +110,12 @@ pub fn load_skill_with_base(path: impl AsRef<Path>) -> Result<SkillSpec> {
 pub fn load_prompt(path: impl AsRef<Path>) -> Result<PromptSpec> {
     let path = path.as_ref();
     if super::embedded_prompts::is_bundled_chat_prompt(path) {
+        // Prefer the on-disk prompt so edits take effect without recompiling
+        // (enables hot reload via SIGHUP / POST /api/reload); fall back to the
+        // embedded copy when the file is missing.
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            return parse_markdown_spec(&raw);
+        }
         return parse_markdown_spec(super::embedded_prompts::CHAT_MD);
     }
     load_markdown_spec(path)

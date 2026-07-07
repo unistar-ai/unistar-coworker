@@ -327,6 +327,7 @@ impl Store for JsonStore {
             title: title.unwrap_or("Chat").to_string(),
             repo_scope: repo_scope.map(str::to_string),
             runtime_state: ChatRuntimeState::default(),
+            active_leaf_message_id: None,
         };
         let path = self
             .root
@@ -591,6 +592,8 @@ mod tests {
                 tool_name: None,
                 tool_calls_json: None,
                 reasoning_original: None,
+                parent_message_id: None,
+                branch_index: None,
             })
             .await
             .unwrap();

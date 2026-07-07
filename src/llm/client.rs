@@ -1,10 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
+use tokio::time::sleep;
 
 use crate::config::LlmConfig;
 use crate::error::{CoworkerError, Result};
@@ -314,7 +316,7 @@ Failed logs (this page only):\n{logs}"
         });
         apply_openai_json_mode(&mut body);
 
-        let v = self.post_json(&url, &body).await?;
+        let v = self.post_json_with_retry(&url, &body).await?;
         extract_openai_chat_content(&v)
     }
 
@@ -336,6 +338,34 @@ Failed logs (this page only):\n{logs}"
         resp.json()
             .await
             .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm json: {e}")))
+    }
+
+    /// POST with retry + exponential backoff for transient LLM errors.
+    async fn post_json_with_retry(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut last_err = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                sleep(Duration::from_secs(1 << attempt)).await;
+            }
+            match self.post_json(url, body).await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    if is_transient_llm_error(&e) && attempt + 1 < MAX_ATTEMPTS {
+                        tracing::debug!("transient LLM error, retry {}: {e}", attempt + 1);
+                        last_err = Some(e);
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| CoworkerError::Other(anyhow::anyhow!("llm retry exhausted"))))
     }
 
     /// LLM gate for `bash_run` (think=false, JSON verdict).
@@ -870,7 +900,7 @@ COMPRESS: raw log excerpts and duplicate tool dumps. No preamble.",
             "max_tokens": num_predict,
             "tool_choice": "none",
         });
-        let v = self.post_json(&url, &body).await?;
+        let v = self.post_json_with_retry(&url, &body).await?;
         extract_openai_plain_content(&v)
     }
 }
@@ -1270,6 +1300,25 @@ fn llm_structured_output_unavailable(err: &crate::error::CoworkerError) -> bool 
         || msg.contains("json_schema")
         || msg.contains("structured outputs")
         || (msg.contains("json_object") && msg.contains("unavailable"))
+}
+
+fn is_transient_llm_error(err: &crate::error::CoworkerError) -> bool {
+    let crate::error::CoworkerError::Other(inner) = err else {
+        return false;
+    };
+    let msg = inner.to_string().to_ascii_lowercase();
+    msg.contains("http 502")
+        || msg.contains("http 503")
+        || msg.contains("http 504")
+        || msg.contains("bad gateway")
+        || msg.contains("service unavailable")
+        || msg.contains("gateway timeout")
+        || msg.contains("connection reset")
+        || msg.contains("unexpected eof")
+        || msg.contains("tls handshake timeout")
+        || msg.contains("request timed out")
+        || msg.contains("timeout occurred")
+        || (msg.contains("hyper") && msg.contains("error"))
 }
 
 /// Remove Gemma / template control tokens (`<|tool_response|>`, `<channel|>`, etc.).

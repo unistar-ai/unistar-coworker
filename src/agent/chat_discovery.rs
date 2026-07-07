@@ -444,6 +444,8 @@ mod tests {
             tool_name: Some("skill_load".into()),
             tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         }];
         state.rehydrate_from_tool_history(&history);
         assert!(state.loaded_skills.contains("pr-review"));

@@ -23,9 +23,9 @@ use crate::mcp::McpPool;
 use crate::store::{Approval, ApprovalKind, ApprovalStatus, ChatRole, Store};
 
 use crate::agent::chat_loop::{
-    append_message, emit_context_snapshot, emit_progress, persist_native_assistant_tool_call,
-    record_session_file_edit, sanitize_repo_string, store_update_session_runtime, ChatProgress,
-    PreparedToolCall, ToolCallSummary,
+    append_message, emit_context_snapshot, emit_progress, fork_parent_for_session,
+    persist_native_assistant_tool_call_parented, record_session_file_edit, sanitize_repo_string,
+    store_update_session_runtime, ChatProgress, PreparedToolCall, ToolCallSummary,
 };
 
 pub(crate) enum MutatingToolOutcome {
@@ -112,7 +112,9 @@ pub(crate) async fn handle_mutating_tool_call(
         .await?;
         return Ok(MutatingToolOutcome::Continue);
     }
-    persist_native_assistant_tool_call(ctx.store, ctx.session_id, ctx.step).await?;
+    let parent = fork_parent_for_session(ctx.store, ctx.session_id).await;
+    persist_native_assistant_tool_call_parented(ctx.store, ctx.session_id, ctx.step, parent, None)
+        .await?;
     emit_progress(
         ctx.progress,
         ChatProgress::ApprovalQueued {

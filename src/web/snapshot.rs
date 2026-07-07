@@ -33,6 +33,8 @@ pub struct WebSnapshot {
     /// Raw (uncompressed) reasoning traces keyed by line index in `chat_lines`.
     /// Present only when LLM reasoning compression was applied for that line.
     pub chat_reasoning_originals: std::collections::HashMap<String, String>,
+    /// Assistant message ids keyed by line index (branch regenerate).
+    pub chat_assistant_ids: std::collections::HashMap<String, String>,
     pub chat_history_revision: u64,
     pub chat_context_revision: u64,
     pub chat_streaming: Option<String>,
@@ -106,6 +108,7 @@ pub struct WebChatPatch {
     pub chat_lines: Vec<String>,
     pub chat_tool_outputs: std::collections::HashMap<String, String>,
     pub chat_reasoning_originals: std::collections::HashMap<String, String>,
+    pub chat_assistant_ids: std::collections::HashMap<String, String>,
     pub chat_history_revision: u64,
     pub chat_context_revision: u64,
     pub chat_streaming: Option<String>,
@@ -256,6 +259,11 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect(),
+        chat_assistant_ids: s
+            .chat_assistant_ids
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
         chat_history_revision: s.chat_history_revision,
         chat_context_revision: s.chat_context_revision,
         chat_streaming: live.chat_streaming,
@@ -391,7 +399,7 @@ fn build_chat_pending_approval_json(s: &AppState) -> Option<Value> {
             "id": p.id,
             "session_id": p.session_id,
             "tool_name": p.tool_name,
-            "tool_args_json": p.tool_args_json,
+            "tool_args_json": crate::agent::redact::redact_json_str(&p.tool_args_json),
         })
     })
 }
@@ -402,7 +410,7 @@ fn build_approval_dialog_json(s: &AppState) -> Option<Value> {
             "id": d.id,
             "tool_name": d.tool_name,
             "description": d.description,
-            "tool_args_json": d.tool_args_json,
+            "tool_args_json": d.tool_args_json.as_deref().map(crate::agent::redact::redact_json_str),
             "choice": format!("{:?}", d.choice),
             "deciding": d.deciding,
             "approve_armed": d.approve_armed(),
@@ -522,6 +530,11 @@ pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
                 )
             })
             .collect(),
+        chat_assistant_ids: s
+            .chat_assistant_ids
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
         chat_history_revision: s.chat_history_revision,
         chat_context_revision: s.chat_context_revision,
         chat_streaming: live.chat_streaming,
@@ -622,6 +635,7 @@ repos: [acme/widget]
         "chat_lines",
         "chat_tool_outputs",
         "chat_reasoning_originals",
+        "chat_assistant_ids",
         "chat_history_revision",
         "chat_context_revision",
         "chat_streaming",
@@ -773,6 +787,7 @@ repos: [acme/widget]
             "chat_lines",
             "chat_tool_outputs",
             "chat_reasoning_originals",
+            "chat_assistant_ids",
             "chat_history_revision",
             "chat_context_revision",
             "chat_streaming",

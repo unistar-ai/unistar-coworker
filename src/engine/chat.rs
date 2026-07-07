@@ -41,6 +41,47 @@ impl Engine {
                 progress,
                 cancel: Some(cancel),
                 resume: None,
+                regenerate_from: None,
+            },
+        )
+        .await;
+
+        self.apply_chat_turn_result(&result).await;
+        result
+    }
+
+    pub async fn regenerate_chat(
+        &self,
+        session_id: Uuid,
+        assistant_message_id: Uuid,
+    ) -> Result<ChatTurnResult> {
+        {
+            let mut s = self.state.write().await;
+            s.chat_busy = true;
+            s.chat_scroll_from_bottom = 0;
+            s.push_log(
+                "info",
+                format!("chat: regenerating message {assistant_message_id}"),
+            );
+        }
+
+        self.reset_chat_cancel();
+        let progress = Some(self.events.clone());
+        let cancel = self.chat_cancel_flag();
+        let config = self.config.read().expect("config lock").clone();
+        let result = run_chat_turn(
+            &config,
+            Arc::clone(&self.store),
+            Arc::clone(&self.github),
+            Arc::clone(&self.mcp),
+            Arc::clone(&self.llm),
+            ChatTurnInput {
+                session_id: Some(session_id),
+                user_message: String::new(),
+                progress,
+                cancel: Some(cancel),
+                resume: None,
+                regenerate_from: Some(assistant_message_id),
             },
         )
         .await;

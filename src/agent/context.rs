@@ -1274,21 +1274,23 @@ pub async fn trim_llm_messages_with_llm(
     compress_with_llm: bool,
     summary_min_tokens: u32,
     compaction: CompactionStrategy,
-) -> Result<()> {
+) {
     if compress_with_llm && estimate_messages_tokens(messages) > token_budget {
-        try_collapse_old_messages_with_llm(
+        if let Err(e) = try_collapse_old_messages_with_llm(
             messages,
             token_budget,
             llm,
             summary_min_tokens,
             compaction,
         )
-        .await?;
+        .await
+        {
+            tracing::warn!("LLM context compression failed, using local trim: {e}");
+        }
     }
     if estimate_messages_tokens(messages) > token_budget {
         trim_llm_messages(messages, token_budget, compaction);
     }
-    Ok(())
 }
 
 /// Shrink `messages` (system at index 0) to fit `token_budget`. Keeps system + recent tail.
@@ -1640,6 +1642,8 @@ mod tests {
                 tool_name: None,
                 tool_calls_json: None,
                 reasoning_original: None,
+                parent_message_id: None,
+                branch_index: None,
                 ts: Utc::now(),
             })
             .collect()
@@ -1779,6 +1783,8 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
             tool_name: None,
             tool_calls_json: None,
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         let llm = chat_message_to_llm(&msg);
         assert_eq!(llm.role, "user");
@@ -1920,6 +1926,8 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
             tool_name: Some("skill_load".into()),
             tool_calls_json: None,
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         let llm = LlmTurnMessage::tool_result("skill_load", compact);
         let panel = format_context_panel_line_content(&llm, Some(&store), None, None);
@@ -1941,6 +1949,8 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
                 tool_name: None,
                 tool_calls_json: None,
                 reasoning_original: None,
+                parent_message_id: None,
+                branch_index: None,
             },
             ChatMessage {
                 id: Uuid::new_v4(),
@@ -1951,6 +1961,8 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
                 tool_name: None,
                 tool_calls_json: None,
                 reasoning_original: None,
+                parent_message_id: None,
+                branch_index: None,
             },
         ];
         let packed = pack_session_history(&history, 20, 64_000);

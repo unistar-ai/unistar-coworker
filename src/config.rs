@@ -546,10 +546,10 @@ fn default_chat_workspace() -> PathBuf {
     PathBuf::from(".")
 }
 
-/// Session history / tool-result compaction for chat (`code` = coding-first default).
+/// Compaction strategy name (code/ops/generic).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ChatCompaction {
+pub enum ChatCompactionStrategy {
     /// Preserve paths, errors, edit targets (coding chat default).
     #[default]
     Code,
@@ -559,12 +559,70 @@ pub enum ChatCompaction {
     Generic,
 }
 
+/// Session history / tool-result compaction for chat.
+///
+/// Accepts either a plain string (`chat.compaction: code`) or an object
+/// (`chat.compaction: { strategy: code, summary_model: fast }`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ChatCompaction {
+    #[serde(default)]
+    pub strategy: ChatCompactionStrategy,
+    /// Optional LLM profile name for compaction summaries. When set, uses a
+    /// lighter/faster model for context compression instead of the main chat LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_model: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ChatCompaction {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Use serde_yaml::Value as intermediary to handle both string and mapping.
+        #[derive(Deserialize)]
+        struct Helper {
+            #[serde(default)]
+            strategy: ChatCompactionStrategy,
+            #[serde(default)]
+            summary_model: Option<String>,
+        }
+        let value = serde_yaml::Value::deserialize(deserializer)?;
+        match value {
+            Value::String(s) => {
+                let strategy = match s.as_str() {
+                    "code" => ChatCompactionStrategy::Code,
+                    "ops" => ChatCompactionStrategy::Ops,
+                    "generic" => ChatCompactionStrategy::Generic,
+                    other => {
+                        return Err(DeError::unknown_variant(other, &["code", "ops", "generic"]))
+                    }
+                };
+                Ok(ChatCompaction {
+                    strategy,
+                    summary_model: None,
+                })
+            }
+            Value::Mapping(_) => {
+                let helper: Helper = serde_yaml::from_value(value)
+                    .map_err(|e| DeError::custom(format!("invalid compaction config: {e}")))?;
+                Ok(ChatCompaction {
+                    strategy: helper.strategy,
+                    summary_model: helper.summary_model,
+                })
+            }
+            _ => Err(DeError::custom(
+                "expected a string or mapping for `compaction`",
+            )),
+        }
+    }
+}
+
 impl ChatCompaction {
-    pub fn to_strategy(self) -> crate::agent::context::CompactionStrategy {
-        match self {
-            Self::Code => crate::agent::context::CompactionStrategy::Code,
-            Self::Ops => crate::agent::context::CompactionStrategy::Ops,
-            Self::Generic => crate::agent::context::CompactionStrategy::Generic,
+    pub fn to_strategy(&self) -> crate::agent::context::CompactionStrategy {
+        match self.strategy {
+            ChatCompactionStrategy::Code => crate::agent::context::CompactionStrategy::Code,
+            ChatCompactionStrategy::Ops => crate::agent::context::CompactionStrategy::Ops,
+            ChatCompactionStrategy::Generic => crate::agent::context::CompactionStrategy::Generic,
         }
     }
 }
@@ -966,7 +1024,21 @@ impl Config {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let raw = std::fs::read_to_string(path)?;
-        let mut cfg: Config = serde_yaml::from_str(&raw)?;
+        let mut cfg: Config = match serde_yaml::from_str(&raw) {
+            Ok(c) => c,
+            Err(e) => {
+                let loc = e
+                    .location()
+                    .map(|p| format!(" at line {}, column {}", p.line(), p.column()))
+                    .unwrap_or_default();
+                return Err(CoworkerError::Config(format!(
+                    "invalid YAML in {}:{}{}",
+                    path.display(),
+                    loc,
+                    e
+                )));
+            }
+        };
         cfg.resolve_env_in_github();
         cfg.resolve_env_in_mcp();
         if let Some(name) = Config::read_llm_profile_sidecar(path) {
@@ -978,7 +1050,16 @@ impl Config {
 
     #[cfg(test)]
     pub(crate) fn load_from_str(raw: &str) -> Result<Self> {
-        let mut cfg: Config = serde_yaml::from_str(raw)?;
+        let mut cfg: Config = match serde_yaml::from_str(raw) {
+            Ok(c) => c,
+            Err(e) => {
+                let loc = e
+                    .location()
+                    .map(|p| format!(" at line {}, column {}", p.line(), p.column()))
+                    .unwrap_or_default();
+                return Err(CoworkerError::Config(format!("invalid YAML{loc}{e}")));
+            }
+        };
         cfg.resolve_env_in_github();
         cfg.resolve_env_in_mcp();
         cfg.finalize()?;
@@ -1090,7 +1171,7 @@ impl Config {
             }
         }
         Err(CoworkerError::Config(
-            "coworker.yaml not found (cwd or .coworker/) — copy coworker.example.yaml to coworker.yaml".into(),
+            "coworker.yaml not found (cwd or .coworker/) — run 'unistar-coworker init' to create one".into(),
         ))
     }
 

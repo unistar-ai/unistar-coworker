@@ -140,6 +140,7 @@ export interface WebSnapshot {
   chat_lines: string[];
   chat_tool_outputs: Record<string, string>;
   chat_reasoning_originals: Record<string, string>;
+  chat_assistant_ids: Record<string, string>;
   chat_history_revision: number;
   chat_context_revision: number;
   chat_streaming: string | null;
@@ -203,6 +204,7 @@ export interface WebChatPatch {
   chat_lines: string[];
   chat_tool_outputs: Record<string, string>;
   chat_reasoning_originals: Record<string, string>;
+  chat_assistant_ids: Record<string, string>;
   chat_history_revision: number;
   chat_context_revision: number;
   chat_streaming: string | null;

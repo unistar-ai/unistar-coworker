@@ -443,6 +443,7 @@ impl ChatProgress {
 }
 
 pub fn format_tool_args_short(args: &Value) -> String {
+    let args = crate::agent::redact::redact_sensitive(args);
     let Some(map) = args.as_object() else {
         return String::new();
     };
@@ -692,6 +693,11 @@ pub struct ChatTurnInput {
     pub cancel: Option<Arc<AtomicBool>>,
     /// Continue a paused turn after the user approves or denies a mutating tool.
     pub resume: Option<ResumeChatAfterApproval>,
+    /// Regenerate mode (Pi-style branching): instead of appending a new user
+    /// message, fork a sibling assistant reply from `regenerate_from` (the
+    /// assistant message being replaced). The new reply shares that message's
+    /// parent and becomes the active branch leaf.
+    pub regenerate_from: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -780,6 +786,7 @@ pub async fn resume_chat_after_approval(
             progress,
             cancel,
             resume: Some(resume),
+            regenerate_from: None,
         },
     )
     .await
@@ -799,8 +806,10 @@ pub async fn run_chat_turn(
         progress,
         cancel,
         resume,
+        regenerate_from,
     } = input;
     let is_resume = resume.is_some();
+    let is_regenerate = regenerate_from.is_some();
     let user_message = user_message.as_str();
     if !config.chat.enabled {
         return Err(CoworkerError::Workflow(
@@ -830,25 +839,72 @@ pub async fn run_chat_turn(
         }
     };
     let session_id = session.id;
-
-    if !is_resume {
-        append_message(
-            store.as_ref(),
-            &session.id,
-            ChatRole::User,
-            user_message,
-            None,
-            None,
-            None,
-        )
-        .await?;
-    }
-
-    let git_summary = build_workspace_git_summary(&workspace);
-    let workspace_display = workspace.to_string_lossy().to_string();
-    let history = store
-        .list_chat_messages(&session.id, config.chat.history_messages as usize)
-        .await?;
+    let (history, fork_parent) = if is_regenerate {
+        // Branching: rebuild the conversation up to the parent of the
+        // assistant message being replaced, then fork a new sibling reply.
+        let all = store.list_chat_messages(&session.id, usize::MAX).await?;
+        let target_id = regenerate_from.expect("regenerate_from set");
+        let target = all
+            .iter()
+            .find(|m| m.id == target_id)
+            .cloned()
+            .ok_or_else(|| CoworkerError::Workflow(format!("unknown chat message {target_id}")))?;
+        let parent_id = target
+            .parent_message_id
+            .or_else(|| {
+                all.iter()
+                    .rev()
+                    .find(|m| {
+                        m.role == ChatRole::User
+                            && m.ts < target.ts
+                            && !all.iter().any(|c| c.parent_message_id == Some(m.id))
+                    })
+                    .map(|m| m.id)
+            })
+            .ok_or_else(|| {
+                CoworkerError::Workflow("cannot regenerate: no parent user message".into())
+            })?;
+        let path = crate::store::branch_path_to_root(&all, parent_id);
+        let mut trimmed = path;
+        let limit = config.chat.history_messages as usize;
+        if trimmed.len() > limit {
+            trimmed = trimmed.split_off(trimmed.len() - limit);
+        }
+        (trimmed, parent_id)
+    } else {
+        let prior = store.list_chat_messages(&session.id, usize::MAX).await?;
+        let branch_leaf = prior.last().map(|m| m.id);
+        let user_msg_id = if !is_resume {
+            append_message_parented(
+                store.as_ref(),
+                &session.id,
+                ChatRole::User,
+                user_message,
+                None,
+                None,
+                None,
+                branch_leaf,
+                Some(0),
+            )
+            .await?
+        } else {
+            Uuid::nil()
+        };
+        let history = store
+            .list_chat_messages(&session.id, config.chat.history_messages as usize)
+            .await?;
+        let fork_parent = if user_msg_id != Uuid::nil() {
+            user_msg_id
+        } else {
+            history
+                .iter()
+                .rev()
+                .find(|m| m.role == ChatRole::User)
+                .map(|m| m.id)
+                .unwrap_or(Uuid::nil())
+        };
+        (history, fork_parent)
+    };
     let user_task = if is_resume {
         history
             .iter()
@@ -856,10 +912,18 @@ pub async fn run_chat_turn(
             .find(|m| m.role == ChatRole::User)
             .map(|m| m.content.clone())
             .unwrap_or_default()
+    } else if is_regenerate {
+        history
+            .iter()
+            .find(|m| m.id == fork_parent)
+            .map(|m| m.content.clone())
+            .unwrap_or_default()
     } else {
         user_message.to_string()
     };
     let user_task = user_task.as_str();
+    let git_summary = build_workspace_git_summary(&workspace);
+    let workspace_display = workspace.to_string_lossy().to_string();
     let skill_paths: Vec<_> = config
         .chat
         .skills
@@ -947,13 +1011,26 @@ pub async fn run_chat_turn(
         }
     }
 
+    let summary_llm = if let Some(name) = &config.chat.compaction.summary_model {
+        if let Some(cfg) = config.llm_profiles.get(name) {
+            let online = crate::llm::ollama::probe(cfg).await;
+            Some(Arc::new(crate::llm::LlmClient::new(cfg.clone(), online)))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let history_llm: &crate::llm::LlmClient =
+        summary_llm.as_deref().unwrap_or_else(|| llm.as_ref());
+
     let compaction = config.chat.compaction.to_strategy();
     llm_messages.extend(
         pack_session_history_with_llm(
             &history,
             config.chat.history_messages as usize,
             history_token_cap,
-            llm.as_ref(),
+            history_llm,
             config.chat.compress_history,
             config.chat.history_summary_min_tokens,
             compaction,
@@ -1044,13 +1121,13 @@ pub async fn run_chat_turn(
             trim_llm_messages_with_llm(
                 &mut llm_messages,
                 message_budget,
-                llm.as_ref(),
+                history_llm,
                 config.chat.compress_history,
                 config.chat.history_summary_min_tokens,
                 compaction,
             ),
         )
-        .await??;
+        .await?;
         emit_context_snapshot(
             &progress,
             &llm_messages,
@@ -1320,7 +1397,9 @@ complete answer when the task is truly done."
                     }
                 };
                 if accept_reply {
-                    append_message(
+                    let branch_index =
+                        next_branch_index(store.as_ref(), &session.id, fork_parent).await;
+                    let id = append_message_parented(
                         store.as_ref(),
                         &session.id,
                         ChatRole::Assistant,
@@ -1328,8 +1407,12 @@ complete answer when the task is truly done."
                         None,
                         None,
                         None,
+                        Some(fork_parent),
+                        Some(branch_index),
                     )
                     .await?;
+                    session.active_leaf_message_id = Some(id);
+                    store.update_chat_session(&session).await?;
                     append_assistant_to_llm_context(&mut llm_messages, &message);
                     emit_context_snapshot(
                         &progress,
@@ -1683,7 +1766,8 @@ from tool results already in context.";
         chat_stop_reason(max_duration_secs, max_turns, turn_started)
     };
     let fallback = synthesize_turn_exhausted_reply(&tool_calls, user_task, stop);
-    append_message(
+    let branch_index = next_branch_index(store.as_ref(), &session.id, fork_parent).await;
+    let id = append_message_parented(
         store.as_ref(),
         &session.id,
         ChatRole::Assistant,
@@ -1691,8 +1775,12 @@ from tool results already in context.";
         None,
         None,
         None,
+        Some(fork_parent),
+        Some(branch_index),
     )
     .await?;
+    session.active_leaf_message_id = Some(id);
+    store.update_chat_session(&session).await?;
     append_assistant_to_llm_context(&mut llm_messages, &fallback);
     emit_context_snapshot(
         &progress,
@@ -1723,9 +1811,39 @@ pub(crate) async fn append_message(
     tool_calls_json: Option<String>,
     reasoning_original: Option<&str>,
 ) -> Result<()> {
+    append_message_parented(
+        store,
+        session_id,
+        role,
+        content,
+        tool_name,
+        tool_calls_json,
+        reasoning_original,
+        None,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Like [`append_message`] but records the branch parent (`parent_message_id`)
+/// and sibling index (`branch_index`) so sessions form a Pi-style message tree.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn append_message_parented(
+    store: &dyn Store,
+    session_id: &Uuid,
+    role: ChatRole,
+    content: &str,
+    tool_name: Option<&str>,
+    tool_calls_json: Option<String>,
+    reasoning_original: Option<&str>,
+    parent_message_id: Option<Uuid>,
+    branch_index: Option<u32>,
+) -> Result<Uuid> {
+    let id = Uuid::new_v4();
     store
         .append_chat_message(&ChatMessage {
-            id: Uuid::new_v4(),
+            id,
             session_id: *session_id,
             role,
             content: content.to_string(),
@@ -1733,15 +1851,24 @@ pub(crate) async fn append_message(
             tool_name: tool_name.map(str::to_string),
             tool_calls_json,
             reasoning_original: reasoning_original.map(str::to_string),
+            parent_message_id,
+            branch_index,
         })
-        .await
+        .await?;
+    Ok(id)
 }
 
-pub(crate) async fn persist_native_assistant_tool_call(
+/// Persist an assistant reply that contains native tool calls, linking it into
+/// the session branch tree (Pi-style message tree) via `parent_message_id` /
+/// `branch_index` so regenerate can fork a sibling reply later.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn persist_native_assistant_tool_call_parented(
     store: &dyn Store,
     session_id: &Uuid,
     step: &ChatAgentStep,
-) -> Result<()> {
+    parent_message_id: Option<Uuid>,
+    branch_index: Option<u32>,
+) -> Result<Uuid> {
     let calls: Vec<LlmToolCall> = step
         .tool_calls
         .iter()
@@ -1752,7 +1879,7 @@ pub(crate) async fn persist_native_assistant_tool_call(
         })
         .collect();
     let tool_calls_json = serde_json::to_string(&calls)?;
-    append_message(
+    append_message_parented(
         store,
         session_id,
         ChatRole::Assistant,
@@ -1760,8 +1887,37 @@ pub(crate) async fn persist_native_assistant_tool_call(
         None,
         Some(tool_calls_json),
         None,
+        parent_message_id,
+        branch_index,
     )
     .await
+}
+
+/// Resolve the parent user message for the current active branch of a session.
+/// Used to link newly persisted assistant replies into the session tree.
+pub(crate) async fn fork_parent_for_session(store: &dyn Store, session_id: &Uuid) -> Option<Uuid> {
+    let session = store.get_chat_session(session_id).await.ok().flatten()?;
+    let branch = store
+        .list_active_branch_messages(&session, usize::MAX)
+        .await
+        .ok()?;
+    branch
+        .iter()
+        .rev()
+        .find(|m| m.role == ChatRole::User)
+        .map(|m| m.id)
+}
+
+/// Count existing children of `parent` in a session — used to assign the next
+/// sibling `branch_index` when forking a new assistant reply.
+pub(crate) async fn next_branch_index(store: &dyn Store, session_id: &Uuid, parent: Uuid) -> u32 {
+    match store.list_chat_messages(session_id, usize::MAX).await {
+        Ok(msgs) => msgs
+            .iter()
+            .filter(|m| m.parent_message_id == Some(parent))
+            .count() as u32,
+        Err(_) => 0,
+    }
 }
 
 async fn apply_approval_resolution(
@@ -3333,6 +3489,8 @@ mod tests {
             tool_name: Some("python_run".into()),
             tool_calls_json: Some(args.to_string()),
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         let from_history = rehydrate_tool_exec_records_from_messages(&[msg]);
         let fp = tool_call_fingerprint("python_run", &args);
@@ -3357,6 +3515,8 @@ mod tests {
             tool_name: Some("python_run".into()),
             tool_calls_json: Some(args.to_string()),
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         let records = rehydrate_tool_exec_records_from_messages(&[msg]);
         let fp = tool_call_fingerprint("python_run", &args);

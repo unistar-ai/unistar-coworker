@@ -41,6 +41,8 @@ pub(crate) async fn persist_interim_assistant_message(
             tool_name: None,
             tool_calls_json: None,
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         })
         .await
 }

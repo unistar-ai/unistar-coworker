@@ -21,6 +21,7 @@ pub mod r#loop;
 pub mod oncall;
 pub mod parse;
 pub mod python_tool;
+pub mod redact;
 pub mod review_gate;
 pub mod review_radar;
 pub mod runtime_context;

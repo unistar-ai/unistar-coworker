@@ -311,6 +311,8 @@ pub struct AppState {
     /// Populated when LLM reasoning compression was applied; the summary is
     /// in `chat_tool_outputs` at the same index. Absent when no compression.
     pub chat_reasoning_originals: std::collections::HashMap<usize, String>,
+    /// Assistant message UUIDs keyed by `chat_lines` index (branch regenerate).
+    pub chat_assistant_ids: std::collections::HashMap<usize, uuid::Uuid>,
     pub chat_expanded_tool_lines: std::collections::HashSet<usize>,
     pub chat_busy: bool,
     /// Partial assistant reply while LLM is streaming (shown in the tail status area).
@@ -404,6 +406,7 @@ impl AppState {
             chat_lines: vec![],
             chat_tool_outputs: std::collections::HashMap::new(),
             chat_reasoning_originals: std::collections::HashMap::new(),
+            chat_assistant_ids: std::collections::HashMap::new(),
             chat_expanded_tool_lines: std::collections::HashSet::new(),
             chat_busy: false,
             chat_streaming: None,
@@ -994,6 +997,7 @@ impl AppState {
         self.chat_lines.clear();
         self.chat_tool_outputs.clear();
         self.chat_reasoning_originals.clear();
+        self.chat_assistant_ids.clear();
         self.chat_expanded_tool_lines.clear();
         self.chat_pending_approval = None;
         self.set_chat_streaming(None);
@@ -1138,7 +1142,10 @@ pub async fn load_chat_session_ui(
     store: &dyn Store,
     session_id: uuid::Uuid,
 ) -> crate::error::Result<()> {
-    let messages = store.list_chat_messages(&session_id, 300).await?;
+    let session = store.get_chat_session(&session_id).await?.ok_or_else(|| {
+        crate::error::CoworkerError::Store(format!("unknown chat session {session_id}"))
+    })?;
+    let messages = store.list_active_branch_messages(&session, 300).await?;
     // Capture the prior context BEFORE clear_chat_transcript() nulls it, so we
     // can preserve its discovered tools & skills across the transcript reload.
     let prev_context = state.chat_context.clone();
@@ -1173,7 +1180,11 @@ pub async fn load_chat_session_ui(
             state.push_chat_line(chat_message_display_line(msg));
             state.record_chat_tool_output(idx, msg.content.clone());
         } else {
+            let idx = state.chat_lines.len();
             state.push_chat_line(chat_message_display_line(msg));
+            if msg.role == ChatRole::Assistant {
+                state.chat_assistant_ids.insert(idx, msg.id);
+            }
         }
     }
     state.chat_scroll_from_bottom = 0;
@@ -1356,6 +1367,8 @@ diff --git a/x.go b/x.go\n\
             tool_name: Some("pr_get_diff".into()),
             tool_calls_json: None,
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         let line = chat_message_display_line(&msg);
         assert!(
@@ -1381,6 +1394,8 @@ diff --git a/x.go b/x.go\n\
             tool_name: Some("pr_get_diff".into()),
             tool_calls_json: None,
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         assert!(chat_message_display_line(&msg).starts_with("  ✗ "));
     }
@@ -1399,6 +1414,8 @@ diff --git a/x.go b/x.go\n\
             tool_name: Some("skill_load".into()),
             tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         assert_eq!(
             chat_message_display_line(&msg),
@@ -1421,6 +1438,8 @@ diff --git a/x.go b/x.go\n\
             tool_name: None,
             tool_calls_json: None,
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         let line = chat_message_display_line(&msg);
         assert!(
@@ -1460,6 +1479,8 @@ diff --git a/x.go b/x.go\n\
             tool_name: None,
             tool_calls_json: None,
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         let ai_msg = ChatMessage {
             id: Uuid::new_v4(),
@@ -1470,6 +1491,8 @@ diff --git a/x.go b/x.go\n\
             tool_name: None,
             tool_calls_json: None,
             reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         };
         store
             .append_chat_message(&user_msg)
@@ -1569,6 +1592,8 @@ repos: [acme/widget]
                 tool_name: None,
                 tool_calls_json: None,
                 reasoning_original: None,
+                parent_message_id: None,
+                branch_index: None,
             })
             .await
             .expect("append");

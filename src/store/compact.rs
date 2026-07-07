@@ -250,16 +250,6 @@ fn prune_sqlite_workflow_runs(
     })
 }
 
-pub fn format_compact_summary(stats: &CompactStats) -> String {
-    format!(
-        "compacted: removed {} audit entries ({} empty files), {} digests, {} workflow runs",
-        stats.audit_entries_removed,
-        stats.audit_files_removed,
-        stats.digests_removed,
-        stats.workflow_runs_removed
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

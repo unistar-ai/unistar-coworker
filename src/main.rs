@@ -2,8 +2,10 @@ mod agent;
 mod app;
 mod approval_payload;
 mod config;
+mod diagnostics;
 mod engine;
 mod error;
+mod exit_codes;
 mod github;
 mod llm;
 mod logging;
@@ -20,15 +22,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use pulldown_cmark::{Event, Parser as MdParser, Tag, TagEnd};
 use rustyline::config::Configurer;
 use rustyline::{ColorMode, DefaultEditor};
+use serde::Deserialize;
+use tokio::io::AsyncBufReadExt;
 
 use app::{event_channel, hydrate_from_store, AppEvent, AppState, SharedState};
 use config::Config;
 use engine::Engine;
-use error::Result;
+use error::{CoworkerError, Result};
 use store::open_store;
 
 use agent::chat_loop::{ChatProgress, ChatTurnResult, ResumeChatAfterApproval};
@@ -37,7 +41,7 @@ use agent::chat_loop::{ChatProgress, ChatTurnResult, ResumeChatAfterApproval};
 #[command(
     name = "unistar-coworker",
     about = "Local GitHub ops secretary with TUI",
-    after_help = "EXAMPLES:\n    unistar-coworker                                  TUI (default)\n    unistar-coworker serve                            Web UI server\n    unistar-coworker chat                             interactive chat REPL\n    unistar-coworker chat --once \"summarize PR 123\" --json\n    unistar-coworker run-once --workflow daily-work\n    unistar-coworker triage-pr --repo acme/widget --pr 42 --json\n    unistar-coworker report oncall\n    unistar-coworker store compact --dry-run --audit-days 30\n\nGlobal flags (--config / -v / -q / --attach) go before the subcommand."
+    after_help = "EXAMPLES:\n    unistar-coworker tui                                  Terminal UI (default)\n    unistar-coworker serve                            Web UI server\n    unistar-coworker chat                             interactive chat REPL\n    unistar-coworker chat --once \"summarize PR 123\" --json\n    unistar-coworker run-once --workflow daily-work\n    unistar-coworker triage-pr --repo acme/widget --pr 42 --json\n    unistar-coworker report oncall\n    unistar-coworker store compact --dry-run --audit-days 30\n\nGlobal flags (--config / -v / -q / --attach) go before the subcommand."
 )]
 struct Cli {
     /// Attach to daemon store only — do not start a local cron scheduler
@@ -52,6 +56,9 @@ struct Cli {
     /// Decrease log verbosity to warn
     #[arg(short = 'q', long, global = true)]
     quiet: bool,
+    /// Disable all ANSI color / box-drawing in output (plain text)
+    #[arg(long, global = true)]
+    plain: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -99,6 +106,8 @@ enum Commands {
         #[arg(long)]
         pid_file: Option<PathBuf>,
     },
+    /// Terminal UI with cron scheduler
+    Tui,
     /// Web UI server (browser)
     Serve {
         /// Override config `web.bind` (e.g. 127.0.0.1:8787)
@@ -150,6 +159,70 @@ enum Commands {
         #[command(subcommand)]
         cmd: CatalogCmd,
     },
+    /// Self-check config, GitHub CLI, LLM, MCP servers, and store
+    Doctor {
+        /// Emit machine-readable JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a starter coworker.yaml (does not overwrite unless --force)
+    Init {
+        /// Overwrite an existing coworker.yaml
+        #[arg(long)]
+        force: bool,
+        /// Target path (defaults to ./coworker.yaml)
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Comma-separated repos to seed (e.g. acme/widget,acme/api)
+        #[arg(long)]
+        repos: Option<String>,
+        /// LLM base_url to seed (e.g. http://localhost:11434/v1)
+        #[arg(long)]
+        llm_url: Option<String>,
+    },
+    /// Export stored data (Pi-style session tree: JSONL + HTML)
+    Export {
+        #[command(subcommand)]
+        target: ExportTarget,
+    },
+    /// JSONL RPC over stdin/stdout (Pi-style machine protocol: chat / get_state / cancel)
+    Rpc {
+        /// Resume an existing chat session (auto-created if omitted)
+        #[arg(long)]
+        session: Option<uuid::Uuid>,
+        /// Auto-approve mutating tools instead of pausing for approval
+        #[arg(long)]
+        yes: bool,
+        /// Wall-clock turn timeout in seconds
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
+    /// Generate shell completion scripts (bash / zsh / fish / powershell)
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExportTarget {
+    /// Export a full chat session (active branch: user/assistant/tool messages)
+    Session {
+        /// Chat session id
+        id: uuid::Uuid,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = ExportFormat::Jsonl)]
+        format: ExportFormat,
+        /// Write to this file instead of stdout
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum ExportFormat {
+    Jsonl,
+    Html,
 }
 
 #[derive(Subcommand)]
@@ -211,9 +284,17 @@ enum ReportKind {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    if let Err(e) = run_cli().await {
+        eprintln!("{} {e}", err_prefix());
+        std::process::exit(exit_codes::exit_code_for_error(&e));
+    }
+}
+
+async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
-    let tui_mode = cli.command.is_none();
+    set_plain(cli.plain);
+    let tui_mode = matches!(cli.command, None | Some(Commands::Tui));
     // Interactive chat REPL: sink tracing so INFO/WARN logs don't interleave
     // with the in-place reasoning preview and streamed reply on the terminal.
     // (`chat --once` / `--list-sessions` stay on stderr — they're headless.)
@@ -233,10 +314,41 @@ async fn main() -> Result<()> {
     if cli.attach
         && !matches!(
             cli.command,
-            None | Some(Commands::Serve { .. }) | Some(Commands::Daemon { .. })
+            None | Some(Commands::Tui)
+                | Some(Commands::Serve { .. })
+                | Some(Commands::Daemon { .. })
         )
     {
-        eprintln!("warning: --attach has no effect for this subcommand (only TUI / serve / daemon consume it)");
+        eprintln!(
+            "{} --attach has no effect for this subcommand (only TUI / serve / daemon consume it)",
+            warn_prefix()
+        );
+    }
+
+    // `doctor`, `init`, and `completions` run without the full config/store load.
+    if let Some(Commands::Completions { shell }) = &cli.command {
+        let mut cmd = Cli::command();
+        clap_complete::generate(*shell, &mut cmd, "unistar-coworker", &mut std::io::stdout());
+        return Ok(());
+    }
+    if let Some(Commands::Doctor { json }) = &cli.command {
+        return run_doctor(cli.config.clone(), *json).await;
+    }
+    if let Some(Commands::Init {
+        force,
+        path,
+        repos,
+        llm_url,
+    }) = &cli.command
+    {
+        return run_init(
+            *force,
+            cli.config.clone(),
+            path.clone(),
+            repos.clone(),
+            llm_url.clone(),
+        )
+        .await;
     }
 
     let (config, config_path) = match &cli.config {
@@ -259,14 +371,17 @@ async fn main() -> Result<()> {
                         Ok(r) => r,
                         Err(_) => {
                             if json {
-                                println!(
-                                    "{}",
-                                    serde_json::json!({ "ok": false, "workflow": workflow, "error": "timeout" })
+                                emit_json(
+                                    serde_json::json!({ "ok": false, "workflow": workflow, "error": "timeout" }),
                                 );
                             } else {
-                                eprintln!("error: timeout after {secs}s");
+                                eprintln!("{} after {secs}s", timeout_prefix());
+                                eprintln!(
+                                    "  {} increase --timeout or check LLM latency",
+                                    hint_prefix()
+                                );
                             }
-                            std::process::exit(124);
+                            std::process::exit(exit_codes::EXIT_TIMEOUT);
                         }
                     }
                 }
@@ -275,9 +390,8 @@ async fn main() -> Result<()> {
             match outcome {
                 Ok(msg) => {
                     if json {
-                        println!(
-                            "{}",
-                            serde_json::json!({ "ok": true, "workflow": workflow, "message": msg })
+                        emit_json(
+                            serde_json::json!({ "ok": true, "workflow": workflow, "message": msg }),
                         );
                     } else {
                         println!("{msg}");
@@ -285,14 +399,13 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     if json {
-                        println!(
-                            "{}",
-                            serde_json::json!({ "ok": false, "workflow": workflow, "error": e.to_string() })
+                        emit_json(
+                            serde_json::json!({ "ok": false, "workflow": workflow, "error": e.to_string() }),
                         );
                     } else {
                         eprintln!("{} {e}", err_prefix());
                     }
-                    std::process::exit(1);
+                    std::process::exit(exit_codes::EXIT_GENERAL);
                 }
             }
         }
@@ -309,6 +422,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Daemon { pid_file }) => {
             run_daemon(config, store, pid_file).await?;
+        }
+        Some(Commands::Tui) | None => {
+            run_tui(config, config_path, store, cli.attach).await?;
         }
         Some(Commands::Serve { bind }) => {
             run_web(config, config_path, store, cli.attach, bind).await?;
@@ -332,14 +448,27 @@ async fn main() -> Result<()> {
         Some(Commands::Store { cmd }) => {
             run_store_cmd(config, cmd).await?;
         }
+        Some(Commands::Export { target }) => {
+            run_export_cmd(store.as_ref(), target).await?;
+        }
+        Some(Commands::Rpc {
+            session,
+            yes,
+            timeout,
+        }) => {
+            run_rpc(config, store, session, yes, timeout).await?;
+        }
         Some(Commands::Workflows { cmd }) => {
             run_workflows_list(cmd).await?;
         }
         Some(Commands::Skills { cmd }) => {
             run_catalog_list("skills", "SKILL.md", cmd).await?;
         }
-        None => {
-            run_tui(config, config_path, store, cli.attach).await?;
+        // Handled by the early returns above (can run without a config).
+        Some(Commands::Doctor { .. })
+        | Some(Commands::Init { .. })
+        | Some(Commands::Completions { .. }) => {
+            unreachable!()
         }
     }
     Ok(())
@@ -372,23 +501,23 @@ async fn run_report(config: &Config, store: &dyn store::Store, kind: ReportKind)
                 if let Some(s) = since {
                     obj["since_days"] = serde_json::json!(s);
                 }
-                println!("{obj}");
-            } else if kind == "oncall" {
-                println!("{md}");
+                emit_json(obj);
             } else {
-                print!("{md}");
+                let tty = use_color_stdout();
+                // Render markdown (headings cyan, code dim, rules) on a TTY for a
+                // cleaner handoff pack; keep raw markdown when piped.
+                println!("{}", render_markdown(&md, tty));
             }
         }
         Err(e) => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "ok": false, "kind": "report", "error": e.to_string() })
+                emit_json(
+                    serde_json::json!({ "ok": false, "kind": "report", "error": e.to_string() }),
                 );
             } else {
                 eprintln!("{} {e}", err_prefix());
             }
-            std::process::exit(1);
+            std::process::exit(exit_codes::EXIT_GENERAL);
         }
     }
     Ok(())
@@ -407,7 +536,7 @@ fn parse_storage_backend(name: &str) -> Result<config::StorageBackend> {
 
 async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<()> {
     use config::expand_tilde;
-    use store::{compact, format_compact_summary, format_migrate_summary, migrate, CompactOptions};
+    use store::{compact, migrate, CompactOptions};
 
     match cmd {
         StoreCommands::Migrate {
@@ -422,7 +551,8 @@ async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<()> {
             let dest_path = expand_tilde(&dest);
             let stats =
                 migrate(from, to, source_path, dest_path.clone(), config.storage.wal).await?;
-            println!("{}", format_migrate_summary(&stats));
+            let tty = use_color_stdout();
+            println!("{}", render_migrate_summary(&stats, tty));
             eprintln!(
                 "Update coworker.yaml storage.backend to {:?} and storage.path to {}",
                 to,
@@ -448,18 +578,21 @@ async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<()> {
                 config.storage.wal,
                 &opts,
             )?;
+            let tty = use_color_stdout();
             if dry_run {
-                println!(
-                    "DRY RUN — nothing was deleted.\n{}",
-                    format_compact_summary(&stats)
-                );
+                if tty {
+                    eprintln!("{}", yellow("⚠ DRY-RUN — nothing was deleted.", true));
+                } else {
+                    eprintln!("DRY RUN — nothing was deleted.");
+                }
+                println!("{}", render_compact_summary(&stats, true, tty));
                 eprintln!(
                     "(would compact {:?} store at {})",
                     config.storage.backend,
                     path.display()
                 );
             } else {
-                println!("{}", format_compact_summary(&stats));
+                println!("{}", render_compact_summary(&stats, false, tty));
                 eprintln!(
                     "compacted {:?} store at {}",
                     config.storage.backend,
@@ -468,6 +601,508 @@ async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Export a chat session (Pi-style session tree) to JSONL or a standalone HTML
+/// file. Uses the active branch so a forked conversation exports as a coherent
+/// transcript rather than the flat message log.
+async fn run_export_cmd(store: &dyn store::Store, target: ExportTarget) -> Result<()> {
+    let ExportTarget::Session { id, format, output } = target;
+    let session = store
+        .get_chat_session(&id)
+        .await?
+        .ok_or_else(|| CoworkerError::Workflow(format!("unknown chat session {id}")))?;
+    let messages = store
+        .list_active_branch_messages(&session, usize::MAX)
+        .await?;
+    let rendered = match format {
+        ExportFormat::Jsonl => export_session_jsonl(&session, &messages),
+        ExportFormat::Html => export_session_html(&session, &messages),
+    };
+    match output {
+        Some(path) => {
+            std::fs::write(&path, rendered)
+                .map_err(|e| CoworkerError::Workflow(format!("write {}: {e}", path.display())))?;
+            eprintln!("exported session {id} -> {}", path.display());
+        }
+        None => {
+            print!("{rendered}");
+        }
+    }
+    Ok(())
+}
+
+fn export_session_jsonl(
+    session: &store::model::ChatSession,
+    messages: &[store::model::ChatMessage],
+) -> String {
+    let mut out = String::new();
+    let meta = serde_json::json!({
+        "type": "session",
+        "id": session.id.to_string(),
+        "title": session.title,
+        "created_at": session.created_at.to_rfc3339(),
+        "repo_scope": session.repo_scope,
+        "active_leaf_message_id": session.active_leaf_message_id.map(|u| u.to_string()),
+    });
+    out.push_str(&serde_json::to_string(&meta).unwrap());
+    out.push('\n');
+    for m in messages {
+        let line = serde_json::json!({
+            "type": "message",
+            "id": m.id.to_string(),
+            "parent_message_id": m.parent_message_id.map(|u| u.to_string()),
+            "branch_index": m.branch_index,
+            "role": serde_json::to_value(m.role).unwrap(),
+            "content": m.content,
+            "ts": m.ts.to_rfc3339(),
+            "tool_name": m.tool_name,
+            "tool_calls_json": m.tool_calls_json,
+            "reasoning_original": m.reasoning_original,
+        });
+        out.push_str(&serde_json::to_string(&line).unwrap());
+        out.push('\n');
+    }
+    out
+}
+
+fn export_session_html(
+    session: &store::model::ChatSession,
+    messages: &[store::model::ChatMessage],
+) -> String {
+    let mut body = String::new();
+    for m in messages {
+        let role = match m.role {
+            store::model::ChatRole::User => "user",
+            store::model::ChatRole::Assistant => "assistant",
+            store::model::ChatRole::Tool => "tool",
+            store::model::ChatRole::Harness => "harness",
+            store::model::ChatRole::Reasoning => "reasoning",
+        };
+        let content = crate::agent::redact::redact_json_str(&m.content);
+        let label = match &m.tool_name {
+            Some(t) => format!("{role}: {t}"),
+            None => role.to_string(),
+        };
+        body.push_str(&format!(
+            "<div class=\"msg {role}\"><div class=\"role\">{label}</div><pre>{escaped}</pre></div>\n",
+            role = role,
+            label = html_escape(&label),
+            escaped = html_escape(&content),
+        ));
+    }
+    let title = html_escape(&session.title);
+    format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>{title}</title>\
+<style>body{{font-family:system-ui,sans-serif;margin:2rem;line-height:1.5}}\
+.msg{{border:1px solid #ddd;border-radius:8px;padding:.75rem;margin:.75rem 0}}\
+.role{{font-weight:600;font-size:.8rem;text-transform:uppercase;color:#666;margin-bottom:.25rem}}\
+pre{{white-space:pre-wrap;word-break:break-word;margin:0}}\
+.user{{background:#f0f7ff}}.assistant{{background:#f0fff4}}.tool{{background:#fff7f0}}\
+.harness{{background:#fafafa}}.reasoning{{background:#fdf6ff}}</style>\
+</head><body><h1>{title}</h1>{body}</body></html>\n",
+        title = title,
+        body = body,
+    )
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// JSONL RPC server: read one JSON request per line from stdin, write one or
+/// more JSON response lines to stdout (Pi-style machine protocol). Requests:
+/// `{"op":"chat","message":"..."}`, `{"op":"get_state"}`, `{"op":"cancel"}`,
+/// `{"op":"switch_profile","profile":"fast"}`.
+async fn run_rpc(
+    config: Config,
+    store: Arc<dyn store::Store>,
+    session: Option<uuid::Uuid>,
+    yes: bool,
+    timeout: Option<u64>,
+) -> Result<()> {
+    if !config.chat.enabled {
+        return Err(CoworkerError::Workflow(
+            "chat disabled — set chat.enabled: true in coworker.yaml".into(),
+        ));
+    }
+    let (tx, _rx) = event_channel();
+    let event_tx = tx.clone();
+    let state: SharedState = Arc::new(tokio::sync::RwLock::new(AppState::new(
+        config.clone(),
+        "rpc".into(),
+    )));
+    let engine = Arc::new(Engine::new(config, Arc::clone(&store), tx, Arc::clone(&state)).await);
+    let mut rx = event_tx.subscribe();
+
+    let progress_tx = event_tx.clone();
+    tokio::spawn(async move {
+        let mut prx = progress_tx.subscribe();
+        while let Ok(ev) = prx.recv().await {
+            if let crate::app::AppEvent::ChatProgress(p) = ev {
+                if let Some(line) = rpc_progress_json(&p) {
+                    println!("{line}");
+                }
+            }
+        }
+    });
+
+    let mut session_id = session;
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|e| CoworkerError::Workflow(e.to_string()))?
+    {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let req: RpcRequest = match serde_json::from_str(line) {
+            Ok(r) => r,
+            Err(e) => {
+                emit_json(serde_json::json!({
+                    "type": "error",
+                    "code": "bad_request",
+                    "error": e.to_string()
+                }));
+                continue;
+            }
+        };
+        match req.op.as_str() {
+            "chat" => {
+                let msg = req.message.unwrap_or_default();
+                if let Err(e) =
+                    run_rpc_turn(&engine, &mut rx, &mut session_id, &msg, yes, timeout).await
+                {
+                    emit_json(serde_json::json!({
+                        "type": "error",
+                        "code": "turn_failed",
+                        "error": e.to_string()
+                    }));
+                }
+            }
+            "get_state" => {
+                let s = state.read().await;
+                let snap = crate::web::snapshot::build_snapshot_from(&s);
+                emit_json(serde_json::json!({ "type": "state", "snapshot": snap }));
+            }
+            "cancel" => {
+                engine.request_chat_cancel();
+                emit_json(serde_json::json!({ "type": "cancelled" }));
+            }
+            "switch_profile" => match engine.switch_llm_profile(&req.profile).await {
+                Ok(()) => emit_json(serde_json::json!({
+                    "type": "profile",
+                    "profile": req.profile
+                })),
+                Err(e) => emit_json(serde_json::json!({
+                    "type": "error",
+                    "code": "profile",
+                    "error": e.to_string()
+                })),
+            },
+            other => emit_json(serde_json::json!({
+                "type": "error",
+                "code": "unknown_op",
+                "op": other
+            })),
+        }
+    }
+    Ok(())
+}
+
+async fn run_rpc_turn(
+    engine: &Arc<Engine>,
+    rx: &mut tokio::sync::broadcast::Receiver<crate::app::AppEvent>,
+    session_id: &mut Option<uuid::Uuid>,
+    msg: &str,
+    yes: bool,
+    timeout: Option<u64>,
+) -> Result<()> {
+    let run_once = async {
+        let (mut result, _streamed, mut pending) = run_turn_with_progress(
+            engine,
+            rx,
+            true,
+            None,
+            false,
+            engine.run_chat(*session_id, msg),
+        )
+        .await?;
+        while result.awaiting_approval {
+            let pa = match pending {
+                Some(p) => p,
+                None => break,
+            };
+            if !yes {
+                emit_json(serde_json::json!({
+                    "type": "error",
+                    "code": "approval_required",
+                    "session_id": result.session_id,
+                    "pending_approval": {
+                        "tool": pa.tool_name,
+                        "args": crate::agent::redact::redact_json_str(&pa.tool_args_json),
+                        "description": pa.description,
+                    }
+                }));
+                break;
+            }
+            let detail = engine
+                .decide_approval(&pa.approval_id, true)
+                .await
+                .unwrap_or_default();
+            let tool_args =
+                serde_json::from_str(&pa.tool_args_json).unwrap_or_else(|_| serde_json::json!({}));
+            let resume = crate::agent::chat_loop::ResumeChatAfterApproval {
+                approval_id: pa.approval_id,
+                approved: true,
+                detail,
+                tool_name: pa.tool_name.clone(),
+                tool_args,
+            };
+            let (r, _s, p) = run_turn_with_progress(
+                engine,
+                rx,
+                true,
+                None,
+                false,
+                engine.resume_chat_after_approval(pa.session_id, resume),
+            )
+            .await?;
+            result = r;
+            pending = p;
+        }
+        Ok::<_, CoworkerError>(result)
+    };
+    let result = match timeout {
+        Some(secs) => {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), run_once).await {
+                Ok(r) => r?,
+                Err(_) => {
+                    emit_json(serde_json::json!({ "type": "error", "code": "timeout" }));
+                    return Ok(());
+                }
+            }
+        }
+        None => run_once.await?,
+    };
+    emit_json(serde_json::json!({
+        "type": "result",
+        "ok": true,
+        "session_id": result.session_id,
+        "assistant": result.assistant_message,
+        "tool_calls": result
+            .tool_calls
+            .iter()
+            .map(|tc| serde_json::json!({ "tool": tc.tool_name, "output": tc.output }))
+            .collect::<Vec<_>>(),
+        "awaiting_approval": result.awaiting_approval,
+    }));
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RpcRequest {
+    op: String,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    profile: String,
+}
+
+/// Map a streaming `ChatProgress` event to a single-line JSON progress record
+/// for the RPC protocol (returns `None` for events with no RPC-relevant info).
+fn rpc_progress_json(p: &crate::agent::chat_loop::ChatProgress) -> Option<String> {
+    use crate::agent::chat_loop::ChatProgress;
+    let v = match p {
+        ChatProgress::TurnThinking { turn, elapsed_secs } => {
+            serde_json::json!({"stage": "thinking", "turn": turn, "elapsed_secs": elapsed_secs})
+        }
+        ChatProgress::ToolStart { name, args_short } => {
+            serde_json::json!({"stage": "tool_start", "name": name, "args": args_short})
+        }
+        ChatProgress::ToolDone {
+            name,
+            ok,
+            elapsed_ms,
+            ..
+        } => {
+            serde_json::json!({"stage": "tool_done", "name": name, "ok": ok, "elapsed_ms": elapsed_ms})
+        }
+        ChatProgress::AssistantPartial { text } => {
+            serde_json::json!({"stage": "assistant", "text": text})
+        }
+        ChatProgress::ReasoningPartial { text } => {
+            serde_json::json!({"stage": "reasoning", "text": text})
+        }
+        ChatProgress::ApprovalQueued {
+            tool_name,
+            description,
+            ..
+        } => {
+            serde_json::json!({"stage": "approval", "tool": tool_name, "description": description})
+        }
+        ChatProgress::ApprovalResolved {
+            tool_name,
+            approved,
+            ..
+        } => {
+            serde_json::json!({"stage": "approval_resolved", "tool": tool_name, "approved": approved})
+        }
+        ChatProgress::ReasoningSummary { preview, .. } => {
+            serde_json::json!({"stage": "reasoning_summary", "preview": preview})
+        }
+        ChatProgress::ActivityFlow { text, .. } => {
+            serde_json::json!({"stage": "activity", "text": text})
+        }
+        _ => return None,
+    };
+    Some(serde_json::to_string(&serde_json::json!({"type": "progress", "progress": v})).unwrap())
+}
+
+/// Two-column, colored summary of a store migration (P0-3).
+fn render_migrate_summary(stats: &store::MigrateStats, tty: bool) -> String {
+    table(
+        &["category", "count"],
+        &[
+            vec!["digests".into(), stats.digests.to_string()],
+            vec!["pr_snapshots".into(), stats.pr_snapshots.to_string()],
+            vec!["approvals".into(), stats.approvals.to_string()],
+            vec!["backport_items".into(), stats.backport_items.to_string()],
+            vec!["chat_messages".into(), stats.chat_messages.to_string()],
+        ],
+        tty,
+    )
+}
+
+/// Two-column summary with a proportion bar per category (P0-3 + P1-2).
+fn render_compact_summary(stats: &store::CompactStats, dry_run: bool, tty: bool) -> String {
+    let rows = [
+        ("audit entries", stats.audit_entries_removed),
+        ("audit files", stats.audit_files_removed),
+        ("digests", stats.digests_removed),
+        ("workflow runs", stats.workflow_runs_removed),
+    ];
+    let max = rows.iter().map(|(_, n)| *n).max().unwrap_or(0).max(1);
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    for (label, n) in rows {
+        let bar = if tty {
+            progress_bar((n as f64 / max as f64) * 100.0, 12, true)
+        } else {
+            String::new()
+        };
+        table_rows.push(vec![label.into(), n.to_string(), bar]);
+    }
+    let title = if dry_run { "would remove" } else { "removed" };
+    if tty {
+        format!(
+            "{}\n{}",
+            bold(title, true),
+            table(&["category", "count", "bar"], &table_rows, tty)
+        )
+    } else {
+        table(&["category", "count"], &table_rows, tty)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `doctor` — self-check config / gh / LLM / MCP / store (shared with Web API).
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn run_doctor(config_override: Option<PathBuf>, json: bool) -> Result<()> {
+    let report = diagnostics::run_checks(config_override).await;
+    let tty = use_color_stdout();
+    if json {
+        emit_json(serde_json::to_value(&report).unwrap_or_default());
+    } else {
+        for c in &report.checks {
+            let icon = match c.status {
+                "ok" => green("✓", tty),
+                "warn" => yellow("⚠", tty),
+                _ => red("✗", tty),
+            };
+            println!("{icon} {:<8} {}", c.name, c.detail);
+            if let Some(hint) = &c.hint {
+                if c.status == "fail" {
+                    println!("         {} {hint}", hint_prefix());
+                }
+            }
+        }
+        println!(
+            "{} {} ok, {} warn, {} fail",
+            bold("summary:", tty),
+            report.ok,
+            report.warn,
+            report.fail
+        );
+    }
+    if report.has_failures() {
+        std::process::exit(exit_codes::EXIT_CONFIG);
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `init` — create a starter coworker.yaml (P1-1).
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn run_init(
+    force: bool,
+    config_override: Option<PathBuf>,
+    path: Option<PathBuf>,
+    repos: Option<String>,
+    llm_url: Option<String>,
+) -> Result<()> {
+    let target = path
+        .or(config_override)
+        .unwrap_or_else(|| PathBuf::from("coworker.yaml"));
+    if target.exists() && !force {
+        eprintln!(
+            "{} already exists — use --force to overwrite",
+            target.display()
+        );
+        return Ok(());
+    }
+
+    let template = include_str!("../coworker.example.yaml");
+    let mut lines: Vec<String> = template.lines().map(String::from).collect();
+
+    if let Some(repos) = &repos {
+        if let Some(idx) = lines.iter().position(|l| l.trim() == "repos:") {
+            let j = idx + 1;
+            while j < lines.len() && lines[j].starts_with("  - ") {
+                lines.remove(j);
+            }
+            for (k, r) in repos.split(',').enumerate() {
+                let r = r.trim();
+                if !r.is_empty() {
+                    lines.insert(idx + 1 + k, format!("  - {r}"));
+                }
+            }
+        }
+    }
+    if let Some(url) = &llm_url {
+        if let Some(idx) = lines.iter().position(|l| {
+            let t = l.trim_start();
+            t.starts_with("base_url:") && !t.starts_with('#')
+        }) {
+            lines[idx] = format!("  base_url: {url}");
+        }
+    }
+
+    std::fs::write(&target, lines.join("\n"))?;
+    let tty = use_color_stdout();
+    println!("{} created {}", green("◆", tty), target.display());
+    eprintln!(
+        "  {} edit `repos:` and `llm.base_url`, then run 'unistar-coworker doctor' to verify",
+        hint_prefix()
+    );
     Ok(())
 }
 
@@ -486,16 +1121,19 @@ async fn run_workflows_list(cmd: CatalogCmd) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::json!(items));
+        emit_json(serde_json::json!(items));
     } else {
+        let tty = use_color_stdout();
+        let mut rows: Vec<Vec<String>> = Vec::new();
         for wf in WORKFLOWS {
             let skills = if wf.default_skills.is_empty() {
                 "—".into()
             } else {
                 wf.default_skills.join(", ")
             };
-            println!("{}\t{}\tskills: {skills}", wf.id, wf.description);
+            rows.push(vec![wf.id.to_string(), wf.description.to_string(), skills]);
         }
+        println!("{}", table(&["id", "description", "skills"], &rows, tty));
     }
     Ok(())
 }
@@ -508,9 +1146,9 @@ async fn run_catalog_list(root: &str, leaf: &str, cmd: CatalogCmd) -> Result<()>
     let root_path = Path::new(root);
     if !root_path.is_dir() {
         if json {
-            println!("[]");
+            emit_json(serde_json::json!([]));
         } else {
-            println!("(no {root}/ directory)");
+            eprintln!("(no {root}/ directory)");
         }
         return Ok(());
     }
@@ -521,6 +1159,7 @@ async fn run_catalog_list(root: &str, leaf: &str, cmd: CatalogCmd) -> Result<()>
     entries.sort_by_key(|e| e.file_name());
 
     let mut json_items: Vec<serde_json::Value> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with('_') {
@@ -546,6 +1185,7 @@ async fn run_catalog_list(root: &str, leaf: &str, cmd: CatalogCmd) -> Result<()>
                 } else {
                     spec.description
                 };
+                let skills = spec.skill_refs.join(", ");
                 if json {
                     json_items.push(serde_json::json!({
                         "name": title,
@@ -554,10 +1194,16 @@ async fn run_catalog_list(root: &str, leaf: &str, cmd: CatalogCmd) -> Result<()>
                         "skills": spec.skill_refs,
                     }));
                 } else {
-                    println!("{title}\t{}\t{desc}", path.display());
-                    if !spec.skill_refs.is_empty() {
-                        println!("  skills: {}", spec.skill_refs.join(", "));
-                    }
+                    rows.push(vec![
+                        title,
+                        path.display().to_string(),
+                        desc,
+                        if skills.is_empty() {
+                            "—".into()
+                        } else {
+                            skills
+                        },
+                    ]);
                 }
             }
             Err(e) => {
@@ -566,7 +1212,13 @@ async fn run_catalog_list(root: &str, leaf: &str, cmd: CatalogCmd) -> Result<()>
         }
     }
     if json {
-        println!("{}", serde_json::json!(json_items));
+        emit_json(serde_json::json!(json_items));
+    } else {
+        let tty = use_color_stdout();
+        println!(
+            "{}",
+            table(&["name", "path", "description", "skills"], &rows, tty)
+        );
     }
     Ok(())
 }
@@ -621,14 +1273,17 @@ async fn run_triage_pr(
                 Ok(r) => r?,
                 Err(_) => {
                     if json {
-                        println!(
-                            "{}",
-                            serde_json::json!({ "ok": false, "repo": repo, "pr": pr_number, "error": "timeout" })
+                        emit_json(
+                            serde_json::json!({ "ok": false, "repo": repo, "pr": pr_number, "error": "timeout" }),
                         );
                     } else {
-                        eprintln!("error: timeout after {secs}s");
+                        eprintln!("{} after {secs}s", timeout_prefix());
+                        eprintln!(
+                            "  {} increase --timeout or check LLM latency",
+                            hint_prefix()
+                        );
                     }
-                    std::process::exit(124);
+                    std::process::exit(exit_codes::EXIT_TIMEOUT);
                 }
             }
         }
@@ -646,24 +1301,39 @@ async fn run_triage_pr(
                 })
             })
             .collect();
+        emit_json(serde_json::json!({
+            "ok": true,
+            "repo": repo,
+            "pr": pr_number,
+            "preamble": outcome.preamble,
+            "fallback_attention": outcome.fallback_attention,
+            "runs": runs,
+        }));
+    } else {
+        let tty = use_color_stdout();
         println!(
             "{}",
-            serde_json::json!({
-                "ok": true,
-                "repo": repo,
-                "pr": pr_number,
-                "preamble": outcome.preamble,
-                "fallback_attention": outcome.fallback_attention,
-                "runs": runs,
-            })
+            panel(
+                &format!("◆ Triage {repo}#{pr_number}"),
+                &outcome
+                    .preamble
+                    .iter()
+                    .map(|l| l.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                tty
+            )
         );
-    } else {
-        println!("# Triage {repo}#{pr_number}\n");
-        for line in outcome.preamble {
-            println!("{line}");
-        }
         for run in &outcome.runs {
-            println!("\n## {:?}\n", run.verdict);
+            let verdict = format!("{:?}", run.verdict);
+            let colored = if verdict.to_lowercase().starts_with("pass") {
+                green(&verdict, tty)
+            } else if verdict.to_lowercase().starts_with("fail") {
+                red(&verdict, tty)
+            } else {
+                yellow(&verdict, tty)
+            };
+            println!("\n{} {}", bold("verdict:", tty), colored);
             for line in &run.lines {
                 println!("{line}");
             }
@@ -739,6 +1409,26 @@ async fn run_headless(
     Ok(msg)
 }
 
+/// Spawn a task that hot-reloads config/LLM/MCP on SIGHUP (Pi-style `/reload`
+/// without restart). No-op on non-unix platforms.
+#[cfg(unix)]
+fn spawn_sighup_reload(engine: Arc<Engine>) {
+    use tokio::signal::unix::{signal, SignalKind};
+    tokio::spawn(async move {
+        match signal(SignalKind::hangup()) {
+            Ok(mut s) => {
+                while s.recv().await.is_some() {
+                    engine.reload_all().await;
+                }
+            }
+            Err(e) => tracing::warn!("SIGHUP handler init failed: {e}"),
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_sighup_reload(_engine: Arc<Engine>) {}
+
 async fn run_daemon(
     config: Config,
     store: Arc<dyn store::Store>,
@@ -750,6 +1440,7 @@ async fn run_daemon(
         "daemon".into(),
     )));
     let engine = Arc::new(Engine::new(config, Arc::clone(&store), tx, Arc::clone(&state)).await);
+    spawn_sighup_reload(Arc::clone(&engine));
     engine.clone().spawn_background();
     engine.clone().spawn_scheduler();
 
@@ -845,19 +1536,24 @@ async fn run_chat_cli(
                                 "session_id": result.session_id,
                                 "pending_approval": serde_json::json!({
                                     "tool": pa.tool_name,
-                                    "args": pa.tool_args_json,
+                                    "args": crate::agent::redact::redact_json_str(&pa.tool_args_json),
                                     "description": pa.description,
                                 }),
                             })
                         );
                     } else {
                         eprintln!(
-                            "awaiting approval for `{}` — {}",
-                            pa.tool_name, pa.description
+                            "{} for `{}` — {}",
+                            warn_prefix().replace("warning:", "approval required"),
+                            pa.tool_name,
+                            pa.description
                         );
-                        eprintln!("  re-run with --yes to auto-approve, or use interactive `chat` to approve per-tool.");
+                        eprintln!(
+                            "  {} re-run with --yes to auto-approve, or use interactive `chat` to approve per-tool.",
+                            hint_prefix()
+                        );
                     }
-                    std::process::exit(2);
+                    std::process::exit(exit_codes::EXIT_APPROVAL);
                 }
                 let detail = engine
                     .decide_approval(&pa.approval_id, true)
@@ -897,11 +1593,15 @@ async fn run_chat_cli(
                     Ok(r) => r,
                     Err(_) => {
                         if json {
-                            println!("{}", serde_json::json!({ "ok": false, "error": "timeout" }));
+                            emit_json(serde_json::json!({ "ok": false, "error": "timeout" }));
                         } else {
-                            eprintln!("error: timeout after {secs}s");
+                            eprintln!("{} after {secs}s", timeout_prefix());
+                            eprintln!(
+                                "  {} increase --timeout or check LLM latency",
+                                hint_prefix()
+                            );
                         }
-                        std::process::exit(124);
+                        std::process::exit(exit_codes::EXIT_TIMEOUT);
                     }
                 }
             }
@@ -917,16 +1617,13 @@ async fn run_chat_cli(
                         .iter()
                         .map(|tc| serde_json::json!({ "tool": tc.tool_name, "output": tc.output }))
                         .collect();
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "ok": true,
-                            "session_id": result.session_id,
-                            "assistant": result.assistant_message,
-                            "tool_calls": tools,
-                            "awaiting_approval": result.awaiting_approval,
-                        })
-                    );
+                    emit_json(serde_json::json!({
+                        "ok": true,
+                        "session_id": result.session_id,
+                        "assistant": result.assistant_message,
+                        "tool_calls": tools,
+                        "awaiting_approval": result.awaiting_approval,
+                    }));
                 } else {
                     if !streamed {
                         println!("{}", result.assistant_message);
@@ -938,14 +1635,11 @@ async fn run_chat_cli(
             }
             Err(e) => {
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({ "ok": false, "error": e.to_string() })
-                    );
+                    emit_json(serde_json::json!({ "ok": false, "error": e.to_string() }));
                 } else {
                     eprintln!("{} {e}", err_prefix());
                 }
-                std::process::exit(1);
+                std::process::exit(exit_codes::EXIT_GENERAL);
             }
         }
     }
@@ -1008,22 +1702,31 @@ async fn run_chat_cli(
                             continue;
                         }
                     };
-                    let msgs = match store.list_chat_messages(&sid, 200).await {
+                    let session = match store.get_chat_session(&sid).await {
+                        Ok(Some(s)) => s,
+                        _ => {
+                            eprintln!("(session not found)");
+                            continue;
+                        }
+                    };
+                    let branch = match store.list_active_branch_messages(&session, 200).await {
                         Ok(m) => m,
                         Err(e) => {
                             eprintln!("{} {e}", err_prefix());
                             continue;
                         }
                     };
-                    let last_user = msgs
+                    let last_assistant = branch
                         .iter()
                         .rev()
-                        .find(|m| m.role == store::model::ChatRole::User)
-                        .map(|m| m.content.clone());
-                    match last_user {
-                        Some(m) => {
-                            eprintln!("(retrying: {m})");
-                            match run_repl_turn(&engine, &mut rx, &rl, Some(sid), &m).await {
+                        .find(|m| m.role == store::model::ChatRole::Assistant)
+                        .map(|m| m.id);
+                    match last_assistant {
+                        Some(aid) => {
+                            eprintln!("(regenerating branch from assistant {aid})");
+                            match run_repl_turn(&engine, &mut rx, &rl, Some(sid), "", Some(aid))
+                                .await
+                            {
                                 Ok((s, reply)) => {
                                     session_id = Some(s);
                                     last_reply = Some(reply);
@@ -1031,7 +1734,7 @@ async fn run_chat_cli(
                                 Err(e) => eprintln!("{} {e}\n", err_prefix()),
                             }
                         }
-                        None => eprintln!("(no user message to retry)"),
+                        None => eprintln!("(no assistant message to regenerate)"),
                     }
                     continue;
                 }
@@ -1088,7 +1791,7 @@ async fn run_chat_cli(
             }
         }
 
-        match run_repl_turn(&engine, &mut rx, &rl, session_id, text).await {
+        match run_repl_turn(&engine, &mut rx, &rl, session_id, text, None).await {
             Ok((s, reply)) => {
                 session_id = Some(s);
                 if let Some(t) = title.take() {
@@ -1163,7 +1866,8 @@ where
             let mut last_thinking: u64 = 0;
             let mut last_len: usize = 0; // assistant reply bytes already printed
             let mut prefix_printed = false;
-            // Clear the in-place status line so the next output starts fresh.
+            let mut spin: u64 = 0; // Braille spinner frame counter (P1-1)
+                                   // Clear the in-place status line so the next output starts fresh.
             macro_rules! clear_inplace {
                 () => {{
                     if inplace_active && stderr_tty {
@@ -1178,34 +1882,45 @@ where
                     AppEvent::ChatProgress(p) => match p {
                         ChatProgress::AssistantPartial { text } if !json && stream_raw => {
                             clear_inplace!();
-                            // `text` is the accumulated reply for the CURRENT
-                            // LLM round (`full` resets each round). When a new
-                            // round's content starts smaller than what we've
-                            // already printed, it's a new segment → reset and
-                            // reprint the prefix so the new segment isn't
-                            // mis-sliced into tail fragments.
                             if text.len() < last_len {
                                 last_len = 0;
                                 prefix_printed = false;
                             }
                             if text.len() > last_len {
-                                let mut out = std::io::stdout().lock();
-                                if !prefix_printed {
-                                    if let Some(pfx) = prefix.as_deref() {
-                                        if std::io::stdout().is_terminal() {
-                                            let _ = out.write_all(
-                                                format!("\x1b[36m{pfx}\x1b[0m").as_bytes(),
-                                            );
-                                        } else {
-                                            let _ = out.write_all(pfx.as_bytes());
+                                let stdout_tty = std::io::stdout().is_terminal();
+                                // P0-4: when stdout is piped (not a TTY), stream
+                                // incremental reply to stderr and keep stdout
+                                // clean for the final result only.
+                                if !stdout_tty {
+                                    let mut out = std::io::stderr().lock();
+                                    let _ = out.write_all(&text.as_bytes()[last_len..]);
+                                    let _ = out.flush();
+                                    last_len = text.len();
+                                    // Do NOT set `streamed` — the final
+                                    // assistant reply will be printed to
+                                    // stdout after the turn completes.
+                                } else {
+                                    let mut out = std::io::stdout().lock();
+                                    if !prefix_printed {
+                                        if let Some(pfx) = prefix.as_deref() {
+                                            if stdout_tty {
+                                                let _ = out.write_all(
+                                                    format!("\x1b[36m{pfx}\x1b[0m").as_bytes(),
+                                                );
+                                            } else {
+                                                let _ = out.write_all(pfx.as_bytes());
+                                            }
+                                        } else if use_color_stdout() {
+                                            let _ = out
+                                                .write_all("\x1b[1;36m◆ reply\x1b[0m\n".as_bytes());
                                         }
+                                        prefix_printed = true;
                                     }
-                                    prefix_printed = true;
+                                    let _ = out.write_all(&text.as_bytes()[last_len..]);
+                                    let _ = out.flush();
+                                    last_len = text.len();
+                                    streamed.store(true, Ordering::Relaxed);
                                 }
-                                let _ = out.write_all(&text.as_bytes()[last_len..]);
-                                let _ = out.flush();
-                                last_len = text.len();
-                                streamed.store(true, Ordering::Relaxed);
                             }
                         }
                         // REPL (stream_raw=false): don't stream the reply to
@@ -1214,14 +1929,18 @@ where
                         // is inactive here, so `\r\x1b[K` is safe — and print the
                         // full rendered reply once at turn end.
                         ChatProgress::AssistantPartial { text } if show_reasoning && stderr_tty => {
-                            eprint!("\r\x1b[K\x1b[2m… {}\x1b[0m", reasoning_tail(&text, 60));
+                            let f = spinner_frame(spin);
+                            spin = spin.wrapping_add(1);
+                            eprint!("\r\x1b[K\x1b[2m{f} {}\x1b[0m", reasoning_tail(&text, 60));
                             inplace_active = true;
                         }
                         // Reasoning tail preview — REPL only (show_reasoning).
                         // Replace on each emit (no append) → no duplication.
                         ChatProgress::ReasoningPartial { text } if show_reasoning && stderr_tty => {
                             seen_reasoning = true;
-                            eprint!("\r\x1b[K\x1b[2m… {}\x1b[0m", reasoning_tail(&text, 60));
+                            let f = spinner_frame(spin);
+                            spin = spin.wrapping_add(1);
+                            eprint!("\r\x1b[K\x1b[2m{f} {}\x1b[0m", reasoning_tail(&text, 60));
                             inplace_active = true;
                         }
                         // Heartbeat only before any reasoning streams; once
@@ -1232,8 +1951,10 @@ where
                             {
                                 last_thinking = elapsed_secs;
                                 if stderr_tty {
+                                    let f = spinner_frame(spin);
+                                    spin = spin.wrapping_add(1);
                                     eprint!(
-                                        "\r\x1b[K\x1b[2m… thinking (turn {turn}, {elapsed_secs}s)\x1b[0m"
+                                        "\r\x1b[K\x1b[2m{f} thinking (turn {turn}, {elapsed_secs}s)\x1b[0m"
                                     );
                                     inplace_active = true;
                                 } else {
@@ -1265,6 +1986,34 @@ where
                         // reasoning-summary line so it never reaches the terminal.
                         ChatProgress::ReasoningSummary { .. } if !json && !show_reasoning => {
                             clear_inplace!();
+                        }
+                        // P1-3: render tool calls as a distinct block (stderr),
+                        // separating them visually from the streamed reply.
+                        ChatProgress::ToolStart { name, args_short } if !json => {
+                            clear_inplace!();
+                            eprintln!(
+                                "{}",
+                                tool_block_start(name.as_str(), args_short.as_str(), stderr_tty)
+                            );
+                        }
+                        ChatProgress::ToolDone {
+                            name,
+                            args_short,
+                            ok,
+                            elapsed_ms,
+                            ..
+                        } if !json => {
+                            clear_inplace!();
+                            eprintln!(
+                                "{}",
+                                tool_block_done(
+                                    name.as_str(),
+                                    args_short.as_str(),
+                                    ok,
+                                    elapsed_ms,
+                                    stderr_tty
+                                )
+                            );
                         }
                         other if !json && other.show_in_log() => {
                             clear_inplace!();
@@ -1336,14 +2085,24 @@ async fn run_repl_turn(
     rl: &Arc<std::sync::Mutex<DefaultEditor>>,
     session_id: Option<uuid::Uuid>,
     message: &str,
+    regenerate_from: Option<uuid::Uuid>,
 ) -> Result<(uuid::Uuid, String)> {
+    let run_future: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ChatTurnResult>> + Send>,
+    > = match regenerate_from {
+        Some(assistant_id) => {
+            let sid = session_id.expect("regenerate requires a session");
+            Box::pin(engine.regenerate_chat(sid, assistant_id))
+        }
+        None => Box::pin(engine.run_chat(session_id, message)),
+    };
     let (mut result, streamed, mut pending) = run_turn_with_progress(
         engine,
         rx,
         false,
         Some("assistant> ".to_string()),
         false,
-        engine.run_chat(session_id, message),
+        run_future,
     )
     .await?;
     print_assistant_reply(&result, streamed);
@@ -1367,7 +2126,10 @@ async fn run_repl_turn(
         } else {
             eprintln!("\napproval required — {}: {}", pa.tool_name, pa.description);
         }
-        eprintln!("  args: {}", pa.tool_args_json);
+        eprintln!(
+            "  args: {}",
+            crate::agent::redact::redact_json_str(&pa.tool_args_json)
+        );
         let approve = prompt_yes_no(rl).await;
         let detail = match engine.decide_approval(&pa.approval_id, approve).await {
             Ok(m) => m,
@@ -1439,30 +2201,270 @@ async fn prompt_yes_no(rl: &Arc<std::sync::Mutex<DefaultEditor>>) -> bool {
 async fn list_chat_sessions(store: &dyn store::Store, json: bool, limit: usize) -> Result<()> {
     let sessions = store.list_chat_sessions(limit).await?;
     if json {
-        println!("{}", serde_json::to_string(&sessions)?);
+        emit_json(serde_json::to_value(&sessions)?);
         return Ok(());
     }
     if sessions.is_empty() {
-        println!("No chat sessions.");
+        eprintln!("(no chat sessions)");
         return Ok(());
     }
+    let tty = use_color_stdout();
+    let mut rows: Vec<Vec<String>> = Vec::new();
     for s in sessions {
-        println!(
-            "{}  {}  {}",
-            s.id,
-            s.created_at.format("%Y-%m-%d %H:%M"),
-            s.title
-        );
+        rows.push(vec![
+            s.id.to_string(),
+            s.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            s.title,
+        ]);
     }
+    println!("{}", table(&["session", "created", "title"], &rows, tty));
     Ok(())
 }
 
-/// `error:` prefix, red on a TTY.
-fn err_prefix() -> String {
-    if std::io::stderr().is_terminal() {
-        "\x1b[31merror:\x1b[0m".to_string()
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI display helpers — TTY-aware, zero new dependencies (reuse crossterm/ANSI).
+// All color/box-drawing is gated behind `use_color_*()`, which is false when the
+// output is not a terminal OR `--plain` was passed, so pipes/files stay clean.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Global `--plain` flag: when set, suppress all ANSI (tables also degrade to
+/// tab-separated text). Set once in `main()` from `cli.plain`.
+static PLAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn set_plain(p: bool) {
+    PLAIN.store(p, Ordering::Relaxed);
+}
+fn use_color_stdout() -> bool {
+    std::io::stdout().is_terminal() && !PLAIN.load(Ordering::Relaxed)
+}
+fn use_color_stderr() -> bool {
+    std::io::stderr().is_terminal() && !PLAIN.load(Ordering::Relaxed)
+}
+
+/// Wrap `s` in an ANSI SGR sequence when `tty`, else return it untouched.
+fn ansi(seq: &str, s: &str, tty: bool) -> String {
+    if tty {
+        format!("\x1b[{seq}m{s}\x1b[0m")
     } else {
-        "error:".to_string()
+        s.to_string()
+    }
+}
+fn cyan(s: &str, tty: bool) -> String {
+    ansi("36", s, tty)
+}
+fn green(s: &str, tty: bool) -> String {
+    ansi("32", s, tty)
+}
+fn red(s: &str, tty: bool) -> String {
+    ansi("31", s, tty)
+}
+fn yellow(s: &str, tty: bool) -> String {
+    ansi("33", s, tty)
+}
+fn purple(s: &str, tty: bool) -> String {
+    ansi("35", s, tty)
+}
+fn dim(s: &str, tty: bool) -> String {
+    ansi("2", s, tty)
+}
+fn bold(s: &str, tty: bool) -> String {
+    ansi("1", s, tty)
+}
+
+/// Display width that treats CJK-range codepoints as width 2 (no extra deps).
+fn disp_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| if (c as u32) >= 0x1100 { 2 } else { 1 })
+        .sum()
+}
+
+/// A box-drawing table. On a TTY renders `┌─┬─┐` borders with aligned columns;
+/// otherwise degrades to tab-separated rows (script-friendly).
+fn table(headers: &[&str], rows: &[Vec<String>], tty: bool) -> String {
+    if !tty {
+        let mut out = String::new();
+        out.push_str(&headers.join("\t"));
+        out.push('\n');
+        for r in rows {
+            out.push_str(&r.join("\t"));
+            out.push('\n');
+        }
+        return out;
+    }
+    let cols = headers.len();
+    let mut widths: Vec<usize> = headers.iter().map(|h| disp_width(h)).collect();
+    for r in rows {
+        for (i, c) in r.iter().enumerate() {
+            if i < cols {
+                widths[i] = widths[i].max(disp_width(c));
+            }
+        }
+    }
+    let mut out = String::new();
+    out.push_str(&hbar(&widths, '┌', '┬', '┐'));
+    out.push_str(&row_line(headers, &widths, true));
+    out.push_str(&hbar(&widths, '├', '┼', '┤'));
+    for r in rows {
+        out.push_str(&row_line(r, &widths, false));
+    }
+    out.push_str(&hbar(&widths, '└', '┴', '┘'));
+    out
+}
+
+fn row_line(cells: &[impl AsRef<str>], widths: &[usize], header: bool) -> String {
+    let mut s = String::from("│ ");
+    for (i, w) in widths.iter().enumerate() {
+        let cell = cells.get(i).map(|c| c.as_ref()).unwrap_or("");
+        let padded = format!("{:<width$}", cell, width = w);
+        if header {
+            s.push_str(&bold(&padded, true));
+        } else {
+            s.push_str(&padded);
+        }
+        s.push_str(" │ ");
+    }
+    s.push('\n');
+    s
+}
+
+fn hbar(widths: &[usize], l: char, m: char, r: char) -> String {
+    let mut s = String::from(l);
+    for (i, w) in widths.iter().enumerate() {
+        s.push_str(&"─".repeat(w + 2));
+        s.push(if i + 1 == widths.len() { r } else { m });
+    }
+    s.push('\n');
+    s
+}
+
+/// A titled box panel for a short block of text.
+fn panel(title: &str, body: &str, tty: bool) -> String {
+    if !tty {
+        return format!("{title}\n{body}\n");
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    let inner_w = lines
+        .iter()
+        .map(|l| disp_width(l))
+        .max()
+        .unwrap_or(0)
+        .max(disp_width(title))
+        .max(8);
+    let mut s = String::new();
+    let title_pad = inner_w.saturating_sub(disp_width(title));
+    s.push('┌');
+    s.push_str(&format!("─ {title}"));
+    s.push_str(&"─".repeat(title_pad + 1));
+    s.push('┐');
+    s.push('\n');
+    for l in lines {
+        s.push_str(&format!("│ {:<width$} │\n", l, width = inner_w));
+    }
+    s.push('└');
+    s.push_str(&"─".repeat(inner_w + 2));
+    s.push('┘');
+    s.push('\n');
+    s
+}
+
+/// ANSI percentage bar: `███░░░ 42%`. Plain mode returns `42%`.
+fn progress_bar(pct: f64, width: usize, tty: bool) -> String {
+    if !tty {
+        return format!("{pct:.0}%");
+    }
+    let pct = pct.clamp(0.0, 100.0);
+    let filled = ((pct / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let bar: String = "█".repeat(filled);
+    let empty: String = "░".repeat(width - filled);
+    format!("{}{} {:.0}%", green(&bar, true), dim(&empty, true), pct)
+}
+
+const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+fn spinner_frame(i: u64) -> char {
+    SPINNER[(i as usize) % SPINNER.len()]
+}
+
+/// Pretty-print a JSON value to stdout with ANSI syntax highlighting (TTY only).
+/// Non-TTY (or `--plain`) emits a single compact line for piping.
+fn emit_json(v: serde_json::Value) {
+    if use_color_stdout() {
+        println!("{}", highlight_json(&v, 0));
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string(&v).unwrap_or_else(|_| v.to_string())
+        );
+    }
+}
+
+fn highlight_json(v: &serde_json::Value, indent: usize) -> String {
+    let pad = "  ".repeat(indent);
+    let pad1 = "  ".repeat(indent + 1);
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                return "{}".to_string();
+            }
+            let mut s = String::from("{\n");
+            for (i, (k, val)) in map.iter().enumerate() {
+                s.push_str(&pad1);
+                s.push_str(&cyan(&format!("\"{k}\""), true));
+                s.push_str(": ");
+                s.push_str(&highlight_json(val, indent + 1));
+                if i + 1 < map.len() {
+                    s.push(',');
+                }
+                s.push('\n');
+            }
+            s.push_str(&pad);
+            s.push('}');
+            s
+        }
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                return "[]".to_string();
+            }
+            let mut s = String::from("[\n");
+            for (i, val) in arr.iter().enumerate() {
+                s.push_str(&pad1);
+                s.push_str(&highlight_json(val, indent + 1));
+                if i + 1 < arr.len() {
+                    s.push(',');
+                }
+                s.push('\n');
+            }
+            s.push_str(&pad);
+            s.push(']');
+            s
+        }
+        serde_json::Value::String(x) => green(&format!("\"{x}\""), true),
+        serde_json::Value::Number(n) => yellow(&n.to_string(), true),
+        serde_json::Value::Bool(b) => purple(&b.to_string(), true),
+        serde_json::Value::Null => dim("null", true),
+    }
+}
+
+/// `error:` prefix, red on a TTY (respects `--plain`).
+fn err_prefix() -> String {
+    red("error:", use_color_stderr())
+}
+
+/// `warning:` prefix, yellow on a TTY (respects `--plain`).
+fn warn_prefix() -> String {
+    yellow("warning:", use_color_stderr())
+}
+
+/// `hint:` prefix, cyan on a TTY (respects `--plain`).
+fn hint_prefix() -> String {
+    cyan("hint:", use_color_stderr())
+}
+
+/// `⏱ timeout:` prefix, yellow on a TTY (respects `--plain`).
+fn timeout_prefix() -> String {
+    if use_color_stderr() {
+        format!("{} timeout:", yellow("⏱", true))
+    } else {
+        "timeout:".to_string()
     }
 }
 
@@ -1485,6 +2487,53 @@ fn colorize_progress(line: &str, tty: bool) -> String {
         _ => return format!("\x1b[2m{line}\x1b[0m"),
     };
     format!("{indent}{marker}\x1b[2m{after}\x1b[0m")
+}
+
+/// P1-3: opening line of a tool-call block (rendered on stderr during a chat
+/// turn, separating tool activity from the streamed reply).
+fn tool_block_start(name: &str, args_short: &str, tty: bool) -> String {
+    if !tty {
+        return format!("┌ tool: {name}{}", opt_args(args_short));
+    }
+    format!(
+        "{} {} {}",
+        cyan("┌ tool:", true),
+        cyan(name, true),
+        dim(opt_args(args_short).as_str(), true)
+    )
+}
+
+/// P1-3: closing line of a tool-call block.
+fn tool_block_done(name: &str, args_short: &str, ok: bool, elapsed_ms: u128, tty: bool) -> String {
+    let mark = if ok {
+        green("✓", tty)
+    } else {
+        red("✗", tty)
+    };
+    if !tty {
+        return format!(
+            "└ {} {}{} ({}ms)",
+            mark,
+            name,
+            opt_args(args_short),
+            elapsed_ms
+        );
+    }
+    format!(
+        "{} {} {} {}",
+        dim("└", true),
+        mark,
+        cyan(name, true),
+        dim(&format!("({}ms){}", elapsed_ms, opt_args(args_short)), true)
+    )
+}
+
+fn opt_args(args_short: &str) -> String {
+    if args_short.is_empty() {
+        String::new()
+    } else {
+        format!("({args_short})")
+    }
 }
 
 /// One-line tail preview of accumulated reasoning text (newlines → spaces),
@@ -1763,6 +2812,7 @@ async fn run_web(
     }
     let engine =
         Arc::new(Engine::new(config, Arc::clone(&store), tx.clone(), Arc::clone(&state)).await);
+    spawn_sighup_reload(Arc::clone(&engine));
     engine.clone().spawn_background();
     if attach {
         let mut s = state.write().await;
@@ -1801,6 +2851,7 @@ async fn run_tui(
 
     let engine =
         Arc::new(Engine::new(config, Arc::clone(&store), tx.clone(), Arc::clone(&state)).await);
+    spawn_sighup_reload(Arc::clone(&engine));
     engine.clone().spawn_background();
     if attach {
         {

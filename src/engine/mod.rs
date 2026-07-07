@@ -369,6 +369,22 @@ impl Engine {
         Ok(())
     }
 
+    /// Hot-reload config, LLM, and MCP servers from disk (triggered by SIGHUP
+    /// or `POST /api/reload`). Skills and the chat prompt are re-read from disk
+    /// on every chat turn, so they pick up changes automatically after this.
+    pub async fn reload_all(&self) {
+        let config_path = { self.state.read().await.config_path.clone() };
+        match Config::load(&config_path) {
+            Ok(new_cfg) => {
+                self.apply_config_reload(new_cfg).await;
+                self.emit_log("info", "hot reload: config reloaded");
+            }
+            Err(e) => {
+                self.emit_log("warn", format!("hot reload: config load failed: {e}"));
+            }
+        }
+    }
+
     async fn apply_config_reload(&self, new_cfg: Config) {
         let llm_latency_ms = crate::llm::ollama::probe_latency_ms(&new_cfg.llm).await;
         let llm_online = llm_latency_ms.is_some();
