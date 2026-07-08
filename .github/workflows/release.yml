@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.triple }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: macos-latest
+            triple: aarch64-apple-darwin
+            archive_ext: tar.gz
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.triple }}
+
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - name: Install LLVM lld (macOS)
+        if: runner.os == 'macOS'
+        run: brew install lld
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web-ui/package.json
+
+      - name: Build Web UI
+        working-directory: web-ui
+        run: |
+          npm install
+          npm run build:fast
+
+      - name: cargo build --release
+        run: cargo build --release --features embed-web-ui -p unistar-coworker
+        env:
+          CARGO_INCREMENTAL: "0"
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASENAME="unistar-coworker-${VERSION}-${{ matrix.triple }}"
+          STAGING="dist/${BASENAME}"
+          mkdir -p "${STAGING}"
+          cp target/release/unistar-coworker "${STAGING}/"
+          cp -R skills "${STAGING}/skills"
+          cp -R packaging/workdir-template "${STAGING}/template"
+          cp coworker.example.yaml "${STAGING}/"
+          cp README.md "${STAGING}/"
+          mkdir -p dist
+          tar -czf "dist/${BASENAME}.tar.gz" -C dist "${BASENAME}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${BASENAME}.tar.gz" > "dist/${BASENAME}.tar.gz.sha256"
+          else
+            shasum -a 256 "dist/${BASENAME}.tar.gz" > "dist/${BASENAME}.tar.gz.sha256"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unistar-coworker-${{ matrix.triple }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*

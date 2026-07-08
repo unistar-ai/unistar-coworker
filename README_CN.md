@@ -476,6 +476,17 @@ cargo run -- serve          # http://127.0.0.1:8787
 cargo build --release --features embed-web-ui
 ```
 
+### GitHub Releases
+
+推送版本 tag 会触发 [`.github/workflows/release.yml`](./.github/workflows/release.yml)，自动构建并上传到 [GitHub Releases](https://github.com/unistar-ai/unistar-coworker/releases)：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+产物（按平台）：`unistar-coworker-<version>-<triple>.tar.gz` 及 `.sha256`，内含二进制、`skills/`、`template/`（workdir 种子）、`coworker.example.yaml`。平台：**Linux x86_64**、**macOS arm64**。
+
 `cargo build` 不依赖 Node。仅在构建 React UI 时需要 Node：
 
 ```bash

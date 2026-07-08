@@ -546,6 +546,17 @@ Optional local speedups live in [`.cargo/config.toml`](./.cargo/config.toml): `d
 cargo build --release --features embed-web-ui
 ```
 
+### GitHub Releases
+
+Pushing a version tag triggers [`.github/workflows/release.yml`](./.github/workflows/release.yml) to build release binaries and upload them to [GitHub Releases](https://github.com/unistar-ai/unistar-coworker/releases):
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Artifacts (per platform): `unistar-coworker-<version>-<triple>.tar.gz` + `.sha256`, containing the binary, `skills/`, `template/` (workdir seed), and `coworker.example.yaml`. Platforms: **Linux x86_64**, **macOS arm64**.
+
 `cargo build` never depends on Node. Install Node only to build the React UI:
 
 ```bash
