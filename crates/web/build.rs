@@ -5,7 +5,7 @@
 //   pub static ASSETS: &[(&str, AssetContent)] = &[("assets/index-HASH.js", ...), ...];
 //
 // The frontend build itself (`npm run build:fast`) is NOT run here — it is owned
-// by start-agent.sh / CI, so `cargo build` never depends on Node and never
+// by package.sh / CI, so `cargo build` never depends on Node and never
 // rebuilds dist/ spuriously (which would force this crate to recompile). When
 // dist/ is absent the manifest emits a stub so `cargo build` never fails solely
 // due to a missing frontend build (binary falls back to legacy UI).
@@ -34,7 +34,7 @@ fn main() {
     }
 
     // NOTE: the frontend build (`npm run build:fast`) is intentionally NOT run
-    // here. It is owned by start-agent.sh / CI so that `cargo build` never
+    // here. It is owned by package.sh / CI so that `cargo build` never
     // depends on a Node toolchain and never rebuilds dist/ spuriously (a
     // spurious rebuild would bump dist mtimes and force this crate to
     // recompile). build.rs only embeds whatever web-ui/dist/ already exists

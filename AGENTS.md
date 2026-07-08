@@ -134,7 +134,7 @@ The repo is a **Cargo workspace** (`crates/core`, `crates/tui`, `crates/web`, `c
 
 Default `cargo build` / `cargo check` **omit** `embed-web-ui`. The React UI is read from `web-ui/dist/` at runtime ([`crates/web/src/ui.rs`](./crates/web/src/ui.rs)), so changing only Rust code does not re-embed JS bundles. Use Vite HMR (`cd web-ui && npm run dev`) alongside `cargo run -p unistar-coworker -- serve` for frontend work.
 
-Release builds, [`scripts/start-agent.sh`](./scripts/start-agent.sh), and CI use `--features embed-web-ui` for a single-binary deploy. Optional speedups: `.cargo/config.toml` sets `debug=1` + incremental; uncomment `sccache` / `mold` there if installed.
+Release builds, [`scripts/package.sh`](./scripts/package.sh), and CI use `--features embed-web-ui` for a single-binary deploy. Optional speedups: `.cargo/config.toml` sets `debug=1` + incremental; uncomment `sccache` / `mold` there if installed.
 
 List skills/workflows: `cargo run --release --features embed-web-ui -- skills list` / `workflows list`.
 

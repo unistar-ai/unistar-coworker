@@ -1,4 +1,4 @@
-# Deploy template — copied into the runtime workdir by scripts/start-agent.sh.
+# Deploy template — copied into the runtime workdir by scripts/package.sh.
 # Edit repos, LLM endpoints, and secrets for your environment after first launch.
 
 llm_profile: ollama-local

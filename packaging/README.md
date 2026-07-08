@@ -4,7 +4,7 @@ Scripts and templates for building and launching a single-binary deploy workdir.
 
 | Path | Role |
 |------|------|
-| [`scripts/start-agent.sh`](../scripts/start-agent.sh) | Build web-ui + Rust binary, refresh runtime workdir, launch agent |
+| [`scripts/package.sh`](../scripts/package.sh) | Build web-ui + Rust binary, refresh runtime workdir (packaging only) |
 | `workdir-template/` | Seed files copied into the runtime workdir (`coworker.yaml`, `AGENTS.md`) |
 
 Runtime output (not in git):
