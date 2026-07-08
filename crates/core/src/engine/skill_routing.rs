@@ -250,14 +250,29 @@ mod tests {
     fn sample_registry() -> SkillRegistry {
         SkillRegistry::from_skills(vec![
             SkillSpec {
-                name: "github-ops-tone".into(),
-                description: "Secretary tone".into(),
+                name: "general-agent-tone".into(),
+                description: "General agent tone".into(),
                 body: "Be accurate".into(),
                 argument_hint: String::new(),
                 skill_refs: vec![],
                 tool_refs: vec![],
                 always_load: true,
                 intent_keywords: vec![],
+                intent_phrases: vec![],
+                intent_bonus_keywords: vec![],
+                intent_penalty_keywords: vec![],
+                intent_penalty_phrases: vec![],
+                intent_penalty: 0,
+            },
+            SkillSpec {
+                name: "github-ops-tone".into(),
+                description: "GitHub ops tone".into(),
+                body: "Ops style".into(),
+                argument_hint: String::new(),
+                skill_refs: vec![],
+                tool_refs: vec![],
+                always_load: false,
+                intent_keywords: vec!["pr".into(), "ci".into()],
                 intent_phrases: vec![],
                 intent_bonus_keywords: vec![],
                 intent_penalty_keywords: vec![],
@@ -302,7 +317,7 @@ mod tests {
         let reg = sample_registry();
         let picked = reg.select_for_message("Why is CI failing on PR #42?", true);
         assert_eq!(picked.len(), 1);
-        assert_eq!(picked[0].name, "github-ops-tone");
+        assert_eq!(picked[0].name, "general-agent-tone");
     }
 
     #[test]
@@ -319,7 +334,7 @@ mod tests {
         let reg = sample_registry();
         let picked = reg.select_for_message_by_intent("Why is CI failing on PR #42?");
         let names: Vec<_> = picked.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"github-ops-tone"));
+        assert!(names.contains(&"general-agent-tone"));
         assert!(names.contains(&"ci-triage"));
         assert!(!names.contains(&"pr-merge"));
     }
@@ -335,7 +350,7 @@ mod tests {
     #[test]
     fn native_mode_loads_all() {
         let reg = sample_registry();
-        assert_eq!(reg.select_for_message("hello", false).len(), 3);
+        assert_eq!(reg.select_for_message("hello", false).len(), 4);
     }
 
     #[test]

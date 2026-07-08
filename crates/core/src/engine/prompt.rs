@@ -141,8 +141,8 @@ fn scan_skill_dir(dir: &Path) -> Vec<PathBuf> {
         // Directory missing (e.g. running outside the repo) — fall back to the
         // known defaults so the agent still has its core skills.
         return vec![
-            PathBuf::from("skills/github-ops-tone/SKILL.md"),
-            PathBuf::from("skills/ci-triage/SKILL.md"),
+            PathBuf::from("skills/general-agent-tone/SKILL.md"),
+            PathBuf::from("skills/code-edit/SKILL.md"),
         ];
     };
     let mut paths: Vec<PathBuf> = entries
@@ -382,7 +382,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bundle.skills.len(), 1);
-        assert_eq!(bundle.skills[0].name, "github-ops-tone");
+        assert_eq!(bundle.skills[0].name, "general-agent-tone");
     }
 
     #[test]
@@ -402,7 +402,7 @@ mod tests {
         // Available skills is now a separate message, NOT in the static prompt.
         assert!(!static_prompt.contains("## Available skills"));
         assert!(static_prompt.contains("## Techniques"));
-        assert!(static_prompt.contains("github-ops-tone"));
+        assert!(static_prompt.contains("general-agent-tone"));
     }
 
     #[test]
@@ -465,12 +465,12 @@ mod tests {
             })
             .collect();
         assert!(
-            names.contains(&"github-ops-tone".to_string()),
-            "missing github-ops-tone"
+            names.contains(&"general-agent-tone".to_string()),
+            "missing general-agent-tone"
         );
         assert!(
-            names.contains(&"ci-triage".to_string()),
-            "missing ci-triage"
+            names.contains(&"code-edit".to_string()),
+            "missing code-edit"
         );
         assert!(
             names.contains(&"my-prs".to_string()),

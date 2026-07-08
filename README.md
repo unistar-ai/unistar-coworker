@@ -674,7 +674,7 @@ unistar-coworker/
 └── Cargo.lock
 ```
 
-Crate version: **2.1.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)).
+Crate version: **2.3.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)). Local LLM setup: [docs/local-models.md](./docs/local-models.md).
 
 ---
 
@@ -684,6 +684,7 @@ See [SUPPORT.md](./SUPPORT.md) — **GitHub Issues only** (bug / feature / quest
 
 | Resource | Topic |
 |----------|-------|
+| [docs/local-models.md](./docs/local-models.md) | 25B+ local models, `tool_mode`, chat knobs |
 | [docs/troubleshooting.md](./docs/troubleshooting.md) | Common problems |
 | [docs/upgrading.md](./docs/upgrading.md) | Version upgrades |
 | [docs/RPC.md](./docs/RPC.md) | JSONL scripting |

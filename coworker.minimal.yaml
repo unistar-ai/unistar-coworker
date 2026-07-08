@@ -11,7 +11,7 @@ llm:
 
 chat:
   workspace: .
-  # tool_mode: auto   # auto | lazy | native — 25B+ reference tier: auto or native
+  tool_mode: auto
 
 web:
   bind: 127.0.0.1:8787

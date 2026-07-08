@@ -1598,7 +1598,8 @@ repos: [acme/widget]
             .create_chat_session(Some("seeded-skills"), None)
             .await
             .expect("create session");
-        session.runtime_state.loaded_skills = vec!["github-ops-tone".into(), "ci-triage".into()];
+        session.runtime_state.loaded_skills =
+            vec!["general-agent-tone".into(), "ci-triage".into()];
         store
             .update_chat_session(&session)
             .await
@@ -1644,7 +1645,7 @@ repos: [acme/widget]
             .as_ref()
             .expect("context built on cold switch");
         let skill_names: Vec<_> = ctx.skill_blocks.iter().map(|s| s.name.clone()).collect();
-        assert_eq!(skill_names, vec!["github-ops-tone", "ci-triage"]);
+        assert_eq!(skill_names, vec!["general-agent-tone", "ci-triage"]);
         // Skills are loaded from disk with real bodies + token counts, not
         // just names with 0 tokens.
         assert!(
@@ -1659,13 +1660,12 @@ repos: [acme/widget]
             ctx.skill_blocks.iter().all(|s| !s.body.is_empty()),
             "expected non-empty skill bodies"
         );
-        // github-ops-tone has always: true in its frontmatter.
         let tone = ctx
             .skill_blocks
             .iter()
-            .find(|s| s.name == "github-ops-tone")
-            .expect("github-ops-tone present");
-        assert!(tone.always, "github-ops-tone should be always-on");
+            .find(|s| s.name == "general-agent-tone")
+            .expect("general-agent-tone present");
+        assert!(tone.always, "general-agent-tone should be always-on");
         assert!(!tone.description.is_empty(), "description should be loaded");
         // Tools are discovered from the static ToolCatalog for the configured
         // tool_mode (Auto → lazy-native subset), so TOOLS is NOT empty.

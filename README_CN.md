@@ -606,7 +606,7 @@ unistar-coworker/
 └── Cargo.lock
 ```
 
-版本：**2.1.0**（workspace `[workspace.package]`，见 [Cargo.toml](./Cargo.toml)）。
+版本：**2.3.0**（workspace `[workspace.package]`，见 [Cargo.toml](./Cargo.toml)）。本地模型：[docs/local-models.md](./docs/local-models.md)。
 
 ---
 

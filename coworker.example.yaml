@@ -48,7 +48,7 @@ chat:
   # llm_step_timeout_secs: 180   # wall clock per LLM step (0 = unlimited)
   # reasoning_only_warn_secs: 30 # stop stream when only reasoning grows (0 = off)
   # prompt: prompts/chat.md   # system prompt; skills: from frontmatter or chat.skills
-  # tool_mode: auto   # auto | lazy | native — 25B+ reference: auto or native
+  tool_mode: auto   # auto | native — 25B+ reference; lazy if VRAM tight
   # bash: { timeout_secs: 30, max_output_chars: 16000 }  # optional tuning
   # python: { timeout_secs: 30, max_output_chars: 16000, command: python3 }
   # web_fetch:
