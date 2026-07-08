@@ -2,7 +2,7 @@
 
 几分钟内跑起 unistar-coworker。两种安装方式：**tar.gz**（原生二进制）或 **Docker**。
 
-完整文档：[readme_cn.md](readme_cn.md) · Docker 说明：[docs/docker.md](docs/docker.md)
+完整文档：[README_CN.md](README_CN.md) · Docker 说明：[docs/docker.md](docs/docker.md)
 
 ---
 

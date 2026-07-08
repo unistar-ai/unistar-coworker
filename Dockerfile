@@ -39,7 +39,7 @@ WORKDIR /app
 COPY skills ./skills
 COPY packaging/workdir-template ./template
 COPY docs ./docs
-COPY README.md readme_cn.md QUICKSTART.md QUICKSTART_CN.md coworker.example.yaml ./
+COPY README.md README_CN.md QUICKSTART.md QUICKSTART_CN.md coworker.example.yaml ./
 
 EXPOSE 8787
 ENTRYPOINT ["/usr/local/bin/unistar-coworker"]

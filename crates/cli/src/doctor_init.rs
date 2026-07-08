@@ -91,7 +91,7 @@ fn write_bundle(
     let mut zip = ZipWriter::new(file);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    let doctor_json = serde_json::to_string_pretty(report).map_err(|e| CoworkerError::Json(e))?;
+    let doctor_json = serde_json::to_string_pretty(report).map_err(CoworkerError::Json)?;
     zip.start_file("doctor.json", opts).map_err(zip_err)?;
     zip.write_all(doctor_json.as_bytes())?;
 
@@ -111,7 +111,7 @@ fn write_bundle(
         "arch": std::env::consts::ARCH,
         "rustc": rustc_version(),
     });
-    let meta_str = serde_json::to_string_pretty(&meta).map_err(|e| CoworkerError::Json(e))?;
+    let meta_str = serde_json::to_string_pretty(&meta).map_err(CoworkerError::Json)?;
     zip.start_file("meta.json", opts).map_err(zip_err)?;
     zip.write_all(meta_str.as_bytes())?;
 
@@ -123,15 +123,12 @@ fn resolve_config_path(config_override: Option<&PathBuf>) -> Option<PathBuf> {
     if let Some(p) = config_override {
         return Some(p.clone());
     }
-    for path in [
+    [
         PathBuf::from("coworker.yaml"),
         PathBuf::from(".coworker/coworker.yaml"),
-    ] {
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|path| path.exists())
 }
 
 fn rustc_version() -> Option<String> {

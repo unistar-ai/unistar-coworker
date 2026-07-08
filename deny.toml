@@ -2,9 +2,9 @@
 
 [advisories]
 version = 2
-unmaintained = "warn"
+# v2 denies vulnerability/unmaintained/unsound/notice by default; scope transitive unmaintained via:
+unmaintained = "workspace"
 yanked = "warn"
-notice = "warn"
 ignore = []
 
 [bans]
