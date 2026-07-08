@@ -163,7 +163,7 @@ The Web UI is a **React 18 SPA** (Vite + Tailwind + Radix UI + zustand). It prov
 | **Dev** (default) | `cargo build` / `cargo run -- serve` | Reads `web-ui/dist/` from disk at runtime — Rust-only edits do not re-embed JS bundles |
 | **Release / CI** | `cargo build --release --features embed-web-ui` | `build.rs` embeds `web-ui/dist/` via `include_str!` / `include_bytes!` for a single-binary deploy |
 
-`build.rs` does **not** run `npm` — the frontend build is owned by the developer, CI, or `start-agent.sh` (`npm run build:fast`). With `embed-web-ui`, the generated manifest is content-gated so the crate only recompiles when bundled assets actually change. Without `embed-web-ui`, run `npm run build:fast` once so `serve` can find `web-ui/dist/`; if `dist/` is missing the React routes return 503 (legacy UI may still be available).
+`build.rs` does **not** run `npm` — the frontend build is owned by the developer, CI, or [`scripts/start-agent.sh`](./scripts/start-agent.sh) (`npm run build:fast`). With `embed-web-ui`, the generated manifest is content-gated so the crate only recompiles when bundled assets actually change. Without `embed-web-ui`, run `npm run build:fast` once so `serve` can find `web-ui/dist/`; if `dist/` is missing the React routes return 503 (legacy UI may still be available).
 
 **Hot reload** (no process restart): send `SIGHUP` to a running `serve` / `tui` / `daemon`, or `POST /api/reload` — reloads `coworker.yaml`, skills, prompts, and MCP connections.
 
@@ -539,7 +539,7 @@ cargo run -- serve          # http://127.0.0.1:8787
 
 Optional local speedups live in [`.cargo/config.toml`](./.cargo/config.toml): `debug = 1`, incremental builds, and commented hooks for `sccache` / `mold` if installed.
 
-**Release / deploy** (single binary, embedded UI — same as CI and `start-agent.sh`):
+**Release / deploy** (single binary, embedded UI — same as CI and [`scripts/start-agent.sh`](./scripts/start-agent.sh)):
 
 ```bash
 (cd web-ui && npm run build:fast)
@@ -586,11 +586,11 @@ Optional: `UNISTAR_BIN=/path/to/unistar-coworker npm test` if the binary is else
 | Feature | Default | Purpose |
 |---------|---------|---------|
 | `web-browser` | on | Headless Chromium for `web_fetch` browser mode (pulls in `chromiumoxide`). Disable with `--no-default-features` for a slimmer build that falls back to HTTP-only `web_fetch`. |
-| `embed-web-ui` | off | Embed `web-ui/dist/` into the binary at compile time (`include_str!`). Enable for release builds, CI, and `start-agent.sh`; omit for faster local `cargo check` / `cargo build` (UI served from disk). |
+| `embed-web-ui` | off | Embed `web-ui/dist/` into the binary at compile time (`include_str!`). Enable for release builds, CI, and `./scripts/start-agent.sh`; omit for faster local `cargo check` / `cargo build` (UI served from disk). |
 
 A vendored `chromiumoxide` patch lives under `vendor/chromiumoxide/` for CDP schema drift resilience.
 
-The Web UI (`web-ui/`) requires Node 18+ and is built with `npm run build:fast` (owned by the developer / CI / `start-agent.sh`, **not** by `build.rs`). With `embed-web-ui`, the resulting bundle is compiled into the binary; without it, `serve` reads `web-ui/dist/` at runtime.
+The Web UI (`web-ui/`) requires Node 18+ and is built with `npm run build:fast` (owned by the developer / CI / `./scripts/start-agent.sh`, **not** by `build.rs`). With `embed-web-ui`, the resulting bundle is compiled into the binary; without it, `serve` reads `web-ui/dist/` at runtime.
 
 ---
 
@@ -607,7 +607,11 @@ unistar-coworker/
 │   ├── cli/                 # clap subcommands, terminal helpers, chat REPL
 │   └── unistar-coworker/    # Thin binary (`main.rs` → `coworker_cli::run`)
 ├── docs/RPC.md              # JSONL rpc mode protocol
-├── prompts/chat.md          # Chat system prompt (embedded at build time)
+├── packaging/
+│   ├── README.md            # packaging overview
+│   └── workdir-template/    # deploy seed (coworker.yaml) copied to runtime workdir
+├── scripts/
+│   └── start-agent.sh       # build web-ui + binary, refresh workdir, launch
 ├── skills/                  # Technique skills (SKILL.md) + _base/TOOLS.md SSOT
 ├── web-ui/                  # React 18 SPA (Vite + Tailwind + Radix + zustand)
 │   ├── src/                 # TypeScript source
