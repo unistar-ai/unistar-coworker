@@ -84,8 +84,8 @@ For long multi-file tasks on 64K context, defaults are usually fine. Set `max_tu
 
 ## UI behavior
 
-- **Web UI** — long tool output collapses automatically; bash-style output shows **head + tail** when collapsed (exit line visible).
-- **TUI** — scroll transcript; context panel shows token estimates when available.
+- **Web UI** — long tool output collapses automatically; bash-style output shows **head + tail** when collapsed (exit line visible); click to expand full output.
+- **TUI** — scroll the transcript; toggle a tool row to show up to **80 lines** of output (no head/tail fold — terminal has no expand-to-full affordance like Web).
 
 ---
 
