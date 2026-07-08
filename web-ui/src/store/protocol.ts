@@ -180,6 +180,10 @@ export interface WebSnapshot {
   attach_mode: boolean;
   auto_approve_mutations: boolean;
   ui_theme: string;
+  app_version: string;
+  upgrade_available: boolean;
+  latest_release: string | null;
+  release_url: string | null;
 }
 
 export interface WebLivePatch {

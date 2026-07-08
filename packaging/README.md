@@ -5,6 +5,7 @@
 | Path | Role |
 |------|------|
 | [`scripts/package.sh`](../scripts/package.sh) | Full package: web-ui, binary, skills, template, docs |
+| [`QUICKSTART.md`](../QUICKSTART.md) / [`QUICKSTART_CN.md`](../QUICKSTART_CN.md) | First-run guide (tar.gz + Docker); copied into release tree |
 | `workdir-template/` | Seed config copied into the tree (`template/` + root `coworker.yaml`) |
 
 ### Output layout
@@ -18,6 +19,8 @@
 ├── AGENTS.md
 ├── coworker.example.yaml
 ├── README.md
+├── QUICKSTART.md
+├── QUICKSTART_CN.md
 └── data/                  # preserved across rebuilds (local runtime only)
 ```
 
@@ -39,3 +42,5 @@ Override paths with `START_AGENT_WORKDIR` and `START_AGENT_DATA_BACKUP`.
 Launch after packaging: `cd <output> && ./unistar-coworker serve`, or use your deploy wrapper (e.g. parent `start-agent.sh`).
 
 Tag push (`v*`) runs [`.github/workflows/release.yml`](../.github/workflows/release.yml), which calls `package.sh` with `PACKAGE_VERSION` / `PACKAGE_TRIPLE`.
+
+Docker images are published separately via [`.github/workflows/docker.yml`](../.github/workflows/docker.yml) to `ghcr.io/unistar-ai/unistar-coworker` — see [docs/docker.md](../docs/docker.md).

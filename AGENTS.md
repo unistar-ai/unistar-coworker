@@ -13,7 +13,7 @@ unistar-coworker is a **local GitHub ops secretary** (Rust, ratatui TUI). It:
 
 It is **not** a coding agent: no repo editing, no auto-merge, no replacement for GitHub Actions.
 
-Product boundaries and architecture: [README.md](./README.md), [README_CN.md](./README_CN.md), [skill-agent-harness.md](./skill-agent-harness.md).
+Product boundaries and architecture: [README.md](./README.md), [README_CN.md](./README_CN.md).
 
 ---
 
@@ -147,15 +147,29 @@ List skills/workflows: `cargo run --release --features embed-web-ui -- skills li
 Before pushing (or immediately after, if you already pushed), run the same bar locally:
 
 ```sh
+./scripts/check-versions.sh
+cd web-ui && npm install && npx tsc --noEmit && npm test && npm run build:fast
 cargo fmt --check
 cargo clippy --workspace --features embed-web-ui -- -D warnings
-cargo test --workspace
-cd web-ui && npm install && npm run build:fast && npx tsc --noEmit && npx vitest run
+cargo test --workspace --features embed-web-ui
 ```
 
-CI also runs a **`rust-no-default-features`** job (same fmt/clippy/test + Web UI build). If you touch `Cargo.toml` features, `build.rs`, or optional deps, verify that job too.
+### CI jobs (`.github/workflows/ci.yml`)
+
+| Job | What it runs |
+|-----|----------------|
+| **`rust`** | `check-versions.sh` → Web UI `tsc --noEmit` + `vitest` + `build:fast` → `cargo fmt` / `clippy` / `test` (`embed-web-ui`) |
+| **`rust-no-default-features`** | Web UI build → `cargo check` / `test` with `--no-default-features` |
+| **`web-e2e`** | Rust build + Playwright smoke tests (**blocking**) |
+| **`docker-smoke`** | `docker build -t unistar-coworker:ci .` |
+| **`secret-scan`** | gitleaks (`.gitleaks.toml`) |
+| **`cargo-deny`** | `cargo deny check advisories` (blocking) |
+
+If you touch `Cargo.toml` features, `build.rs`, or optional deps, verify **`rust-no-default-features`** too.
 
 When Web UI or `web-ui/dist` embedding changes, ensure `npm run build:fast` succeeds so Rust `build.rs` does not warn about a missing `web-ui/dist`.
+
+Bump `[workspace.package].version` in `Cargo.toml` together with the **Crate version** lines in `README.md` and `README_CN.md` — `check-versions.sh` enforces sync.
 
 If CI fails after your push, **fix and push again** until all jobs pass — do not leave broken `main`.
 

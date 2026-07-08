@@ -78,6 +78,10 @@ pub struct WebSnapshot {
     pub auto_approve_mutations: bool,
     /// Default Web UI theme from config (`dark` | `light`); user override in localStorage.
     pub ui_theme: String,
+    pub app_version: String,
+    pub upgrade_available: bool,
+    pub latest_release: Option<String>,
+    pub release_url: Option<String>,
 }
 
 /// Lightweight WS patch for streaming / tool progress (avoids full snapshot flood).
@@ -316,6 +320,10 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
         attach_mode: s.attach_mode,
         auto_approve_mutations: s.config.chat.auto_approve_mutations,
         ui_theme: s.config.web_theme_id().to_string(),
+        app_version: s.app_version.clone(),
+        upgrade_available: s.upgrade_available,
+        latest_release: s.latest_release.clone(),
+        release_url: s.release_url.clone(),
     }
 }
 
@@ -586,6 +594,23 @@ repos: [acme/widget]
             "coworker.yaml".into(),
         ));
         assert!(!snap_off.auto_approve_mutations);
+    }
+
+    #[test]
+    fn snapshot_exposes_upgrade_fields() {
+        let mut app = AppState::new(test_config_yaml(false), "coworker.yaml".into());
+        app.app_version = "2.1.0".into();
+        app.upgrade_available = true;
+        app.latest_release = Some("2.2.0".into());
+        app.release_url = Some("https://example.com/release".into());
+        let snap = build_snapshot_from(&app);
+        assert_eq!(snap.app_version, "2.1.0");
+        assert!(snap.upgrade_available);
+        assert_eq!(snap.latest_release.as_deref(), Some("2.2.0"));
+        assert_eq!(
+            snap.release_url.as_deref(),
+            Some("https://example.com/release")
+        );
     }
 
     #[test]

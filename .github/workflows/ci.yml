@@ -6,6 +6,19 @@ on:
   pull_request:
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -20,6 +33,9 @@ jobs:
       - name: Install mold linker (Linux)
         run: sudo apt-get update && sudo apt-get install -y mold
 
+      - name: Check README/Cargo version sync
+        run: ./scripts/check-versions.sh
+
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
@@ -30,6 +46,14 @@ jobs:
       - name: Install Web UI deps
         working-directory: web-ui
         run: npm install
+
+      - name: Typecheck Web UI
+        working-directory: web-ui
+        run: npx tsc --noEmit
+
+      - name: Test Web UI
+        working-directory: web-ui
+        run: npm test
 
       - name: Build Web UI
         working-directory: web-ui
@@ -78,10 +102,8 @@ jobs:
       - name: cargo test --no-default-features
         run: cargo test --workspace --no-default-features
 
-  # Optional: Playwright smoke tests (Rust build + Chromium). Does not block merge.
   web-e2e:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
 
@@ -122,3 +144,24 @@ jobs:
         env:
           CI: true
           UNISTAR_BIN: ${{ github.workspace }}/target/debug/unistar-coworker
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Docker build smoke
+        run: docker build -t unistar-coworker:ci .
+
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: cargo deny check advisories
+        run: cargo deny check advisories

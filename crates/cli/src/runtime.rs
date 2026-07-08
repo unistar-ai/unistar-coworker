@@ -46,8 +46,14 @@ pub(crate) async fn run_web(
     {
         let mut s = state.write().await;
         s.chat_context_visible = true;
+        s.app_version = env!("CARGO_PKG_VERSION").to_string();
         s.push_log("info", format!("WebUI listening on http://{bind}"));
     }
+
+    coworker_core::app::AppState::spawn_upgrade_check(
+        Arc::clone(&state),
+        env!("CARGO_PKG_VERSION"),
+    );
 
     let auth_token = config.web.effective_auth_token().map(str::to_owned);
     if !bind.ip().is_loopback() && !config.web.auth_enabled() {

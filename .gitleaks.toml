@@ -1,0 +1,13 @@
+title = "unistar-coworker gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures and redact unit tests"
+paths = [
+  '''crates/core/src/agent/redact\.rs''',
+  '''crates/core/src/config\.rs''',
+  '''crates/core/src/diagnostics\.rs''',
+  '''web-e2e/''',
+]

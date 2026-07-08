@@ -8,6 +8,16 @@
 
 [English](./README.md) · [中文](./README_CN.md)
 
+### Policy & support
+
+| Document | Description |
+|----------|-------------|
+| [SECURITY.md](./SECURITY.md) | Vulnerability reporting, supported versions, localhost exposure |
+| [PRIVACY.md](./PRIVACY.md) | Local-only data, no telemetry |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Fork, branch, PR, and CI checks |
+| [SUPPORT.md](./SUPPORT.md) | GitHub Issues, self-service docs |
+| [CHANGELOG.md](./CHANGELOG.md) | Release history |
+
 ---
 
 ## Overview
@@ -79,6 +89,23 @@ Chat can still use workspace tools (`read_file`, `grep`, `bash_run`, …) for li
 
 ## Quick start
 
+> **Step-by-step install:** [QUICKSTART.md](./QUICKSTART.md) (tar.gz + Docker).
+
+### Docker (3 commands)
+
+```bash
+docker pull ghcr.io/unistar-ai/unistar-coworker:latest
+mkdir -p config data
+docker run --rm -p 127.0.0.1:8787:8787 \
+  -v "$(pwd)/config:/config" -v "$(pwd)/data:/data" \
+  -e DEEPSEEK_API_KEY -e GH_TOKEN \
+  ghcr.io/unistar-ai/unistar-coworker:latest serve --config /config/coworker.yaml
+```
+
+See [docs/docker.md](docs/docker.md) for config template, volumes, and `gh auth` mount notes.
+
+### From source
+
 ```bash
 cd unistar-coworker
 unistar-coworker init --repos acme/widget --llm-url http://localhost:11434/v1
@@ -102,6 +129,16 @@ cargo build --release --features embed-web-ui
 ---
 
 ## Requirements
+
+### Supported platforms
+
+| Platform | Install | Notes |
+|----------|---------|-------|
+| **Linux x86_64** | [tar.gz](https://github.com/unistar-ai/unistar-coworker/releases), Docker (M2) | Official CI builds |
+| **macOS arm64** (Apple Silicon) | [tar.gz](https://github.com/unistar-ai/unistar-coworker/releases) | Official CI builds |
+| **Other** (Intel Mac, Linux arm64, Windows, …) | Source: `cargo build --release --features embed-web-ui` | Community self-build; not officially supported |
+
+### Dependencies
 
 | Dependency | Purpose |
 |------------|---------|
@@ -180,7 +217,11 @@ cd web-ui && npm install && npm run dev
 # Open http://localhost:5173
 ```
 
-**Security model.** The Web UI is intended for **trusted local use** on your machine. Keep `web.bind` at the default `127.0.0.1:8787` so chat, approvals, and workflows are not exposed on the LAN.
+**Security model (localhost personal secretary).** unistar-coworker is **not** a multi-user or internet-facing product. The Web UI is for **trusted local use** on your machine only:
+
+- Keep `web.bind` at the default **`127.0.0.1:8787`** — chat, approvals, and workflows stay on loopback.
+- **Docker:** map to localhost only, e.g. `-p 127.0.0.1:8787:8787` (never expose the container port on `0.0.0.0` without `web.auth_token`).
+- **Do not** put the Web UI behind a public reverse proxy without strong authentication.
 
 When you must bind beyond localhost (e.g. `0.0.0.0`), set `web.auth_token`:
 
@@ -633,13 +674,25 @@ unistar-coworker/
 └── Cargo.lock
 ```
 
-Crate version: **2.0.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)).
+Crate version: **2.1.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)).
+
+---
+
+## Getting help
+
+See [SUPPORT.md](./SUPPORT.md) — **GitHub Issues only** (bug / feature / question templates). No commercial SLA.
+
+| Resource | Topic |
+|----------|-------|
+| [docs/troubleshooting.md](./docs/troubleshooting.md) | Common problems |
+| [docs/upgrading.md](./docs/upgrading.md) | Version upgrades |
+| [docs/RPC.md](./docs/RPC.md) | JSONL scripting |
 
 ---
 
 ## Contributing
 
-Read [AGENTS.md](./AGENTS.md) for the workspace layout, harness conventions, sensitive-data rules, and PR expectations. Skills and prompts live beside the crate; tool names must stay aligned between `TOOLS.md` and `tool_catalog.rs`.
+Read [CONTRIBUTING.md](./CONTRIBUTING.md) and [AGENTS.md](./AGENTS.md) for the workflow, harness conventions, sensitive-data rules, and PR expectations. Skills and prompts live beside the crate; tool names must stay aligned between `TOOLS.md` and `tool_catalog.rs`.
 
 Conventions:
 
@@ -662,4 +715,4 @@ Conventions:
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT — see [LICENSE](./LICENSE). Security: [SECURITY.md](./SECURITY.md) · Privacy: [PRIVACY.md](./PRIVACY.md).

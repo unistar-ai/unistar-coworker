@@ -145,6 +145,8 @@ assemble_tree() {
   cp "$TEMPLATE/AGENTS.md" "$WORKDIR/AGENTS.md"
   cp "$REPO_ROOT/coworker.example.yaml" "$WORKDIR/"
   cp "$REPO_ROOT/README.md" "$WORKDIR/"
+  cp "$REPO_ROOT/QUICKSTART.md" "$WORKDIR/"
+  cp "$REPO_ROOT/QUICKSTART_CN.md" "$WORKDIR/"
 
   if [ -d "$DATA_BACKUP" ]; then
     mv "$DATA_BACKUP" "$WORKDIR/data"

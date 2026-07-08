@@ -3,6 +3,8 @@
 Pi-style machine protocol for driving `unistar-coworker` from scripts, Slack bots,
 or internal dashboards without starting the Web UI.
 
+**Compatibility:** see [STABILITY.md](./STABILITY.md). RPC `op` values marked **Stable** below are not removed or semantically changed except in major releases.
+
 ## Start
 
 ```bash
@@ -20,7 +22,7 @@ stdout as typed events so callers can parse a single stream. Tracing logs go to 
 
 Each non-empty line is one JSON object with an `op` field:
 
-### `chat`
+### `chat` — **Stable**
 
 ```json
 {"op":"chat","message":"triage PR #42 in acme/widget"}
@@ -28,7 +30,7 @@ Each non-empty line is one JSON object with an `op` field:
 
 Runs one user turn. Streams `progress` lines, then `result` or `error`.
 
-### `get_state`
+### `get_state` — **Stable**
 
 ```json
 {"op":"get_state"}
@@ -36,7 +38,7 @@ Runs one user turn. Streams `progress` lines, then `result` or `error`.
 
 Returns a `state` line with a full `WebSnapshot` (same shape as `/api/state`).
 
-### `cancel`
+### `cancel` — **Stable**
 
 ```json
 {"op":"cancel"}
@@ -44,7 +46,7 @@ Returns a `state` line with a full `WebSnapshot` (same shape as `/api/state`).
 
 Cancels the in-flight chat turn. Responds with `{"type":"cancelled"}`.
 
-### `switch_profile`
+### `switch_profile` — **Stable**
 
 ```json
 {"op":"switch_profile","profile":"fast"}

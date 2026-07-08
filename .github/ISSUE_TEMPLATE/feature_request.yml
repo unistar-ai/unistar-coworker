@@ -1,0 +1,75 @@
+name: Feature request
+description: Suggest an enhancement (local single-user scope)
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        unistar-coworker is a **local personal GitHub ops secretary** — not a SaaS or team product.
+        See [README.md](https://github.com/unistar-ai/unistar-coworker/blob/main/README.md) for product boundaries.
+
+  - type: input
+    id: version
+    attributes:
+      label: unistar-coworker version
+      description: Output of `unistar-coworker --version` (if applicable)
+      placeholder: "2.1.0"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux x86_64
+        - macOS arm64 (Apple Silicon)
+        - Other (source build)
+        - N/A
+    validations:
+      required: false
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      options:
+        - tar.gz (GitHub Release)
+        - Docker
+        - Source (cargo build)
+        - N/A
+    validations:
+      required: false
+
+  - type: textarea
+    id: doctor_json
+    attributes:
+      label: doctor --json
+      description: Optional context from `unistar-coworker doctor --json` (redact secrets)
+      render: json
+    validations:
+      required: false
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem does this solve? Who benefits?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you like it to work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

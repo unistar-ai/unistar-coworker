@@ -11,7 +11,7 @@ default = []
 embed-web-ui = []
 
 [dependencies]
-coworker-core = { path = "../core" }
+coworker-core = { path = "../core", default-features = false }
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
@@ -24,7 +24,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
-coworker-core = { path = "../core" }
+coworker-core = { path = "../core", default-features = false }
 http-body-util = "0.1"
 tempfile = "3"
 tokio-tungstenite = "0.26"

@@ -1,0 +1,31 @@
+# Git and local runtime data
+.git
+.gitignore
+**/.git
+
+# Build artifacts
+target/
+dist/
+workdir/
+data/
+.digests/
+
+# Node (rebuilt in Docker stage 1)
+web-ui/node_modules/
+web-ui/dist/
+
+# Local config and secrets (never bake into images)
+coworker.yaml
+.coworker/
+*.llm-profile
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# CI-only or dev-only paths
+.github/
+design-plans/

@@ -106,6 +106,10 @@ const DEFAULT_SNAPSHOT: WebSnapshot = {
   attach_mode: false,
   auto_approve_mutations: false,
   ui_theme: "dark",
+  app_version: "",
+  upgrade_available: false,
+  latest_release: null,
+  release_url: null,
 };
 
 interface UiState {

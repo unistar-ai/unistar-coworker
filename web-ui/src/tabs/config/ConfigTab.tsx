@@ -14,6 +14,10 @@ export default function ConfigTab() {
   const githubLatency = useStore((s) => s.github_latency_ms);
   const llmLatency = useStore((s) => s.llm_latency_ms);
   const mcpServers = useStore((s) => s.mcp_servers);
+  const appVersion = useStore((s) => s.app_version);
+  const upgradeAvailable = useStore((s) => s.upgrade_available);
+  const latestRelease = useStore((s) => s.latest_release);
+  const releaseUrl = useStore((s) => s.release_url);
 
   const profileBusy = chatBusy || engineBusy;
   const activeProfile = llmProfile ?? "";
@@ -130,6 +134,33 @@ export default function ConfigTab() {
             ))}
           </div>
         )}
+      </div>
+
+      <div className="config-section">
+        <div className="config-section-title">About</div>
+        <div className="config-muted">
+          Version <code className="config-mono">{appVersion || "…"}</code>
+        </div>
+        {upgradeAvailable && (
+          <div className="config-upgrade-banner config-muted">
+            Update available:{" "}
+            <a href={releaseUrl ?? "#"} target="_blank" rel="noreferrer">
+              {latestRelease ?? "latest"}
+            </a>
+          </div>
+        )}
+        <div className="config-muted config-llm-hint">
+          Help:{" "}
+          <a
+            href="https://github.com/unistar-ai/unistar-coworker/blob/main/docs/troubleshooting.md"
+            target="_blank"
+            rel="noreferrer"
+          >
+            troubleshooting
+          </a>
+          {" · "}
+          <code className="config-mono">unistar-coworker doctor --bundle</code>
+        </div>
       </div>
 
       <div className="config-section">

@@ -370,6 +370,12 @@ pub struct AppState {
     pub dashboard_digest_pr_index: usize,
     /// Digest list index the PR cursor applies to.
     pub dashboard_digest_pr_digest_idx: Option<usize>,
+    /// Running binary version (for Web Config).
+    pub app_version: String,
+    /// Set by background upgrade check after `serve` starts.
+    pub upgrade_available: bool,
+    pub latest_release: Option<String>,
+    pub release_url: Option<String>,
 }
 
 impl AppState {
@@ -439,7 +445,23 @@ impl AppState {
             attach_mode: false,
             dashboard_digest_pr_index: 0,
             dashboard_digest_pr_digest_idx: None,
+            app_version: String::new(),
+            upgrade_available: false,
+            latest_release: None,
+            release_url: None,
         }
+    }
+
+    /// Fire-and-forget GitHub Releases version check (updates snapshot fields).
+    pub fn spawn_upgrade_check(state: SharedState, current_version: &str) {
+        let current = current_version.to_string();
+        tokio::spawn(async move {
+            let info = crate::upgrade::check_upgrade(&current).await;
+            let mut s = state.write().await;
+            s.latest_release = info.latest;
+            s.release_url = info.release_url;
+            s.upgrade_available = info.update_available;
+        });
     }
 
     pub fn pr_overview_key(repo: &str, number: u32) -> String {

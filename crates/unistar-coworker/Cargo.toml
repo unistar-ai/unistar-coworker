@@ -16,6 +16,6 @@ embed-web-ui = ["coworker-web/embed-web-ui"]
 
 [dependencies]
 coworker-cli = { path = "../cli" }
-coworker-core = { path = "../core" }
+coworker-core = { path = "../core", default-features = false }
 coworker-web = { path = "../web" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -44,7 +44,8 @@ fn is_sensitive_key(key: &str) -> bool {
 /// Deliberately conservative — only known token prefixes and JWTs are flagged,
 /// so legitimate long identifiers (commit SHAs, PR numbers, UUIDs) are NOT
 /// accidentally masked.
-fn looks_like_secret(s: &str) -> bool {
+/// Heuristic for credential-shaped bare strings (used by doctor config checks).
+pub fn looks_like_secret(s: &str) -> bool {
     let s = s.trim();
     if s.is_empty() {
         return false;

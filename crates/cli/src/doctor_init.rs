@@ -1,16 +1,48 @@
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
-use coworker_core::diagnostics;
-use coworker_core::error::Result;
+use coworker_core::diagnostics::{self, DoctorExtras, DoctorReport};
+use coworker_core::error::{CoworkerError, Result};
 use coworker_core::exit_codes;
 
 use super::terminal::{bold, emit_json, green, hint_prefix, red, use_color_stdout, yellow};
 
-pub(crate) async fn run_doctor(config_override: Option<PathBuf>, json: bool) -> Result<()> {
-    let report = diagnostics::run_checks(config_override).await;
+pub(crate) async fn run_doctor(
+    config_override: Option<PathBuf>,
+    json: bool,
+    bundle: Option<PathBuf>,
+) -> Result<()> {
+    let (web_status, web_detail) = coworker_web::web_ui_doctor_status();
+    let extras = DoctorExtras {
+        web_ui_status: Some(web_status),
+        web_ui_detail: Some(web_detail),
+    };
+    let report = diagnostics::run_checks_with_extras(config_override.clone(), extras).await;
+
+    if let Some(path) = bundle {
+        write_bundle(&path, &report, config_override.as_ref())?;
+        if !json {
+            let tty = use_color_stdout();
+            println!(
+                "{} diagnostic bundle -> {}",
+                green("◆", tty),
+                path.display()
+            );
+        }
+    }
+
+    print_report(&report, json)?;
+
+    if report.has_failures() {
+        std::process::exit(exit_codes::EXIT_CONFIG);
+    }
+    Ok(())
+}
+
+fn print_report(report: &DoctorReport, json: bool) -> Result<()> {
     let tty = use_color_stdout();
     if json {
-        emit_json(serde_json::to_value(&report).unwrap_or_default());
+        emit_json(serde_json::to_value(report).unwrap_or_default());
     } else {
         for c in &report.checks {
             let icon = match c.status {
@@ -20,7 +52,7 @@ pub(crate) async fn run_doctor(config_override: Option<PathBuf>, json: bool) -> 
             };
             println!("{icon} {:<8} {}", c.name, c.detail);
             if let Some(hint) = &c.hint {
-                if c.status == "fail" {
+                if c.status == "fail" || c.status == "warn" {
                     println!("         {} {hint}", hint_prefix());
                 }
             }
@@ -33,14 +65,91 @@ pub(crate) async fn run_doctor(config_override: Option<PathBuf>, json: bool) -> 
             report.fail
         );
     }
-    if report.has_failures() {
-        std::process::exit(exit_codes::EXIT_CONFIG);
-    }
     Ok(())
 }
 
+fn zip_err(e: impl std::fmt::Display) -> CoworkerError {
+    CoworkerError::Workflow(format!("zip: {e}"))
+}
+
+fn write_bundle(
+    zip_path: &std::path::Path,
+    report: &DoctorReport,
+    config_override: Option<&PathBuf>,
+) -> Result<()> {
+    use std::fs::File;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    if let Some(parent) = zip_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let file = File::create(zip_path)?;
+    let mut zip = ZipWriter::new(file);
+    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let doctor_json = serde_json::to_string_pretty(report).map_err(|e| CoworkerError::Json(e))?;
+    zip.start_file("doctor.json", opts).map_err(zip_err)?;
+    zip.write_all(doctor_json.as_bytes())?;
+
+    let config_path = resolve_config_path(config_override);
+    if let Some(path) = config_path {
+        if path.exists() {
+            let raw = std::fs::read_to_string(&path)?;
+            let redacted = diagnostics::redact_coworker_yaml(&raw);
+            zip.start_file("coworker.yaml", opts).map_err(zip_err)?;
+            zip.write_all(redacted.as_bytes())?;
+        }
+    }
+
+    let meta = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "platform": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "rustc": rustc_version(),
+    });
+    let meta_str = serde_json::to_string_pretty(&meta).map_err(|e| CoworkerError::Json(e))?;
+    zip.start_file("meta.json", opts).map_err(zip_err)?;
+    zip.write_all(meta_str.as_bytes())?;
+
+    zip.finish().map_err(zip_err)?;
+    Ok(())
+}
+
+fn resolve_config_path(config_override: Option<&PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = config_override {
+        return Some(p.clone());
+    }
+    for path in [
+        PathBuf::from("coworker.yaml"),
+        PathBuf::from(".coworker/coworker.yaml"),
+    ] {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn rustc_version() -> Option<String> {
+    std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// `init` — create a starter coworker.yaml (P1-1).
+// `init` — create a starter coworker.yaml.
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub(crate) async fn run_init(
@@ -49,6 +158,7 @@ pub(crate) async fn run_init(
     path: Option<PathBuf>,
     repos: Option<String>,
     llm_url: Option<String>,
+    interactive: bool,
 ) -> Result<()> {
     let target = path
         .or(config_override)
@@ -61,10 +171,18 @@ pub(crate) async fn run_init(
         return Ok(());
     }
 
+    let use_interactive = interactive && io::stdin().is_terminal() && io::stdout().is_terminal();
+
+    let (repos_csv, llm_url_seed, remote_profile) = if use_interactive {
+        run_interactive_prompts().await?
+    } else {
+        (repos, llm_url, None)
+    };
+
     let template = include_str!("../../../coworker.example.yaml");
     let mut lines: Vec<String> = template.lines().map(String::from).collect();
 
-    if let Some(repos) = &repos {
+    if let Some(repos) = &repos_csv {
         if let Some(idx) = lines.iter().position(|l| l.trim() == "repos:") {
             let j = idx + 1;
             while j < lines.len() && lines[j].starts_with("  - ") {
@@ -78,21 +196,263 @@ pub(crate) async fn run_init(
             }
         }
     }
-    if let Some(url) = &llm_url {
+    if let Some(url) = &llm_url_seed {
         if let Some(idx) = lines.iter().position(|l| {
             let t = l.trim_start();
             t.starts_with("base_url:") && !t.starts_with('#')
         }) {
-            lines[idx] = format!("  base_url: {url}");
+            lines[idx] = format!("    base_url: {url}");
+        }
+    }
+
+    if let Some((name, env_var, base_url, model)) = remote_profile {
+        if let Some(idx) = lines.iter().position(|l| l.trim() == "llm:") {
+            let insert_at = idx + 1;
+            let block = [
+                format!("  {name}:"),
+                format!("    base_url: {base_url}"),
+                format!("    model: {model}"),
+                "    context_limit: 128000".into(),
+                format!("    api_key: ${{{env_var}}}"),
+            ];
+            for (i, line) in block.into_iter().enumerate() {
+                lines.insert(insert_at + i, line);
+            }
+            lines.insert(idx, format!("llm_profile: {name}"));
+            lines.insert(idx, String::new());
         }
     }
 
     std::fs::write(&target, lines.join("\n"))?;
     let tty = use_color_stdout();
     println!("{} created {}", green("◆", tty), target.display());
-    eprintln!(
-        "  {} edit `repos:` and `llm.base_url`, then run 'unistar-coworker doctor' to verify",
-        hint_prefix()
-    );
+
+    if use_interactive {
+        eprintln!("  {} running doctor summary…", hint_prefix());
+        let report =
+            diagnostics::run_checks_with_extras(Some(target.clone()), DoctorExtras::default())
+                .await;
+        print_report(&report, false)?;
+        if report.has_failures() {
+            eprintln!(
+                "  {} fix warnings above, then run `unistar-coworker serve`",
+                hint_prefix()
+            );
+        }
+    } else {
+        eprintln!(
+            "  {} edit `repos:` and `llm.base_url`, then run 'unistar-coworker doctor' to verify",
+            hint_prefix()
+        );
+    }
     Ok(())
+}
+
+async fn run_interactive_prompts() -> Result<(
+    Option<String>,
+    Option<String>,
+    Option<(String, String, String, String)>,
+)> {
+    println!("unistar-coworker init (interactive)");
+    println!();
+
+    let ollama_url = probe_ollama().await;
+    let llm_url = if ollama_url {
+        println!(
+            "{} Ollama detected at http://127.0.0.1:11434 — using http://127.0.0.1:11434/v1",
+            green("✓", use_color_stdout())
+        );
+        Some("http://127.0.0.1:11434/v1".into())
+    } else {
+        println!(
+            "{} Ollama not detected — you can set llm.base_url manually later",
+            yellow("!", use_color_stdout())
+        );
+        None
+    };
+
+    let repos = prompt_repos()?;
+    let remote_profile = prompt_remote_profile()?;
+
+    Ok((repos, llm_url, remote_profile))
+}
+
+async fn probe_ollama() -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .get("http://127.0.0.1:11434/api/tags")
+        .send()
+        .await
+        .ok()
+        .is_some_and(|r| r.status().is_success())
+}
+
+fn prompt_repos() -> Result<Option<String>> {
+    print!("GitHub repos (comma-separated owner/repo, Enter to skip): ");
+    io::stdout().flush().ok();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let mut valid = Vec::new();
+    for part in trimmed.split(',') {
+        let r = part.trim();
+        if r.is_empty() {
+            continue;
+        }
+        if !is_valid_repo_slug(r) {
+            eprintln!("{} invalid repo `{r}` — expected owner/repo", hint_prefix());
+            continue;
+        }
+        valid.push(r.to_string());
+    }
+    if valid.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(valid.join(",")))
+    }
+}
+
+fn is_valid_repo_slug(slug: &str) -> bool {
+    let Some((owner, repo)) = slug.split_once('/') else {
+        return false;
+    };
+    !owner.is_empty()
+        && !repo.is_empty()
+        && owner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+fn prompt_remote_profile() -> Result<Option<(String, String, String, String)>> {
+    print!("Add remote LLM profile? [y/N]: ");
+    io::stdout().flush().ok();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Ok(None);
+    }
+
+    print!("Profile name (e.g. deepseek): ");
+    io::stdout().flush().ok();
+    line.clear();
+    io::stdin().read_line(&mut line)?;
+    let name = line.trim().to_string();
+    if name.is_empty() {
+        return Ok(None);
+    }
+
+    print!("API key env var name (e.g. DEEPSEEK_API_KEY): ");
+    io::stdout().flush().ok();
+    line.clear();
+    io::stdin().read_line(&mut line)?;
+    let env_var = line.trim().to_string();
+    if env_var.is_empty()
+        || !env_var
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        eprintln!(
+            "{} invalid env var name — skipping remote profile",
+            hint_prefix()
+        );
+        return Ok(None);
+    }
+
+    print!("base_url [https://api.deepseek.com/v1]: ");
+    io::stdout().flush().ok();
+    line.clear();
+    io::stdin().read_line(&mut line)?;
+    let base_url = line.trim();
+    let base_url = if base_url.is_empty() {
+        "https://api.deepseek.com/v1".to_string()
+    } else {
+        base_url.to_string()
+    };
+
+    print!("model [deepseek-chat]: ");
+    io::stdout().flush().ok();
+    line.clear();
+    io::stdin().read_line(&mut line)?;
+    let model = line.trim();
+    let model = if model.is_empty() {
+        "deepseek-chat".to_string()
+    } else {
+        model.to_string()
+    };
+
+    Ok(Some((name, env_var, base_url, model)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn valid_repo_slug_accepts_owner_repo() {
+        assert!(is_valid_repo_slug("acme/widget"));
+        assert!(is_valid_repo_slug("my-org/my_repo"));
+        assert!(!is_valid_repo_slug("invalid"));
+        assert!(!is_valid_repo_slug("/repo"));
+    }
+
+    #[tokio::test]
+    async fn init_non_interactive_writes_template() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coworker.yaml");
+        run_init(
+            false,
+            None,
+            Some(path.clone()),
+            Some("acme/widget,acme/api".into()),
+            Some("http://127.0.0.1:11434/v1".into()),
+            false,
+        )
+        .await
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("acme/widget"));
+        assert!(raw.contains("acme/api"));
+        assert!(raw.contains("http://127.0.0.1:11434/v1"));
+    }
+
+    #[tokio::test]
+    async fn init_skips_existing_without_force() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coworker.yaml");
+        std::fs::write(&path, "existing").unwrap();
+        run_init(false, None, Some(path.clone()), None, None, false)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
+    }
+
+    #[tokio::test]
+    async fn init_interactive_without_tty_uses_cli_args() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coworker.yaml");
+        run_init(
+            false,
+            None,
+            Some(path.clone()),
+            Some("acme/widget".into()),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("acme/widget"));
+    }
 }

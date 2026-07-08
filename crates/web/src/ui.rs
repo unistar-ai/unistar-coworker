@@ -155,6 +155,30 @@ fn react_unavailable() -> Response {
         .into_response()
 }
 
+/// Status for `doctor` — embedded assets vs on-disk `web-ui/dist/`.
+pub fn web_ui_doctor_status() -> (&'static str, String) {
+    #[cfg(feature = "embed-web-ui")]
+    {
+        if HAS_DIST && !INDEX_HTML.is_empty() {
+            ("ok", "embedded in binary (embed-web-ui)".into())
+        } else {
+            (
+                "warn",
+                "embed-web-ui enabled but web-ui/dist was empty at build time".into(),
+            )
+        }
+    }
+    #[cfg(not(feature = "embed-web-ui"))]
+    {
+        let path = web_dist_root().join("index.html");
+        if path.exists() {
+            ("ok", format!("served from disk ({})", path.display()))
+        } else {
+            ("warn", format!("missing {}", path.display()))
+        }
+    }
+}
+
 fn mime_for(name: &str) -> &'static str {
     if name.ends_with(".js") {
         "application/javascript"

@@ -257,3 +257,50 @@ fn rpc_progress_json(p: &coworker_core::agent::chat_loop::ChatProgress) -> Optio
     };
     Some(serde_json::to_string(&serde_json::json!({"type": "progress", "progress": v})).unwrap())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stable RPC error envelope — do not change without a major release (see docs/STABILITY.md).
+    #[test]
+    fn stable_unknown_op_error_shape() {
+        let line = serde_json::json!({
+            "type": "error",
+            "code": "unknown_op",
+            "op": "nope"
+        });
+        assert_eq!(line["type"], "error");
+        assert_eq!(line["code"], "unknown_op");
+        assert_eq!(line["op"], "nope");
+    }
+
+    #[test]
+    fn stable_cancelled_shape() {
+        let line = serde_json::json!({ "type": "cancelled" });
+        assert_eq!(line["type"], "cancelled");
+    }
+
+    #[test]
+    fn stable_approval_required_error_shape() {
+        let line = serde_json::json!({
+            "type": "error",
+            "code": "approval_required",
+            "session_id": "9950379a-3db7-46ec-98ed-11310014b456",
+            "pending_approval": {
+                "tool": "pr_merge",
+                "args": "***redacted***",
+                "description": "merge PR"
+            }
+        });
+        assert_eq!(line["type"], "error");
+        assert_eq!(line["code"], "approval_required");
+        assert!(line.get("pending_approval").is_some());
+    }
+
+    #[test]
+    fn stable_timeout_error_shape() {
+        let line = serde_json::json!({ "type": "error", "code": "timeout" });
+        assert_eq!(line["code"], "timeout");
+    }
+}

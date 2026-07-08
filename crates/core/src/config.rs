@@ -52,6 +52,58 @@ pub struct Config {
     pub hygiene: HygieneConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    /// Config schema version for forward-compatible migrations (default `1`).
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
+}
+
+fn default_config_version() -> u32 {
+    1
+}
+
+/// Latest config schema version understood by this binary.
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
+
+/// Apply in-memory YAML migrations before deserializing [`Config`].
+pub fn migrate_config_value(doc: &mut Value) {
+    let mut version = doc
+        .get("config_version")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .unwrap_or(1);
+
+    while version < CURRENT_CONFIG_VERSION {
+        version = match version {
+            // v1 → v2 placeholder: add future field renames here.
+            1 => CURRENT_CONFIG_VERSION,
+            _ => CURRENT_CONFIG_VERSION,
+        };
+    }
+
+    if let Value::Mapping(ref mut map) = doc {
+        map.insert(
+            Value::String("config_version".into()),
+            Value::Number(version.into()),
+        );
+    }
+}
+
+fn parse_config_yaml(raw: &str) -> Result<Config> {
+    let mut doc: Value = serde_yaml::from_str(raw).map_err(|e| {
+        let loc = e
+            .location()
+            .map(|p| format!(" at line {}, column {}", p.line(), p.column()))
+            .unwrap_or_default();
+        CoworkerError::Config(format!("invalid YAML{loc}{e}"))
+    })?;
+    migrate_config_value(&mut doc);
+    serde_yaml::from_value(doc).map_err(|e| {
+        let loc = e
+            .location()
+            .map(|p| format!(" at line {}, column {}", p.line(), p.column()))
+            .unwrap_or_default();
+        CoworkerError::Config(format!("invalid config{loc}{e}"))
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1024,23 +1076,16 @@ impl Config {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let raw = std::fs::read_to_string(path)?;
-        let mut cfg: Config = match serde_yaml::from_str(&raw) {
-            Ok(c) => c,
-            Err(e) => {
-                let loc = e
-                    .location()
-                    .map(|p| format!(" at line {}, column {}", p.line(), p.column()))
-                    .unwrap_or_default();
-                return Err(CoworkerError::Config(format!(
-                    "invalid YAML in {}:{}{}",
-                    path.display(),
-                    loc,
-                    e
-                )));
+        let mut cfg = parse_config_yaml(&raw).map_err(|e| {
+            if let CoworkerError::Config(msg) = &e {
+                CoworkerError::Config(format!("invalid YAML in {}: {}", path.display(), msg))
+            } else {
+                e
             }
-        };
+        })?;
         cfg.resolve_env_in_github();
         cfg.resolve_env_in_mcp();
+        cfg.resolve_env_in_llm();
         if let Some(name) = Config::read_llm_profile_sidecar(path) {
             cfg.llm_profile = Some(name);
         }
@@ -1049,18 +1094,10 @@ impl Config {
     }
 
     pub fn load_from_str(raw: &str) -> Result<Self> {
-        let mut cfg: Config = match serde_yaml::from_str(raw) {
-            Ok(c) => c,
-            Err(e) => {
-                let loc = e
-                    .location()
-                    .map(|p| format!(" at line {}, column {}", p.line(), p.column()))
-                    .unwrap_or_default();
-                return Err(CoworkerError::Config(format!("invalid YAML{loc}{e}")));
-            }
-        };
+        let mut cfg = parse_config_yaml(raw)?;
         cfg.resolve_env_in_github();
         cfg.resolve_env_in_mcp();
+        cfg.resolve_env_in_llm();
         cfg.finalize()?;
         Ok(cfg)
     }
@@ -1170,7 +1207,7 @@ impl Config {
             }
         }
         Err(CoworkerError::Config(
-            "coworker.yaml not found (cwd or .coworker/) — run 'unistar-coworker init' to create one".into(),
+            "coworker.yaml not found (cwd or .coworker/) — run `unistar-coworker init --interactive` to create one".into(),
         ))
     }
 
@@ -1188,17 +1225,36 @@ impl Config {
             resolve_env_map(&mut server.headers);
         }
     }
+
+    fn resolve_env_in_llm(&mut self) {
+        for profile in self.llm_profiles.values_mut() {
+            if let Some(ref mut key) = profile.api_key {
+                resolve_env_string(key);
+            }
+        }
+    }
+}
+
+/// Expand `${VAR}` from the environment when the whole value is a single placeholder.
+pub fn resolve_env_string(value: &mut String) {
+    if let Some(rest) = value.strip_prefix("${") {
+        if let Some(var) = rest.strip_suffix('}') {
+            if let Ok(v) = std::env::var(var) {
+                *value = v;
+            }
+        }
+    }
+}
+
+/// True when the value is still an unresolved `${VAR}` placeholder.
+pub fn is_unresolved_env_placeholder(value: &str) -> bool {
+    let v = value.trim();
+    v.starts_with("${") && v.ends_with('}') && v.len() > 3
 }
 
 fn resolve_env_map(map: &mut HashMap<String, String>) {
     for value in map.values_mut() {
-        if let Some(rest) = value.strip_prefix("${") {
-            if let Some(var) = rest.strip_suffix('}') {
-                if let Ok(v) = std::env::var(var) {
-                    *value = v;
-                }
-            }
-        }
+        resolve_env_string(value);
     }
 }
 
@@ -1430,5 +1486,66 @@ repos: [acme/widget]
         assert_eq!(cfg.llm.model, "gemma");
         assert_eq!(cfg.llm_profile.as_deref(), Some("default"));
         assert!(cfg.llm_profiles.contains_key("default"));
+    }
+
+    #[test]
+    fn resolve_env_string_expands_api_key() {
+        let key = "TEST_RESOLVE_ENV_KEY";
+        std::env::set_var(key, "sk-test-expanded");
+        let yaml = format!(
+            r#"
+llm:
+  remote:
+    base_url: https://api.example.com/v1
+    model: m
+    context_limit: 64000
+    api_key: ${{{key}}}
+repos: [acme/widget]
+"#
+        );
+        let cfg = Config::load_from_str(&yaml).unwrap();
+        assert_eq!(
+            cfg.llm_profiles["remote"].api_key.as_deref(),
+            Some("sk-test-expanded")
+        );
+        std::env::remove_var(key);
+    }
+
+    #[test]
+    fn resolve_env_string_keeps_placeholder_when_unset() {
+        let yaml = r#"
+llm:
+  remote:
+    base_url: https://api.example.com/v1
+    model: m
+    context_limit: 64000
+    api_key: ${UNSET_TEST_API_KEY_XYZ}
+repos: [acme/widget]
+"#;
+        let cfg = Config::load_from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.llm_profiles["remote"].api_key.as_deref(),
+            Some("${UNSET_TEST_API_KEY_XYZ}")
+        );
+        assert!(is_unresolved_env_placeholder("${UNSET_TEST_API_KEY_XYZ}"));
+    }
+
+    #[test]
+    fn migrate_config_value_sets_schema_version() {
+        let mut doc: Value = serde_yaml::from_str(
+            r#"
+llm:
+  local:
+    base_url: http://127.0.0.1:11434/v1
+    model: m
+    context_limit: 64000
+repos: [acme/widget]
+"#,
+        )
+        .unwrap();
+        migrate_config_value(&mut doc);
+        assert_eq!(doc.get("config_version").and_then(|v| v.as_u64()), Some(1));
+        let cfg: Config = serde_yaml::from_value(doc).unwrap();
+        assert_eq!(cfg.config_version, 1);
     }
 }

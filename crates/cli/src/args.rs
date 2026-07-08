@@ -129,6 +129,9 @@ pub(crate) enum Commands {
         /// Emit machine-readable JSON on stdout
         #[arg(long)]
         json: bool,
+        /// Export a diagnostic zip (doctor json, redacted config, meta)
+        #[arg(long, value_name = "PATH")]
+        bundle: Option<PathBuf>,
     },
     /// Create a starter coworker.yaml (does not overwrite unless --force)
     Init {
@@ -144,6 +147,15 @@ pub(crate) enum Commands {
         /// LLM base_url to seed (e.g. http://localhost:11434/v1)
         #[arg(long)]
         llm_url: Option<String>,
+        /// Guided setup when stdin/stdout are a TTY
+        #[arg(long)]
+        interactive: bool,
+    },
+    /// Check GitHub Releases for a newer version
+    UpgradeCheck {
+        /// Emit machine-readable JSON on stdout
+        #[arg(long)]
+        json: bool,
     },
     /// Export stored data (Pi-style session tree: JSONL + HTML)
     Export {
@@ -261,6 +273,7 @@ use coworker_core::store::open_store;
 use super::terminal::{emit_json, err_prefix, hint_prefix, set_plain, timeout_prefix, warn_prefix};
 use super::{
     catalog, chat, daemon, doctor_init, export, headless, report, rpc, runtime, store, triage,
+    upgrade_check,
 };
 
 pub async fn run() -> Result<()> {
@@ -296,14 +309,18 @@ pub async fn run() -> Result<()> {
         clap_complete::generate(*shell, &mut cmd, "unistar-coworker", &mut std::io::stdout());
         return Ok(());
     }
-    if let Some(Commands::Doctor { json }) = &cli.command {
-        return doctor_init::run_doctor(cli.config.clone(), *json).await;
+    if let Some(Commands::Doctor { json, bundle }) = &cli.command {
+        return doctor_init::run_doctor(cli.config.clone(), *json, bundle.clone()).await;
+    }
+    if let Some(Commands::UpgradeCheck { json }) = &cli.command {
+        return upgrade_check::run_upgrade_check(*json).await;
     }
     if let Some(Commands::Init {
         force,
         path,
         repos,
         llm_url,
+        interactive,
     }) = &cli.command
     {
         return doctor_init::run_init(
@@ -312,6 +329,7 @@ pub async fn run() -> Result<()> {
             path.clone(),
             repos.clone(),
             llm_url.clone(),
+            *interactive,
         )
         .await;
     }
@@ -431,6 +449,7 @@ pub async fn run() -> Result<()> {
         }
         Some(Commands::Doctor { .. })
         | Some(Commands::Init { .. })
+        | Some(Commands::UpgradeCheck { .. })
         | Some(Commands::Completions { .. }) => {
             unreachable!()
         }

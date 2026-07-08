@@ -51,6 +51,17 @@ jobs:
           PACKAGE_VERSION: ${{ github.ref_name }}
           PACKAGE_TRIPLE: ${{ matrix.triple }}
 
+      - name: Generate SBOM (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-cyclonedx --locked
+          BASENAME="unistar-coworker-${GITHUB_REF_NAME}-${{ matrix.triple }}"
+          cargo cyclonedx --manifest-path crates/unistar-coworker/Cargo.toml \
+            --all-features --format json --override-filename "${BASENAME}.sbom"
+          mv "crates/unistar-coworker/${BASENAME}.sbom.json" "dist/${BASENAME}.sbom.json"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

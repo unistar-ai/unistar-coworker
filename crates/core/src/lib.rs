@@ -16,3 +16,4 @@ pub mod output;
 pub mod repo;
 pub mod store;
 pub mod terminal;
+pub mod upgrade;

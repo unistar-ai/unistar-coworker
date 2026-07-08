@@ -1,0 +1,68 @@
+name: Bug report
+description: Report incorrect behavior, crashes, or regressions
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. See [troubleshooting.md](https://github.com/unistar-ai/unistar-coworker/blob/main/docs/troubleshooting.md) first.
+        **Do not paste API keys, tokens, or production repo names.**
+
+  - type: input
+    id: version
+    attributes:
+      label: unistar-coworker version
+      description: Output of `unistar-coworker --version`
+      placeholder: "2.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux x86_64
+        - macOS arm64 (Apple Silicon)
+        - Other (source build)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      options:
+        - tar.gz (GitHub Release)
+        - Docker
+        - Source (cargo build)
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor_json
+    attributes:
+      label: doctor --json
+      description: Paste output of `unistar-coworker doctor --json` (redact secrets)
+      render: json
+      placeholder: |
+        { "ok": true, ... }
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Steps to reproduce, expected vs actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: CLI output, `RUST_LOG=debug` snippets (redacted)
+    validations:
+      required: false

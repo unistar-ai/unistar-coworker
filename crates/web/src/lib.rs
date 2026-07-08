@@ -1,6 +1,11 @@
 pub mod snapshot;
 mod ui;
 
+/// Doctor status for the React Web UI assets.
+pub fn web_ui_doctor_status() -> (&'static str, String) {
+    ui::web_ui_doctor_status()
+}
+
 #[cfg(test)]
 mod api_tests;
 

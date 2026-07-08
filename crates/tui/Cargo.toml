@@ -6,7 +6,7 @@ license.workspace = true
 description = "Terminal UI for unistar-coworker"
 
 [dependencies]
-coworker-core = { path = "../core" }
+coworker-core = { path = "../core", default-features = false }
 anyhow = "1"
 crossterm = "0.28"
 futures-util = "0.3"
