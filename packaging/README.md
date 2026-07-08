@@ -1,19 +1,41 @@
 # Packaging
 
-Scripts and templates for building and launching a single-binary deploy workdir.
+[`scripts/package.sh`](../scripts/package.sh) builds web-ui + Rust binary and assembles one deploy tree (local workdir or GitHub Release).
 
 | Path | Role |
 |------|------|
-| [`scripts/package.sh`](../scripts/package.sh) | Build web-ui + Rust binary, refresh runtime workdir (packaging only) |
-| `workdir-template/` | Seed files copied into the runtime workdir (`coworker.yaml`, `AGENTS.md`) |
+| [`scripts/package.sh`](../scripts/package.sh) | Full package: web-ui, binary, skills, template, docs |
+| `workdir-template/` | Seed config copied into the tree (`template/` + root `coworker.yaml`) |
 
-Runtime output (not in git):
+### Output layout
 
-- `../workdir/` — agent cwd (binary, config, `data/`, synced `skills/`)
-- `../.data-backup/` — transient backup while rebuilding workdir
+```
+<output>/
+├── unistar-coworker       # binary (embed-web-ui, release)
+├── skills/
+├── template/              # pristine workdir-template/
+├── coworker.yaml          # active config (from template)
+├── AGENTS.md
+├── coworker.example.yaml
+├── README.md
+└── data/                  # preserved across rebuilds (local runtime only)
+```
 
-Override locations with `START_AGENT_WORKDIR` and `START_AGENT_DATA_BACKUP`.
+**Local** (default `../workdir` next to repo):
 
-### GitHub Releases
+```bash
+./scripts/package.sh
+# or: START_AGENT_WORKDIR=./workdir ./scripts/package.sh
+```
 
-Tag push (`v*`) runs [`.github/workflows/release.yml`](../.github/workflows/release.yml) — release archives mirror the layout above (binary + `skills/` + `template/`).
+**GitHub Release** (also writes `dist/*.tar.gz` + `.sha256`):
+
+```bash
+PACKAGE_VERSION=2.0.0 PACKAGE_TRIPLE=x86_64-unknown-linux-gnu ./scripts/package.sh
+```
+
+Override paths with `START_AGENT_WORKDIR` and `START_AGENT_DATA_BACKUP`.
+
+Launch after packaging: `cd <output> && ./unistar-coworker serve`, or use your deploy wrapper (e.g. parent `start-agent.sh`).
+
+Tag push (`v*`) runs [`.github/workflows/release.yml`](../.github/workflows/release.yml), which calls `package.sh` with `PACKAGE_VERSION` / `PACKAGE_TRIPLE`.

@@ -18,10 +18,8 @@ jobs:
         include:
           - os: ubuntu-latest
             triple: x86_64-unknown-linux-gnu
-            archive_ext: tar.gz
           - os: macos-latest
             triple: aarch64-apple-darwin
-            archive_ext: tar.gz
 
     steps:
       - uses: actions/checkout@v6
@@ -47,37 +45,11 @@ jobs:
           cache: npm
           cache-dependency-path: web-ui/package.json
 
-      - name: Build Web UI
-        working-directory: web-ui
-        run: |
-          npm install
-          npm run build:fast
-
-      - name: cargo build --release
-        run: cargo build --release --features embed-web-ui -p unistar-coworker
+      - name: Package release
+        run: ./scripts/package.sh
         env:
-          CARGO_INCREMENTAL: "0"
-
-      - name: Package release archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          BASENAME="unistar-coworker-${VERSION}-${{ matrix.triple }}"
-          STAGING="dist/${BASENAME}"
-          mkdir -p "${STAGING}"
-          cp target/release/unistar-coworker "${STAGING}/"
-          cp -R skills "${STAGING}/skills"
-          cp -R packaging/workdir-template "${STAGING}/template"
-          cp coworker.example.yaml "${STAGING}/"
-          cp README.md "${STAGING}/"
-          mkdir -p dist
-          tar -czf "dist/${BASENAME}.tar.gz" -C dist "${BASENAME}"
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "dist/${BASENAME}.tar.gz" > "dist/${BASENAME}.tar.gz.sha256"
-          else
-            shasum -a 256 "dist/${BASENAME}.tar.gz" > "dist/${BASENAME}.tar.gz.sha256"
-          fi
+          PACKAGE_VERSION: ${{ github.ref_name }}
+          PACKAGE_TRIPLE: ${{ matrix.triple }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -433,7 +433,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "coworker-cli"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "coworker-core"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "coworker-tui"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "coworker-web"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "axum",
  "chrono",
@@ -2610,7 +2610,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "unistar-coworker"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "coworker-cli",
  "coworker-core",
