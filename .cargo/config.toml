@@ -17,14 +17,14 @@ split-debuginfo = "unpacked"
 [profile.dev.package."*"]
 opt-level = 0
 
-# mold does NOT work as a macOS linker (rustc passes -dynamic etc.). Use split-debuginfo
-# + codegen-units above, or install LLVM lld: brew install lld
-#   rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/opt/llvm/bin/ld64.lld"]
-#
-# [target.aarch64-apple-darwin]
-# rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/opt/llvm/bin/ld64.lld"]
+# macOS — LLVM lld (Mach-O): brew install lld
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/opt/lld/bin/ld64.lld"]
 
-# Linux x86_64 — enable after: apt install mold  /  brew install mold
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-fuse-ld=/usr/local/opt/lld/bin/ld64.lld"]
+
+# Linux x86_64 — mold (ELF only; not available on macOS): apt install mold
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
