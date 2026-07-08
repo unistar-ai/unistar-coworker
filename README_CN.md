@@ -563,7 +563,7 @@ unistar-coworker/
 └── Cargo.lock
 ```
 
-版本：**1.0.0**（workspace `[workspace.package]`，见 [Cargo.toml](./Cargo.toml)）。
+版本：**2.0.0**（workspace `[workspace.package]`，见 [Cargo.toml](./Cargo.toml)）。
 
 ---
 

@@ -633,7 +633,7 @@ unistar-coworker/
 └── Cargo.lock
 ```
 
-Crate version: **1.0.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)).
+Crate version: **2.0.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)).
 
 ---
 
