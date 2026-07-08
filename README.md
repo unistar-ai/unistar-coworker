@@ -49,6 +49,7 @@
     - [GitHub harness tools](#github-harness-tools)
   - [Configuration](#configuration)
   - [Storage](#storage)
+  - [Integrations (optional)](#integrations-optional)
   - [MCP federation](#mcp-federation)
   - [Architecture](#architecture)
     - [Product boundaries](#product-boundaries)
@@ -301,6 +302,8 @@ cargo run --release -- --attach                # TUI attached to a running daemo
 
 Batch workflows **block third-party MCP by default**; set `workflows.mcp_readonly: true` (global) or `workflows.<id>.mcp_readonly: true` (per-workflow) to allow readonly MCP only. Mutating MCP stays chat-only.
 
+Details: [docs/workflows.md](docs/workflows.md).
+
 ### CLI reference
 
 **Global flags** (before the subcommand): `--config <PATH>` override config file (skip discover); `-v` / `--verbose` (`-v` debug, `-vv` trace); `-q` / `--quiet` (warn); `--plain` disable ANSI color; `--attach` attach to a daemon store only (TUI / `serve` / `daemon`).
@@ -455,9 +458,25 @@ cargo run --release -- store compact --dry-run  # preview what would be pruned, 
 
 ---
 
+## Integrations (optional)
+
+The core product is a **local-first general agent** (workspace + LLM). These are optional capability packs — enable only what you need:
+
+| Integration | Config | Docs |
+|-------------|--------|------|
+| **GitHub / CI harness** | `github:`, `repos:`, workflow skills | [skills/github-ops-pack/README.md](skills/github-ops-pack/README.md) |
+| **Batch workflows** | `workflows:` + cron / `run-once` | [docs/workflows.md](docs/workflows.md) |
+| **Third-party MCP** | `mcp.servers[]` (Slack, HTTP, filesystem, …) | [docs/mcp-recipes.md](docs/mcp-recipes.md) |
+
+Authoring skills: [skills/_base/SKILL_TEMPLATE.md](skills/_base/SKILL_TEMPLATE.md). Local models: [docs/local-models.md](docs/local-models.md). Context budget: [docs/context-budget.md](docs/context-budget.md).
+
+---
+
 ## MCP federation
 
 GitHub **always** uses the in-process `GithubHarness`. External tools (Slack, filesystem, custom HTTP MCP) use `mcp.servers[]`:
+
+> Step-by-step server examples: [docs/mcp-recipes.md](docs/mcp-recipes.md).
 
 | Topic | Behavior |
 |-------|----------|

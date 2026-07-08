@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.3.0"
+version = "2.4.0"
 edition = "2021"
 license = "MIT"
 description = "Local GitHub ops secretary with TUI, MCP, and local LLM"

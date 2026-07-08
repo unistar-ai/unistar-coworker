@@ -45,6 +45,7 @@
   - [常用命令](#常用命令)
 - [配置](#配置)
 - [存储](#存储)
+- [可选集成](#可选集成)
 - [MCP 联邦](#mcp-联邦)
 - [架构](#架构)
 - [开发](#开发)
@@ -266,6 +267,8 @@ cargo run --release -- --attach        # 附着到已运行 daemon 的 store
 
 批处理 workflow **默认不调用第三方 MCP**；设置 `workflows.mcp_readonly: true`（全局）或 `workflows.<id>.mcp_readonly: true`（单 workflow）可放开只读 MCP。Mutating MCP 始终仅限 chat。
 
+详见 [docs/workflows.md](docs/workflows.md)。
+
 ### 常用命令
 
 | 命令 | 说明 |
@@ -387,9 +390,25 @@ cargo run --release -- store compact --audit-days 180 --digest-keep 60
 
 ---
 
+## 可选集成
+
+核心是 **本地优先通用 Agent**（工作区 + LLM）。以下为可选能力包，按需启用：
+
+| 集成 | 配置 | 文档 |
+|------|------|------|
+| **GitHub / CI harness** | `github:`、`repos:`、workflow skills | [skills/github-ops-pack/README.md](skills/github-ops-pack/README.md) |
+| **批处理 workflow** | `workflows:` + cron / `run-once` | [docs/workflows.md](docs/workflows.md) |
+| **第三方 MCP** | `mcp.servers[]`（Slack、HTTP、filesystem 等） | [docs/mcp-recipes.md](docs/mcp-recipes.md) |
+
+编写 skill：[skills/_base/SKILL_TEMPLATE.md](skills/_base/SKILL_TEMPLATE.md)。本地模型：[docs/local-models.md](docs/local-models.md)。上下文预算：[docs/context-budget.md](docs/context-budget.md)。
+
+---
+
 ## MCP 联邦
 
 GitHub **永远**走进程内 `GithubHarness`。Slack、filesystem 等外部工具走 `mcp.servers[]`：
+
+> 分步示例：[docs/mcp-recipes.md](docs/mcp-recipes.md)。
 
 | 主题 | 行为 |
 |------|------|

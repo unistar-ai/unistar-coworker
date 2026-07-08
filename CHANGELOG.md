@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-08
+
+### Added
+
+- `skills/_base/SKILL_TEMPLATE.md` — skill authoring template and checklist.
+- `skills/github-ops-pack/README.md` — optional GitHub/CI skill catalog and workflow defaults.
+- `docs/mcp-recipes.md` — Slack, filesystem, and HTTP MCP setup recipes.
+- `docs/workflows.md` — built-in workflows, cron/daemon, MCP policy, customization via skills.
+- README / README_CN § **Integrations (optional)** — GitHub harness, workflows, and MCP as capability packs.
+
+[2.4.0]: https://github.com/unistar-ai/unistar-coworker/compare/v2.3.0...v2.4.0
+
 ## [2.3.0] - 2026-07-08
 
 ### Added
