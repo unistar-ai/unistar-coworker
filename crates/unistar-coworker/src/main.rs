@@ -6,5 +6,4 @@ async fn main() {
         eprintln!("{} {e}", err_prefix());
         std::process::exit(coworker_core::exit_codes::exit_code_for_error(&e));
     }
-    
 }
