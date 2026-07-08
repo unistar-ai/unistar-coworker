@@ -13,7 +13,7 @@ web-browser = ["dep:chromiumoxide"]
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-cron = "0.15"
+cron = "0.17"
 encoding_rs = "0.8"
 futures-util = "0.3"
 regex = "1"
