@@ -1,0 +1,37 @@
+[package]
+name = "coworker-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core harness for unistar-coworker"
+
+[features]
+default = ["web-browser"]
+web-browser = ["dep:chromiumoxide"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.15"
+encoding_rs = "0.8"
+futures-util = "0.3"
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "process", "net", "fs", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
+uuid = { version = "1", features = ["serde", "v4"] }
+fs2 = "0.4"
+chromiumoxide = { version = "0.9", default-features = true, optional = true }
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tempfile = "3"

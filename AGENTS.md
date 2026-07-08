@@ -7,7 +7,7 @@ Guidance for AI agents working in the **unistar-coworker** repository.
 unistar-coworker is a **local GitHub ops secretary** (Rust, ratatui TUI). It:
 
 - Runs scheduled **workflows** (daily triage, release duty, review radar, …) and an interactive **chat** mode.
-- Calls **GithubHarness** in-process (`gh` CLI) for GitHub/CI read/write tools; optional **third-party MCP** servers via `mcp.servers[]` ([`src/mcp/`](./src/mcp/)).
+- Calls **GithubHarness** in-process (`gh` CLI) for GitHub/CI read/write tools; optional **third-party MCP** servers via `mcp.servers[]` ([`crates/core/src/mcp/`](./crates/core/src/mcp/)).
 - Uses a **local LLM** (Ollama-compatible OpenAI API) for classification, chat planning, and digests.
 - **Never** auto-executes mutating actions — GitHub harness tools (`ci_rerun_workflow`, …) and **federated MCP mutating tools** go through the TUI/Web approval queue unless `chat.auto_approve_mutations` (or per-server `approval.mutating: auto` with global auto) is explicitly enabled.
 
@@ -44,27 +44,27 @@ Three layers; do not blur responsibilities:
 |-------|----------|------|
 | **Skill** | `skills/*/SKILL.md` | Reusable technique: triage rules, tone, digest style. No cron, no harness logic. |
 | **Prompt** | `prompts/*.md` | Chat system prompt body; frontmatter `skills:` lists default techniques. |
-| **Harness** | `src/agent/*.rs`, `src/engine/*.rs` | Deterministic Rust: MCP, store, approvals, token budget, chat/workflow loops. |
+| **Harness** | `crates/core/src/agent/*.rs`, `crates/core/src/engine/*.rs` | Deterministic Rust: MCP, store, approvals, token budget, chat/workflow loops. |
 
-Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`src/agent/tool_catalog.rs`](./src/agent/tool_catalog.rs).
+Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`crates/core/src/agent/tool_catalog.rs`](./crates/core/src/agent/tool_catalog.rs).
 
-Prompt assembly: [`src/engine/prompt.rs`](./src/engine/prompt.rs) (`compose_system_prompt`, `load_chat_prompt_bundle`).
+Prompt assembly: [`crates/core/src/engine/prompt.rs`](./crates/core/src/engine/prompt.rs) (`compose_system_prompt`, `load_chat_prompt_bundle`).
 
 ---
 
 ## Chat harness (most active area)
 
-Entry: [`src/engine/chat.rs`](./src/engine/chat.rs) → [`src/agent/chat_loop.rs`](./src/agent/chat_loop.rs).
+Entry: [`crates/core/src/engine/chat.rs`](./crates/core/src/engine/chat.rs) → [`crates/core/src/agent/chat_loop.rs`](./crates/core/src/agent/chat_loop.rs).
 
 | Concern | Where |
 |---------|--------|
-| Native tool calling (Ollama/OpenAI `tools` / `tool_calls`) | [`src/llm/chat.rs`](./src/llm/chat.rs), [`src/llm/client.rs`](./src/llm/client.rs) |
-| Tool schemas exposed to the model | `ToolCatalog::native_tool_definitions_for_session(chat.tool_mode, warmed)` in [`tool_catalog.rs`](./src/agent/tool_catalog.rs) |
-| LLM message packing, trimming, token estimate | [`src/agent/context.rs`](./src/agent/context.rs) |
+| Native tool calling (Ollama/OpenAI `tools` / `tool_calls`) | [`crates/core/src/llm/chat.rs`](./crates/core/src/llm/chat.rs), [`crates/core/src/llm/client.rs`](./crates/core/src/llm/client.rs) |
+| Tool schemas exposed to the model | `ToolCatalog::native_tool_definitions_for_session(chat.tool_mode, warmed)` in [`tool_catalog.rs`](./crates/core/src/agent/tool_catalog.rs) |
+| LLM message packing, trimming, token estimate | [`crates/core/src/agent/context.rs`](./crates/core/src/agent/context.rs) |
 | Full tool args + result/error in context | `format_tool_context_message()` in `context.rs` |
 | Harness nudges (missing args, duplicate tool, invalid name) | `tool_catalog.rs` + `push_harness_nudge` in `chat_loop.rs` — **chronological order**, not moved to tail |
-| Mutating tool gate | `is_mutating_tool` → approval queue in `chat_loop.rs` / [`src/engine/approvals.rs`](./src/engine/approvals.rs) |
-| Session persistence | [`src/store/json.rs`](./src/store/json.rs), [`src/store/sqlite.rs`](./src/store/sqlite.rs) (`data/chat/` when using JSON backend) |
+| Mutating tool gate | `is_mutating_tool` → approval queue in `chat_loop.rs` / [`crates/core/src/engine/approvals.rs`](./crates/core/src/engine/approvals.rs) |
+| Session persistence | [`crates/core/src/store/json.rs`](./crates/core/src/store/json.rs), [`crates/core/src/store/sqlite.rs`](./crates/core/src/store/sqlite.rs) (`data/chat/` when using JSON backend) |
 
 Chat system prompt: [`prompts/chat.md`](./prompts/chat.md) — **embedded at build time** (`include_str!`); default `chat.prompt` does not read from cwd. Custom `chat.prompt` paths still load from disk for overrides.
 
@@ -76,11 +76,11 @@ Legacy JSON `action: reply | tool | approval` has been removed; chat uses native
 
 | Layer | Config / path | Role |
 |-------|---------------|------|
-| **GitHub** | `github:` in `coworker.yaml` | [`src/github/harness.rs`](./src/github/harness.rs) — in-process `gh`; meta-tools (`tool_list`, `tool_search`, `tool_describe`, `tool_call`) index GitHub + local harness only. |
-| **Third-party** | `mcp.servers[]` | [`src/mcp/`](./src/mcp/) — `McpPool`; `transport: stdio` (subprocess) or `http` (Streamable HTTP POST + JSON/SSE). |
+| **GitHub** | `github:` in `coworker.yaml` | [`crates/core/src/github/harness.rs`](./crates/core/src/github/harness.rs) — in-process `gh`; meta-tools (`tool_list`, `tool_search`, `tool_describe`, `tool_call`) index GitHub + local harness only. |
+| **Third-party** | `mcp.servers[]` | [`crates/core/src/mcp/`](./crates/core/src/mcp/) — `McpPool`; `transport: stdio` (subprocess) or `http` (Streamable HTTP POST + JSON/SSE). |
 
-- Chat routes federated readonly MCP tools through `execute_readonly_tool` in [`chat_loop.rs`](./src/agent/chat_loop.rs); mutating MCP tools are split out alongside GitHub harness mutators in the tool-call loop and queued through `queue_mutating_approval` (same approval queue as `ci_rerun_workflow`, etc.) unless `chat.auto_approve_mutations` or per-server `approval.mutating: auto` applies.
-- Lazy mode: when `mcp.servers[]` is non-empty, `tool_list` / `tool_search` / `tool_describe` federate GitHub harness + MCP registry ([`src/mcp/lazy_adapter.rs`](./src/mcp/lazy_adapter.rs)).
+- Chat routes federated readonly MCP tools through `execute_readonly_tool` in [`chat_loop.rs`](./crates/core/src/agent/chat_loop.rs); mutating MCP tools are split out alongside GitHub harness mutators in the tool-call loop and queued through `queue_mutating_approval` (same approval queue as `ci_rerun_workflow`, etc.) unless `chat.auto_approve_mutations` or per-server `approval.mutating: auto` applies.
+- Lazy mode: when `mcp.servers[]` is non-empty, `tool_list` / `tool_search` / `tool_describe` federate GitHub harness + MCP registry ([`crates/core/src/mcp/lazy_adapter.rs`](./crates/core/src/mcp/lazy_adapter.rs)).
 - TUI Config tab shows per-server `mcp[id]` status from `AppState.mcp_servers`.
 
 For new **GitHub** tools, extend **GithubHarness** / unistar-mcp catalog — do not duplicate `gh` calls in coworker. For **Slack/filesystem/etc.**, add an MCP server entry under `mcp.servers[]`.
@@ -91,10 +91,10 @@ For new **GitHub** tools, extend **GithubHarness** / unistar-mcp catalog — do 
 
 | Area | Path |
 |------|------|
-| JSON / SQLite store | `src/store/` |
-| Cron + workflow dispatch | `src/engine/scheduler.rs`, `src/engine/workflows.rs` |
-| TUI (tabs, chat, context panel, approvals) | `src/tui/` |
-| CLI entry | `src/main.rs` |
+| JSON / SQLite store | `crates/core/src/store/` |
+| Cron + workflow dispatch | `crates/core/src/engine/scheduler.rs`, `crates/core/src/engine/workflows.rs` |
+| TUI (tabs, chat, context panel, approvals) | `crates/tui/src/` |
+| CLI entry | `crates/unistar-coworker/src/main.rs`, `crates/cli/src/` |
 
 Default store backend is JSON under `./data` (gitignored). SQLite backend and `store migrate` are built in.
 
@@ -103,7 +103,7 @@ Default store backend is JSON under `./data` (gitignored). SQLite backend and `s
 ## Configuration
 
 - Example: [`coworker.example.yaml`](./coworker.example.yaml).
-- Loaded from cwd or `~/.config/unistar-coworker/coworker.yaml` (see [`src/config.rs`](./src/config.rs)).
+- Loaded from cwd or `~/.config/unistar-coworker/coworker.yaml` (see [`crates/core/src/config.rs`](./crates/core/src/config.rs)).
 - Key knobs: `repos`, `llm.context_limit` (64K), `chat.max_turns`, `chat.max_tool_calls`, `chat.tool_mode`, `policy.auto_rerun_flaky`, `github:`, `mcp.servers[]`.
 
 ---
@@ -111,17 +111,32 @@ Default store backend is JSON under `./data` (gitignored). SQLite backend and `s
 ## Common commands
 
 ```sh
+# Fast dev loop — no frontend embed; Web UI served from web-ui/dist/ at runtime
 cargo check
+cargo check -p coworker-tui    # TUI-only when editing crates/tui/
+cargo run -p unistar-coworker -- serve   # after: cd web-ui && npm run build:fast (once)
+
+# Release / deploy — embed web-ui/dist into the binary
+cargo build --release --features embed-web-ui
+
 cargo fmt --check              # CI enforces formatting
-cargo clippy -- -D warnings    # CI-quality bar; fix all warnings
-cargo test
+cargo clippy --workspace --features embed-web-ui -- -D warnings
+cargo test --workspace
 cd web-ui && npm run build:fast && npx tsc --noEmit && npx vitest run
-cargo run --release            # TUI + scheduler
-cargo run --release -- chat --once "Summarize open PRs in acme/widget"
-cargo run --release -- run-once --workflow daily-work
+cargo run -p unistar-coworker --release --features embed-web-ui            # TUI + scheduler
+cargo run -p unistar-coworker --release --features embed-web-ui -- chat --once "Summarize open PRs in acme/widget"
+cargo run -p unistar-coworker --release --features embed-web-ui -- run-once --workflow daily-work
 ```
 
-List skills/workflows: `cargo run --release -- skills list` / `workflows list`.
+### Fast compile (dev)
+
+The repo is a **Cargo workspace** (`crates/core`, `crates/tui`, `crates/web`, `crates/cli`, `crates/unistar-coworker`). Editing one surface crate avoids recompiling unrelated layers when their rlibs are still clean — use `cargo check -p coworker-tui` (etc.) for the tightest loop.
+
+Default `cargo build` / `cargo check` **omit** `embed-web-ui`. The React UI is read from `web-ui/dist/` at runtime ([`crates/web/src/ui.rs`](./crates/web/src/ui.rs)), so changing only Rust code does not re-embed JS bundles. Use Vite HMR (`cd web-ui && npm run dev`) alongside `cargo run -p unistar-coworker -- serve` for frontend work.
+
+Release builds, `start-agent.sh`, and CI use `--features embed-web-ui` for a single-binary deploy. Optional speedups: `.cargo/config.toml` sets `debug=1` + incremental; uncomment `sccache` / `mold` there if installed.
+
+List skills/workflows: `cargo run --release --features embed-web-ui -- skills list` / `workflows list`.
 
 ---
 
@@ -133,8 +148,8 @@ Before pushing (or immediately after, if you already pushed), run the same bar l
 
 ```sh
 cargo fmt --check
-cargo clippy -- -D warnings
-cargo test
+cargo clippy --workspace --features embed-web-ui -- -D warnings
+cargo test --workspace
 cd web-ui && npm install && npm run build:fast && npx tsc --noEmit && npx vitest run
 ```
 

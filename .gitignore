@@ -16,11 +16,6 @@ secrets/
 *.pem
 *.key
 
-# runtime logs and local binaries
-*.log
-unistar-mcp
-unistar-coworker
-
 # editor / agent local state
 .vscode/
 .cursor/settings.json
@@ -40,4 +35,4 @@ web-ui/playwright-report/
 web-ui/.e2e-workdir
 
 # Generated at `cargo build` by build.rs (hashed asset paths from dist/)
-src/web/_dist_manifest.rs
+crates/web/src/_dist_manifest.rs

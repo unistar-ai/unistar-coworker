@@ -36,10 +36,10 @@ jobs:
         run: cargo fmt --check
 
       - name: cargo clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --features embed-web-ui -- -D warnings
 
       - name: cargo test
-        run: cargo test
+        run: cargo test --workspace --features embed-web-ui
 
   # Slim build without headless Chromium (chromiumoxide); default features stay on in release builds.
   rust-no-default-features:
@@ -67,10 +67,10 @@ jobs:
         run: npm run build:fast
 
       - name: cargo check --no-default-features
-        run: cargo check --no-default-features
+        run: cargo check --workspace --no-default-features
 
       - name: cargo test --no-default-features
-        run: cargo test --no-default-features
+        run: cargo test --workspace --no-default-features
 
   # Optional: Playwright smoke tests (Rust build + Chromium). Does not block merge.
   web-e2e:
@@ -97,7 +97,7 @@ jobs:
           npm run build:fast
 
       - name: cargo build
-        run: cargo build
+        run: cargo build --workspace --features embed-web-ui
 
       - name: Install E2E deps
         working-directory: web-e2e

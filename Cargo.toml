@@ -1,56 +1,18 @@
-[package]
-name = "unistar-coworker"
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/tui",
+    "crates/web",
+    "crates/cli",
+    "crates/unistar-coworker",
+]
+
+[workspace.package]
 version = "1.0.0"
 edition = "2021"
-description = "Local GitHub ops secretary with TUI, MCP, and local LLM"
 license = "MIT"
+description = "Local GitHub ops secretary with TUI, MCP, and local LLM"
 
-[[bin]]
-name = "unistar-coworker"
-path = "src/main.rs"
-
-[features]
-default = ["web-browser"]
-web-browser = ["dep:chromiumoxide"]
-
-[dependencies]
-anyhow = "1"
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
-cron = "0.15"
-crossterm = "0.28"
-pulldown-cmark = "0.13"
-ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
-regex = "1"
-encoding_rs = "0.8"
-reqwest = { version = "0.12", features = ["json", "stream"] }
-futures-util = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-sha2 = "0.10"
-thiserror = "2"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-unicode-width = "0.2"
-uuid = { version = "1", features = ["serde", "v4"] }
-fs2 = "0.4"
-chromiumoxide = { version = "0.9", default-features = true, optional = true }
-rusqlite = { version = "0.34", features = ["bundled"] }
-axum = { version = "0.8", features = ["ws"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-rustyline = "14"
-
-[dev-dependencies]
-http-body-util = "0.1"
-tempfile = "3"
-tokio-tungstenite = "0.26"
-tower = { version = "0.5", features = ["util"] }
-
-# Vendor CDP parse-error patch; used only when `web-browser` pulls in chromiumoxide.
 [patch.crates-io]
 chromiumoxide = { path = "vendor/chromiumoxide" }

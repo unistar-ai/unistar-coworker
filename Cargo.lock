@@ -432,6 +432,93 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "coworker-cli"
+version = "1.0.0"
+dependencies = [
+ "clap",
+ "clap_complete",
+ "coworker-core",
+ "coworker-tui",
+ "coworker-web",
+ "pulldown-cmark",
+ "ratatui",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "coworker-core"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chromiumoxide",
+ "chrono",
+ "cron",
+ "encoding_rs",
+ "fs2",
+ "futures-util",
+ "regex",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width 0.2.0",
+ "uuid",
+]
+
+[[package]]
+name = "coworker-tui"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "coworker-core",
+ "crossterm",
+ "futures-util",
+ "pulldown-cmark",
+ "ratatui",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "unicode-width 0.2.0",
+ "uuid",
+]
+
+[[package]]
+name = "coworker-web"
+version = "1.0.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "coworker-core",
+ "futures-util",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tower",
+ "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2228,7 +2315,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -2526,39 +2612,10 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 name = "unistar-coworker"
 version = "1.0.0"
 dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "chromiumoxide",
- "chrono",
- "clap",
- "clap_complete",
- "cron",
- "crossterm",
- "encoding_rs",
- "fs2",
- "futures-util",
- "http-body-util",
- "pulldown-cmark",
- "ratatui",
- "regex",
- "reqwest 0.12.28",
- "rusqlite",
- "rustyline",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tempfile",
- "thiserror",
+ "coworker-cli",
+ "coworker-core",
+ "coworker-web",
  "tokio",
- "tokio-tungstenite 0.26.2",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "unicode-width 0.2.0",
- "uuid",
 ]
 
 [[package]]

@@ -15,7 +15,7 @@
 `unistar-coworker` is **not** an unconstrained coding agent and **not** a replacement for GitHub Actions. It is an ops secretary that:
 
 - Runs scheduled **workflows** (`daily-work` triage, `review-radar`) and an interactive **chat** mode for ad-hoc Q&A and light local work.
-- Calls GitHub/CI **in-process** in Rust via the [`GithubHarness`](./src/github/harness.rs) → `gh` CLI — no MCP subprocess for GitHub.
+- Calls GitHub/CI **in-process** in Rust via the [`GithubHarness`](./crates/core/src/github/harness.rs) → `gh` CLI — no MCP subprocess for GitHub.
 - Mounts optional **third-party MCP** servers (Slack, filesystem, HTTP gateways) through `mcp.servers[]` (stdio or Streamable HTTP).
 - Uses a **local LLM** (Ollama / OpenAI-compatible) for classification, chat planning, and digests.
 - **Never** auto-executes mutating actions — rerun CI, backport, post comment, and MCP mutating tools all go through a TUI/Web approval queue unless `chat.auto_approve_mutations` is explicitly enabled.
@@ -45,7 +45,8 @@ Chat can still use workspace tools (`read_file`, `grep`, `bash_run`, …) for li
   - [Architecture](#architecture)
     - [Product boundaries](#product-boundaries)
     - [Skill / Prompt / Harness](#skill--prompt--harness)
-  - [Development](#development)
+    - [Development](#development)
+    - [Fast compile (dev loop)](#fast-compile-dev-loop)
     - [Web UI development (HMR)](#web-ui-development-hmr)
     - [Web UI E2E (Playwright)](#web-ui-e2e-playwright)
     - [Feature flags](#feature-flags)
@@ -87,10 +88,10 @@ export GH_TOKEN=ghp_...   # or: gh auth login
 
 unistar-coworker doctor          # config / gh / LLM / MCP / store health
 
-# Frontend (optional but recommended): build the React UI once before cargo build
+# Frontend: build once (dev serves from disk; release embeds into the binary)
 (cd web-ui && npm install && npm run build:fast)
 
-cargo build --release
+cargo build --release --features embed-web-ui
 
 ./target/release/unistar-coworker                                   # TUI + cron scheduler
 ./target/release/unistar-coworker serve                             # Web → http://127.0.0.1:8787
@@ -109,8 +110,13 @@ cargo build --release
 | **Ollama / OpenAI-compatible API** (optional) | Local LLM at `llm.base_url`; chat/triage degrade to heuristics when offline |
 
 ```bash
-cargo build --release
+# Release / deploy (single binary with embedded Web UI)
+cargo build --release --features embed-web-ui
 # Binary: target/release/unistar-coworker
+
+# Dev (faster — Web UI read from web-ui/dist/ at runtime; see Development)
+cargo build
+# Binary: target/debug/unistar-coworker
 ```
 
 > [unistar-mcp](../unistar-mcp) is a **standalone** GitHub MCP server (Go). Coworker does **not** require or spawn it at runtime — GitHub always goes through the in-process `GithubHarness`.
@@ -148,7 +154,16 @@ cargo run --release -- serve
 # Open http://127.0.0.1:8787
 ```
 
-The Web UI is a **React 18 SPA** (Vite + Tailwind + Radix UI + zustand) embedded into the binary at compile time. It provides streaming chat with live tool/reasoning cards, a context pane, an approval modal, **LLM profile switching** (Config tab), **branch regenerate** on any assistant message, theme toggle, and transcript export. Source lives in `web-ui/`; `build.rs` embeds whatever `web-ui/dist/` already contains via `include_str!`/`include_bytes!` (it does **not** run `npm` itself — the frontend build is owned by the developer / CI / `start-agent.sh` via `npm run build:fast`). The embedded manifest is content-gated, so `cargo build` only recompiles the crate when the bundled assets actually change.
+The Web UI is a **React 18 SPA** (Vite + Tailwind + Radix UI + zustand). It provides streaming chat with live tool/reasoning cards, a context pane, an approval modal, **LLM profile switching** (Config tab), **branch regenerate** on any assistant message, theme toggle, and transcript export. Source lives in `web-ui/`.
+
+**How assets are served:**
+
+| Build | Command | Web UI delivery |
+|-------|---------|-----------------|
+| **Dev** (default) | `cargo build` / `cargo run -- serve` | Reads `web-ui/dist/` from disk at runtime — Rust-only edits do not re-embed JS bundles |
+| **Release / CI** | `cargo build --release --features embed-web-ui` | `build.rs` embeds `web-ui/dist/` via `include_str!` / `include_bytes!` for a single-binary deploy |
+
+`build.rs` does **not** run `npm` — the frontend build is owned by the developer, CI, or `start-agent.sh` (`npm run build:fast`). With `embed-web-ui`, the generated manifest is content-gated so the crate only recompiles when bundled assets actually change. Without `embed-web-ui`, run `npm run build:fast` once so `serve` can find `web-ui/dist/`; if `dist/` is missing the React routes return 503 (legacy UI may still be available).
 
 **Hot reload** (no process restart): send `SIGHUP` to a running `serve` / `tui` / `daemon`, or `POST /api/reload` — reloads `coworker.yaml`, skills, prompts, and MCP connections.
 
@@ -294,7 +309,7 @@ CI: `ci_analyze_pr_failures`, `ci_get_run_summary`, `ci_get_failed_logs`, `ci_re
 
 Meta: `tool_search`, `tool_list`, `tool_describe`, `tool_call`, `resource_read` (`github://`, `pr://`, `ci://`).
 
-Implemented in [`src/github/harness.rs`](./src/github/harness.rs). Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`src/agent/tool_catalog.rs`](./src/agent/tool_catalog.rs).
+Implemented in [`crates/core/src/github/harness.rs`](./crates/core/src/github/harness.rs). Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`crates/core/src/agent/tool_catalog.rs`](./crates/core/src/agent/tool_catalog.rs).
 
 ---
 
@@ -444,7 +459,7 @@ mcp:
         Authorization: Bearer ${OPS_MCP_TOKEN}
 ```
 
-Implementation: [`src/mcp/`](./src/mcp/).
+Implementation: [`crates/core/src/mcp/`](./crates/core/src/mcp/).
 
 ---
 
@@ -483,9 +498,9 @@ Three layers; do not blur responsibilities:
 |-------|----------|------|
 | **Skill** | `skills/*/SKILL.md` | Reusable technique — triage rules, tone, digest format. No cron, no harness logic. |
 | **Prompt** | `prompts/chat.md` | Chat system prompt body; `skills:` frontmatter selects default techniques. Embedded at build time. |
-| **Harness** | `src/agent/`, `src/engine/` | Deterministic Rust — scheduler, MCP pool, approvals, token budget, chat/workflow loops |
+| **Harness** | `crates/core/src/agent/`, `crates/core/src/engine/` | Deterministic Rust — scheduler, MCP pool, approvals, token budget, chat/workflow loops |
 
-Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`src/agent/tool_catalog.rs`](./src/agent/tool_catalog.rs).
+Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`crates/core/src/agent/tool_catalog.rs`](./crates/core/src/agent/tool_catalog.rs).
 
 Further detail: [AGENTS.md](./AGENTS.md).
 
@@ -494,15 +509,44 @@ Further detail: [AGENTS.md](./AGENTS.md).
 ## Development
 
 ```bash
-# Rust backend (build.rs embeds web-ui/dist/ — run `npm run build:fast` first to (re)build the UI)
+# Fast Rust iteration (no frontend embed)
 cargo check
-cargo clippy -- -D warnings
-cargo test
-cargo test --no-default-features   # slim build without headless Chromium
+cargo check -p coworker-tui    # TUI-only loop
+cargo clippy --workspace -- -D warnings
+cargo test --workspace
+
+# CI / release bar (embeds web-ui/dist/)
+cargo clippy --workspace --features embed-web-ui -- -D warnings
+cargo test --workspace --features embed-web-ui
+
+cargo test --workspace --no-default-features   # slim build without headless Chromium
 cargo fmt --check
 ```
 
-`cargo build` never depends on Node — it only embeds an existing `web-ui/dist/`. If `dist/` is absent the binary still compiles and the React UI returns 404 (fall back to `/legacy`); run `npm run build:fast` in `web-ui/` to (re)generate it. Install Node to build the React UI:
+### Fast compile (dev loop)
+
+Default `cargo build` and `cargo check` **omit** the `embed-web-ui` feature. The React UI is served from `web-ui/dist/` at runtime ([`crates/web/src/ui.rs`](./crates/web/src/ui.rs)), so editing Rust code does not force a full crate recompile when frontend assets change.
+
+The Rust code is split into a **Cargo workspace** (`crates/core`, `crates/tui`, `crates/web`, `crates/cli`, `crates/unistar-coworker`). When a dependency crate is unchanged, `cargo check -p coworker-tui` (or `-p coworker-web`, etc.) skips recompiling unrelated layers.
+
+```bash
+# One-time (or when web-ui sources change)
+cd web-ui && npm install && npm run build:fast
+
+# Backend — incremental, no JS embed
+cargo run -- serve          # http://127.0.0.1:8787
+```
+
+Optional local speedups live in [`.cargo/config.toml`](./.cargo/config.toml): `debug = 1`, incremental builds, and commented hooks for `sccache` / `mold` if installed.
+
+**Release / deploy** (single binary, embedded UI — same as CI and `start-agent.sh`):
+
+```bash
+(cd web-ui && npm run build:fast)
+cargo build --release --features embed-web-ui
+```
+
+`cargo build` never depends on Node. Install Node only to build the React UI:
 
 ```bash
 brew install node          # macOS
@@ -520,14 +564,15 @@ cd web-ui && npm run dev
 # Open http://localhost:5173
 ```
 
-CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, a `--no-default-features` build/test job, and an **optional** Playwright smoke job (`continue-on-error: true`).
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy --workspace` / `cargo test --workspace` with `--features embed-web-ui` (after building `web-ui/dist/`), a `--no-default-features` build/test job, and an **optional** Playwright smoke job (`continue-on-error: true`).
 
 ### Web UI E2E (Playwright)
 
 Smoke tests live in [`web-e2e/`](./web-e2e/) — page load, theme toggle, approvals tab. They start a real `unistar-coworker serve` instance via Playwright `webServer` and a minimal temp `coworker.yaml`.
 
 ```bash
-cargo build                                    # once: binary at target/debug/unistar-coworker
+(cd web-ui && npm run build:fast)              # dist/ required for e2e
+cargo build --features embed-web-ui            # binary at target/debug/unistar-coworker
 cd web-e2e
 npm install
 npx playwright install chromium                # first time: download Chromium
@@ -541,10 +586,11 @@ Optional: `UNISTAR_BIN=/path/to/unistar-coworker npm test` if the binary is else
 | Feature | Default | Purpose |
 |---------|---------|---------|
 | `web-browser` | on | Headless Chromium for `web_fetch` browser mode (pulls in `chromiumoxide`). Disable with `--no-default-features` for a slimmer build that falls back to HTTP-only `web_fetch`. |
+| `embed-web-ui` | off | Embed `web-ui/dist/` into the binary at compile time (`include_str!`). Enable for release builds, CI, and `start-agent.sh`; omit for faster local `cargo check` / `cargo build` (UI served from disk). |
 
 A vendored `chromiumoxide` patch lives under `vendor/chromiumoxide/` for CDP schema drift resilience.
 
-The Web UI (`web-ui/`) requires Node 18+ and is built with `npm run build:fast` (owned by the developer / CI / `start-agent.sh`, **not** by `build.rs`). The resulting bundle is embedded at compile time.
+The Web UI (`web-ui/`) requires Node 18+ and is built with `npm run build:fast` (owned by the developer / CI / `start-agent.sh`, **not** by `build.rs`). With `embed-web-ui`, the resulting bundle is compiled into the binary; without it, `serve` reads `web-ui/dist/` at runtime.
 
 ---
 
@@ -552,34 +598,27 @@ The Web UI (`web-ui/`) requires Node 18+ and is built with `npm run build:fast` 
 
 ```
 unistar-coworker/
+├── .cargo/config.toml       # Dev profile: debug=1, incremental; optional sccache/mold
+├── Cargo.toml               # Workspace root
+├── crates/
+│   ├── core/                # config, store, llm, github, mcp, agent, engine, app
+│   ├── tui/                 # ratatui terminal UI
+│   ├── web/                 # axum Web server + embed-web-ui build.rs
+│   ├── cli/                 # clap subcommands, terminal helpers, chat REPL
+│   └── unistar-coworker/    # Thin binary (`main.rs` → `coworker_cli::run`)
 ├── docs/RPC.md              # JSONL rpc mode protocol
 ├── prompts/chat.md          # Chat system prompt (embedded at build time)
 ├── skills/                  # Technique skills (SKILL.md) + _base/TOOLS.md SSOT
-├── src/
-│   ├── main.rs              # CLI entry
-│   ├── diagnostics.rs       # Shared doctor health checks (CLI + /api/doctor)
-│   ├── exit_codes.rs        # Stable CLI exit codes for scripting
-│   ├── build.rs             # Runs vite build, embeds web-ui/dist/
-│   ├── config.rs            # YAML config model
-│   ├── agent/               # Chat loop, tool catalog, context, redact, triage
-│   ├── engine/              # Engine, scheduler, workflows, approvals, prompts
-│   ├── github/              # GithubHarness (in-process gh)
-│   ├── llm/                 # OpenAI-compatible client, streaming, classify
-│   ├── mcp/                 # Optional MCP federation pool
-│   ├── store/               # JSON + SQLite persistence, migrate, compact
-│   ├── tui/                 # ratatui terminal UI
-│   ├── web/                 # axum Web server + React UI embedding (ui.rs)
-│   └── output/              # Digest export
 ├── web-ui/                  # React 18 SPA (Vite + Tailwind + Radix + zustand)
 │   ├── src/                 # TypeScript source
 │   └── dist/                # vite build output (gitignored, generated)
 ├── vendor/chromiumoxide/    # Patched CDP dependency
 ├── web-e2e/                 # Playwright smoke tests
 ├── coworker.example.yaml    # Config template
-└── Cargo.toml
+└── Cargo.lock
 ```
 
-Crate version: **1.0.0** ([Cargo.toml](./Cargo.toml)).
+Crate version: **1.0.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)).
 
 ---
 

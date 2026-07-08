@@ -1,0 +1,21 @@
+[package]
+name = "unistar-coworker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+
+[[bin]]
+name = "unistar-coworker"
+path = "src/main.rs"
+
+[features]
+default = ["web-browser"]
+web-browser = ["coworker-core/web-browser"]
+embed-web-ui = ["coworker-web/embed-web-ui"]
+
+[dependencies]
+coworker-cli = { path = "../cli" }
+coworker-core = { path = "../core" }
+coworker-web = { path = "../web" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
