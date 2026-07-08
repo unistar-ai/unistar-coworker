@@ -137,29 +137,28 @@ Refs: 676104e
 
 Maintainers fold user-visible `feat` / `fix` / breaking items into [CHANGELOG.md](../CHANGELOG.md) under `[Unreleased]` before tagging. See [docs/releasing.md](./releasing.md).
 
-## Enforcement (commitlint)
+## Enforcement (shell)
 
-Commit messages are validated automatically:
+Commit messages are validated automatically — **no Node.js required**:
 
 | Layer | What |
 |-------|------|
-| **Local** | Husky `commit-msg` hook → `commitlint` (after `npm install` at repo root) |
-| **CI** | Job `commitlint` on pull requests and pushes to `main` |
+| **Local** | `scripts/hooks/commit-msg` → [scripts/validate-commit-msg.sh](../scripts/validate-commit-msg.sh) |
+| **CI** | Job `commit-messages` → [scripts/validate-commit-range.sh](../scripts/validate-commit-range.sh) |
 
 Setup:
 
 ```bash
-npm install          # or ./scripts/setup-git-hooks.sh
+./scripts/setup-git-hooks.sh
 ```
 
-Config: [commitlint.config.mjs](../commitlint.config.mjs) (extends [@commitlint/config-conventional](https://github.com/conventional-changelog/commitlint)).
-
-Merge/revert commits (`Merge …`, `Revert …`) are ignored by commitlint defaults. To bypass the local hook in an emergency: `git commit --no-verify` (CI still checks on push/PR).
+Merge/revert commits (`Merge …`, `Revert …`) are skipped. To bypass the local hook in an emergency: `git commit --no-verify` (CI still checks on push/PR).
 
 Manual check:
 
 ```bash
-echo "feat(cli): example" | npx commitlint
+./scripts/validate-commit-msg.sh --subject "feat(cli): example"
+./scripts/validate-commit-msg.sh --self-test
 ```
 
 ## References

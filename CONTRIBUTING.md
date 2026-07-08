@@ -14,9 +14,8 @@ Thank you for your interest in contributing. This project is a **local, single-u
 git clone https://github.com/unistar-ai/unistar-coworker.git
 cd unistar-coworker
 
-# Commit message lint (Husky commit-msg hook)
-npm install
-# or: ./scripts/setup-git-hooks.sh
+# Commit message lint (shell hook — no Node at repo root)
+./scripts/setup-git-hooks.sh
 
 # Rust
 cargo check
@@ -69,7 +68,7 @@ Quick format:
 
 Common types: `feat`, `fix`, `docs`, `test`, `ci`, `chore`, `deps`. Use `feat!` or a `BREAKING CHANGE:` footer for incompatible changes.
 
-**Enforcement:** after `npm install` at the repo root, Husky runs **commitlint** on every `git commit`. CI job **`commitlint`** validates PR commits and pushes to `main`. Bypass locally only when necessary: `git commit --no-verify`.
+**Enforcement:** `./scripts/setup-git-hooks.sh` installs `core.hooksPath=scripts/hooks`. CI job **`commit-messages`** validates PR commits and pushes to `main`. Bypass locally only when necessary: `git commit --no-verify`.
 
 - One logical change per commit when practical.
 - **Never** commit secrets, real `owner/repo` names from production, or contents of `coworker.yaml` / `data/`.

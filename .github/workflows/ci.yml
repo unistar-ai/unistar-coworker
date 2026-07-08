@@ -169,29 +169,19 @@ jobs:
       - name: cargo deny check advisories
         run: cargo deny check advisories
 
-  commitlint:
+  commit-messages:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install commitlint
-        run: npm ci
-
       - name: Validate commit messages
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            npx commitlint --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}"
+            ./scripts/validate-commit-range.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
           elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
-            npx commitlint --from HEAD~1 --to HEAD
+            ./scripts/validate-commit-range.sh HEAD~1 HEAD
           else
-            npx commitlint --from "${{ github.event.before }}" --to "${{ github.event.after }}"
+            ./scripts/validate-commit-range.sh "${{ github.event.before }}" "${{ github.event.after }}"
           fi
