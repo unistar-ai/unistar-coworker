@@ -86,6 +86,7 @@ Summarized from [AGENTS.md](./AGENTS.md):
 
 - User-facing docs: `README.md`, `README_CN.md`, `docs/`.
 - Policy docs: `SECURITY.md`, `PRIVACY.md`, `SUPPORT.md`.
+- AI assistants: [AGENTS.md](./AGENTS.md) (all tools), [CLAUDE.md](./CLAUDE.md) (Claude Code entry).
 - Update [CHANGELOG.md](./CHANGELOG.md) for user-visible changes in releases (maintainers may fold this at release time).
 
 ## Code of conduct

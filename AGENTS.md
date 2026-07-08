@@ -196,6 +196,20 @@ When adding a chat tool, update: `TOOLS.md` (if documented), `tool_catalog.rs` `
 
 ---
 
+## AI tooling (Cursor vs Claude Code)
+
+| Path | Audience | Notes |
+|------|----------|--------|
+| **`AGENTS.md`** | All agents | **Canonical** — read this first |
+| **`CLAUDE.md`** | Claude Code | Entry point; points here, avoids duplicating content |
+| **`.cursor/rules/`** | Cursor IDE | e.g. `conventional-commits.mdc` |
+| **`.claude/rules/`** | Claude Code | e.g. `conventional-commits.md` (same policies) |
+| **`skills/`** | unistar-coworker runtime | Workflow/chat skills — not IDE configuration |
+
+Personal overrides: `.cursor/settings.json` and `.claude/settings.local.json` are gitignored.
+
+---
+
 ## Related repos
 
 - [unistar-mcp](../unistar-mcp) — Go MCP server (`gh`/`git`); see its `AGENTS.md` for tool design principles.
