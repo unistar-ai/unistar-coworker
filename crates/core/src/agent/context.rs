@@ -2184,11 +2184,11 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
         for i in 0..8 {
             messages.insert(
                 1,
-                LlmTurnMessage::new("user", &format!("older turn {i} {}", "x".repeat(500))),
+                LlmTurnMessage::new("user", format!("older turn {i} {}", "x".repeat(500))),
             );
             messages.insert(
                 2,
-                LlmTurnMessage::new("assistant", &format!("ack {i} {}", "y".repeat(500))),
+                LlmTurnMessage::new("assistant", format!("ack {i} {}", "y".repeat(500))),
             );
         }
 

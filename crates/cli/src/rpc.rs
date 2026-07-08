@@ -260,8 +260,6 @@ fn rpc_progress_json(p: &coworker_core::agent::chat_loop::ChatProgress) -> Optio
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// Stable RPC error envelope — do not change without a major release (see docs/STABILITY.md).
     #[test]
     fn stable_unknown_op_error_shape() {
