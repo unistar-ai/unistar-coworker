@@ -1,0 +1,44 @@
+---
+description: Conventional Commits format for git commit messages
+alwaysApply: true
+---
+
+# Commit messages (Conventional Commits)
+
+Follow [docs/COMMITS.md](../../docs/COMMITS.md) and [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+
+```
+<type>[optional scope][optional !]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+## Types
+
+`feat` (MINOR), `fix` (PATCH), `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
+
+## Scopes (this repo)
+
+`core`, `cli`, `web`, `tui`, `web-ui`, `ci`, `docker`, `release`, `packaging`, `docs`, `skills`, `deps` — omit when cross-cutting.
+
+## Rules
+
+- Imperative subject, lowercase start, no trailing period, ~72 chars.
+- Breaking: `type(scope)!:` and/or `BREAKING CHANGE:` footer → MAJOR.
+- One logical change per commit; body explains *why* when non-obvious.
+- Never include secrets or real production identifiers in messages.
+- Root `npm install` enables Husky **commitlint** on `git commit`; CI job **`commitlint`** enforces on PR/push.
+
+## Examples
+
+```
+fix(cli): resolve clippy redundant_closure in doctor_init
+ci: replace gitleaks-action with CLI install
+feat(web-ui)!: migrate to Tailwind CSS v4
+
+BREAKING CHANGE: postcss now requires @tailwindcss/postcss.
+```
+
+Use HEREDOC for multi-line commits: `git commit -m "$(cat <<'EOF' ... EOF)"`.

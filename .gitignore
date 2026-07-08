@@ -22,6 +22,9 @@ secrets/
 .cursor/settings.json
 .claude/settings.local.json
 
+# repo root tooling (commitlint / husky)
+node_modules/
+
 # web-ui (React / Vite) — do not commit deps, build output, or tooling caches
 web-ui/node_modules/
 web-ui/dist/

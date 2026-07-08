@@ -14,6 +14,10 @@ Thank you for your interest in contributing. This project is a **local, single-u
 git clone https://github.com/unistar-ai/unistar-coworker.git
 cd unistar-coworker
 
+# Commit message lint (Husky commit-msg hook)
+npm install
+# or: ./scripts/setup-git-hooks.sh
+
 # Rust
 cargo check
 cargo build
@@ -55,7 +59,18 @@ When Web UI or embedding changes, ensure `npm run build:fast` succeeds so `build
 
 ## Commit style
 
-- Use clear, imperative subject lines (`fix doctor warn on 0.0.0.0 bind`, `docs: add upgrading guide`).
+This project uses **[Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)**. Full rules, scopes, and examples: **[docs/COMMITS.md](./docs/COMMITS.md)**.
+
+Quick format:
+
+```
+<type>[optional scope]: <imperative description>
+```
+
+Common types: `feat`, `fix`, `docs`, `test`, `ci`, `chore`, `deps`. Use `feat!` or a `BREAKING CHANGE:` footer for incompatible changes.
+
+**Enforcement:** after `npm install` at the repo root, Husky runs **commitlint** on every `git commit`. CI job **`commitlint`** validates PR commits and pushes to `main`. Bypass locally only when necessary: `git commit --no-verify`.
+
 - One logical change per commit when practical.
 - **Never** commit secrets, real `owner/repo` names from production, or contents of `coworker.yaml` / `data/`.
 

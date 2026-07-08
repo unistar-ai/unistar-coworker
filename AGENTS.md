@@ -111,6 +111,9 @@ Default store backend is JSON under `./data` (gitignored). SQLite backend and `s
 ## Common commands
 
 ```sh
+# One-time: Conventional Commits hook (Husky + commitlint at repo root)
+npm install
+
 # Fast dev loop — no frontend embed; Web UI served from web-ui/dist/ at runtime
 cargo check
 cargo check -p coworker-tui    # TUI-only when editing crates/tui/
@@ -147,11 +150,13 @@ List skills/workflows: `cargo run --release --features embed-web-ui -- skills li
 Before pushing (or immediately after, if you already pushed), run the same bar locally:
 
 ```sh
+npm install   # if hooks not installed yet
 ./scripts/check-versions.sh
 cd web-ui && npm install && npx tsc --noEmit && npm test && npm run build:fast
 cargo fmt --check
 cargo clippy --workspace --features embed-web-ui -- -D warnings
 cargo test --workspace --features embed-web-ui
+echo "feat(scope): subject" | npx commitlint   # optional sanity check
 ```
 
 ### CI jobs (`.github/workflows/ci.yml`)
@@ -164,6 +169,7 @@ cargo test --workspace --features embed-web-ui
 | **`docker-smoke`** | `docker build -t unistar-coworker:ci .` |
 | **`secret-scan`** | gitleaks (`.gitleaks.toml`) |
 | **`cargo-deny`** | `cargo deny check advisories` (blocking) |
+| **`commitlint`** | Conventional Commits on PR / `main` pushes ([docs/COMMITS.md](./docs/COMMITS.md)) |
 
 If you touch `Cargo.toml` features, `build.rs`, or optional deps, verify **`rust-no-default-features`** too.
 
@@ -176,6 +182,7 @@ If CI fails after your push, **fix and push again** until all jobs pass — do n
 
 ## Conventions for code changes
 
+- **Commits** — [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/); full spec in [docs/COMMITS.md](./docs/COMMITS.md). Format: `<type>[scope]: <imperative subject>` (e.g. `fix(cli): redact doctor bundle yaml`). Types: `feat`, `fix`, `docs`, `ci`, `chore`, `deps`, … Scopes: `core`, `cli`, `web`, `tui`, `web-ui`, `ci`, `docker`, `docs`, `skills`, `deps`, … — omit when cross-cutting. Breaking: `feat!:` or `BREAKING CHANGE:` footer. **Enforced** by Husky `commit-msg` (after root `npm install`) and CI job **`commitlint`** (`commitlint.config.mjs`). Do not use `--no-verify` unless the user explicitly asks; never put secrets in messages.
 - **Minimal diff** — match existing style in the file; reuse `tool_catalog`, `context`, `parse` helpers instead of new one-off logic.
 - **Rust 2021**, `tokio` async, `thiserror` / `anyhow` for errors.
 - **Tests** — unit tests live next to modules (`mod tests`); use `acme/widget` and synthetic JSON; run full `cargo test` before finishing.

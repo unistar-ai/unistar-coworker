@@ -1,0 +1,14 @@
+{
+  "name": "unistar-coworker-repo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare": "husky",
+    "commitlint": "commitlint"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.8.1",
+    "@commitlint/config-conventional": "^19.8.1",
+    "husky": "^9.1.7"
+  }
+}

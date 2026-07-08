@@ -1,0 +1,45 @@
+/** @type {import('@commitlint/types').UserConfig} */
+export default {
+  extends: ["@commitlint/config-conventional"],
+  rules: {
+    "type-enum": [
+      2,
+      "always",
+      [
+        "build",
+        "chore",
+        "ci",
+        "deps",
+        "docs",
+        "feat",
+        "fix",
+        "perf",
+        "refactor",
+        "revert",
+        "style",
+        "test",
+      ],
+    ],
+    "scope-enum": [
+      2,
+      "always",
+      [
+        "core",
+        "cli",
+        "web",
+        "tui",
+        "web-ui",
+        "ci",
+        "docker",
+        "release",
+        "packaging",
+        "docs",
+        "skills",
+        "deps",
+      ],
+    ],
+    "header-max-length": [2, "always", 100],
+    "subject-full-stop": [2, "never", "."],
+    "subject-case": [2, "never", ["start-case", "pascal-case", "upper-case"]],
+  },
+};

@@ -39,7 +39,7 @@ Pushing `v*` also triggers [.github/workflows/docker.yml](../.github/workflows/d
 
 ## GitHub Release notes
 
-Use this template in addition to auto-generated commits:
+Squash-merge and PR titles should follow [docs/COMMITS.md](../COMMITS.md) when possible. Use this template in addition to auto-generated commits:
 
 ```markdown
 ## Highlights

@@ -27,7 +27,7 @@ Hard limits:
 1. **`git status` / `git diff`** — understand dirty state and scope.
 2. **Branch** — feature branches for non-trivial work unless user wants direct commits.
 3. **Code changes** — via approved `edit_file` / `write_file` (load `code-edit`).
-4. **Commit** — `git add … && git commit -m "…"` only when intent is clear; focused messages.
+4. **Commit** — follow [docs/COMMITS.md](../../docs/COMMITS.md) (Conventional Commits); `git add … && git commit -m "…"` only when intent is clear.
 5. **Push** — check branch and remote; warn before anything destructive.
 
 ## Output template
