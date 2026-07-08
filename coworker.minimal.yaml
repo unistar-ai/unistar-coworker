@@ -1,0 +1,23 @@
+# Minimal workspace-only agent (no GitHub). Copy to coworker.yaml and edit.
+#
+# Reference tier: 25B+ local model (e.g. gemma4:26b-a4b, qwen3.6:27b), 64K context.
+# See coworker.example.yaml for profiles + GitHub.
+
+llm:
+  default:
+    base_url: http://localhost:11434/v1
+    model: gemma4:26b-a4b-it-qat
+    context_limit: 64000
+
+chat:
+  workspace: .
+  # tool_mode: auto   # auto | lazy | native — 25B+ reference tier: auto or native
+
+web:
+  bind: 127.0.0.1:8787
+
+storage:
+  backend: json
+  path: ./data
+
+theme: dark

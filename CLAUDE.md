@@ -10,7 +10,7 @@ Read AGENTS.md before making changes. This file only lists Claude-specific entry
 
 ## Project in one line
 
-Local **GitHub ops secretary** (Rust + TUI + optional Web UI). Not a coding agent; no auto-merge; mutating tools need approval unless config opts in.
+**Local-first general agent for local LLMs** (Rust + TUI + Web UI). GitHub/MCP/workflows are capability packs; mutating external tools need approval unless config opts in.
 
 ## Common tasks
 

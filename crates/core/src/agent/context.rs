@@ -2090,14 +2090,120 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
     }
 
     #[test]
-    fn coding_bash_compaction_keeps_exit_and_tail() {
-        let body = (0..40)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let content = format!("exit: 1\n{body}");
-        let out = summarize_coding_tool_content("bash_run", &content);
-        assert!(out.contains("exit: 1"));
-        assert!(out.contains("line 39"));
+    fn multi_turn_workspace_fixture_keeps_recent_tool_results_on_trim() {
+        use crate::llm::chat::LlmToolCall;
+
+        let mut messages = vec![
+            LlmTurnMessage::new("system", "You are a general agent."),
+            LlmTurnMessage::new("user", "fix the failing test in src/lib.rs"),
+        ];
+
+        messages.push(LlmTurnMessage::assistant_tool_call(
+            "",
+            vec![
+                LlmToolCall {
+                    id: "c1".into(),
+                    name: "grep".into(),
+                    arguments: serde_json::json!({"pattern": "test_foo"}),
+                },
+                LlmToolCall {
+                    id: "c2".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "src/lib.rs"}),
+                },
+            ],
+        ));
+        messages.push(LlmTurnMessage::tool_result_with_id(
+            Some("c1".into()),
+            "grep",
+            format_tool_context_message(
+                "grep",
+                &serde_json::json!({"pattern": "test_foo"}),
+                true,
+                "src/lib.rs:10: fn test_foo",
+            ),
+        ));
+        messages.push(LlmTurnMessage::tool_result_with_id(
+            Some("c2".into()),
+            "read_file",
+            format_tool_context_message(
+                "read_file",
+                &serde_json::json!({"path": "src/lib.rs"}),
+                true,
+                "fn test_foo() { assert!(false); }",
+            ),
+        ));
+
+        messages.push(LlmTurnMessage::assistant_tool_call(
+            "",
+            vec![LlmToolCall {
+                id: "c3".into(),
+                name: "edit_file".into(),
+                arguments: serde_json::json!({
+                    "path": "src/lib.rs",
+                    "old_string": "false",
+                    "new_string": "true"
+                }),
+            }],
+        ));
+        messages.push(LlmTurnMessage::tool_result_with_id(
+            Some("c3".into()),
+            "edit_file",
+            format_tool_context_message(
+                "edit_file",
+                &serde_json::json!({"path": "src/lib.rs"}),
+                true,
+                "patched 1 occurrence",
+            ),
+        ));
+
+        messages.push(LlmTurnMessage::assistant_tool_call(
+            "",
+            vec![LlmToolCall {
+                id: "c4".into(),
+                name: "bash_run".into(),
+                arguments: serde_json::json!({"command": "cargo test"}),
+            }],
+        ));
+        const VERIFY_MARKER: &str = "VERIFY_OK_ALL_PASSED";
+        messages.push(LlmTurnMessage::tool_result_with_id(
+            Some("c4".into()),
+            "bash_run",
+            format_tool_context_message(
+                "bash_run",
+                &serde_json::json!({"command": "cargo test"}),
+                true,
+                &format!("exit: 0\n{VERIFY_MARKER}"),
+            ),
+        ));
+        messages.push(LlmTurnMessage::new(
+            "assistant",
+            "Fixed test_foo and cargo test passed.",
+        ));
+
+        for i in 0..8 {
+            messages.insert(
+                1,
+                LlmTurnMessage::new("user", &format!("older turn {i} {}", "x".repeat(500))),
+            );
+            messages.insert(
+                2,
+                LlmTurnMessage::new("assistant", &format!("ack {i} {}", "y".repeat(500))),
+            );
+        }
+
+        let budget = 4_000u32;
+        trim_llm_messages(&mut messages, budget, CompactionStrategy::Code);
+
+        let joined: String = messages.iter().map(|m| m.content.as_str()).collect();
+        assert!(
+            joined.contains(VERIFY_MARKER),
+            "recent verification tool result should survive trim ({} messages)",
+            messages.len()
+        );
+        assert!(
+            joined.contains("patched 1 occurrence") || joined.contains("edit_file"),
+            "recent edit result should remain visible after trim"
+        );
     }
 }

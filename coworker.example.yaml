@@ -1,10 +1,22 @@
 # Named LLM endpoints under `llm`; pick the active one with `llm_profile`.
 # Switch presets in Web UI (Config tab). Last choice is saved to `coworker.llm-profile`.
-# llm_profile: local-ollama
+#
+# Reference tier: 25B+ local models (e.g. qwen3.6-27B, gemma4:26b-a4b), context_limit 64K–128K.
+# Workspace-only minimum: see coworker.minimal.yaml
+#
+# llm_profile: gemma-26b
 # llm:
-#   local-ollama:
+#   gemma-26b:
 #     base_url: http://localhost:11434/v1
 #     model: gemma4:26b-a4b-it-qat
+#     context_limit: 64000
+#   qwen-27b:
+#     base_url: http://localhost:11434/v1
+#     model: qwen3.6:27b
+#     context_limit: 64000
+#   qwen-35b-a3b:
+#     base_url: http://localhost:11434/v1
+#     model: qwen3.6:35b-a3b
 #     context_limit: 64000
 #   deepseek:
 #     base_url: https://api.deepseek.com/v1
@@ -19,29 +31,24 @@ llm:
     context_limit: 64000
     # api_key: ollama
 
-# GitHub/CI tools run in-process via `gh` (GithubHarness) — no MCP subprocess required.
-github:
-  gh_command: gh
-  env: {}
-  timeout_secs: 120
-  # tool_timeouts:
-  #   ci_get_failed_logs: 180
-
-repos:
-  - owner/repo
-
-workflows:
-  # mcp_readonly: false   # global default — batch workflows do not call third-party MCP
-  daily-work: {}
-  # review-radar:
-  #   mcp_readonly: true  # opt-in readonly MCP for this workflow only (chat may always use MCP)
+# --- Optional: GitHub / CI (in-process GithubHarness via `gh`) ---
+# github:
+#   gh_command: gh
+#   env: {}
+#   timeout_secs: 120
+#
+# repos:
+#   - owner/repo
+#
+# workflows:
+#   daily-work: {}
 
 chat:
   workspace: .
   # llm_step_timeout_secs: 180   # wall clock per LLM step (0 = unlimited)
   # reasoning_only_warn_secs: 30 # stop stream when only reasoning grows (0 = off)
   # prompt: prompts/chat.md   # system prompt; skills: from frontmatter or chat.skills
-  # tool_mode: auto   # auto | lazy | native — see README
+  # tool_mode: auto   # auto | lazy | native — 25B+ reference: auto or native
   # bash: { timeout_secs: 30, max_output_chars: 16000 }  # optional tuning
   # python: { timeout_secs: 30, max_output_chars: 16000, command: python3 }
   # web_fetch:

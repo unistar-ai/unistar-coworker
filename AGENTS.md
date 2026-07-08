@@ -4,14 +4,17 @@ Guidance for AI agents working in the **unistar-coworker** repository.
 
 ## What this project is
 
-unistar-coworker is a **local GitHub ops secretary** (Rust, ratatui TUI). It:
+unistar-coworker is a **local-first general agent** built for **local LLMs** (Ollama / OpenAI-compatible APIs). Rust runtime, ratatui TUI, optional Web UI.
 
-- Runs scheduled **workflows** (daily triage, release duty, review radar, …) and an interactive **chat** mode.
-- Calls **GithubHarness** in-process (`gh` CLI) for GitHub/CI read/write tools; optional **third-party MCP** servers via `mcp.servers[]` ([`crates/core/src/mcp/`](./crates/core/src/mcp/)).
-- Uses a **local LLM** (Ollama-compatible OpenAI API) for classification, chat planning, and digests.
-- **Never** auto-executes mutating actions — GitHub harness tools (`ci_rerun_workflow`, …) and **federated MCP mutating tools** go through the TUI/Web approval queue unless `chat.auto_approve_mutations` (or per-server `approval.mutating: auto` with global auto) is explicitly enabled.
+**Core loop:** chat and scheduled **workflows** drive an LLM with native tool calling — workspace tools (`read_file`, `grep`, `bash_run`, …), optional **MCP** federation, and an in-process **GithubHarness** (`gh`) when GitHub/CI is in scope.
 
-It is **not** a coding agent: no repo editing, no auto-merge, no replacement for GitHub Actions.
+**Design center:**
+
+- **Local LLM first (25B+ reference tier)** — context budget 64K–128K, trimming, profiles (`llm:` map, `switch_profile`), prompts/skills tuned for capable on-device models (e.g. **qwen3.6-27B**, **gemma 26B A4B**); smaller models may work but are not the optimization target.
+- **General agent** — coding, Q&A, and ops in `chat.workspace`; domain behavior comes from **skills** + **prompts**, not hard-coded product identity.
+- **Safety by default** — external mutating tools (GitHub harness, federated MCP) go through TUI/Web **approval** unless `chat.auto_approve_mutations` (or per-server `approval.mutating: auto`) is explicitly enabled. File/bash mutating paths use harness + LLM safety review as today.
+
+**Not in scope:** hosted multi-tenant SaaS, silent auto-merge, replacing GitHub Actions or CI runners. GitHub ops remains a **first-class skill pack**, not the whole product.
 
 Product boundaries and architecture: [README.md](./README.md), [README_CN.md](./README_CN.md).
 

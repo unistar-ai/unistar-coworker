@@ -1,6 +1,6 @@
 # Contributing to unistar-coworker
 
-Thank you for your interest in contributing. This project is a **local, single-user GitHub ops secretary** — contributions should respect that scope (no multi-tenant SaaS features unless clearly scoped as optional).
+Thank you for your interest in contributing. This project is a **local-first, single-user general agent** for **local LLMs** — contributions should respect that scope (no multi-tenant SaaS unless clearly optional). GitHub ops is one domain pack among many; prefer extending skills, tools, and prompts over hard-coding a single use case.
 
 ## Before you start
 

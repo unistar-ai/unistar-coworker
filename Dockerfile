@@ -21,7 +21,7 @@ COPY .cargo ./.cargo
 COPY crates ./crates
 COPY vendor ./vendor
 COPY prompts ./prompts
-COPY coworker.example.yaml ./
+COPY coworker.example.yaml coworker.minimal.yaml ./
 COPY --from=web-ui /build/web-ui/dist ./web-ui/dist
 
 RUN cargo build --release --no-default-features --features embed-web-ui -p unistar-coworker
@@ -39,7 +39,7 @@ WORKDIR /app
 COPY skills ./skills
 COPY packaging/workdir-template ./template
 COPY docs ./docs
-COPY README.md README_CN.md QUICKSTART.md QUICKSTART_CN.md coworker.example.yaml ./
+COPY README.md README_CN.md QUICKSTART.md QUICKSTART_CN.md coworker.example.yaml coworker.minimal.yaml ./
 
 EXPOSE 8787
 ENTRYPOINT ["/usr/local/bin/unistar-coworker"]

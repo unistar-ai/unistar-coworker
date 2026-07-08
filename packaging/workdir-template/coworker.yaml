@@ -1,5 +1,7 @@
 # Deploy template — copied into the runtime workdir by scripts/package.sh.
 # Personal local config — do not commit files containing real API keys.
+#
+# Reference tier: 25B+ (e.g. gemma4:26b-a4b, qwen3.6:27b). GitHub below is optional.
 
 llm_profile: ollama-local
 
@@ -8,28 +10,37 @@ llm:
     base_url: http://127.0.0.1:11434/v1
     model: gemma4:26b-a4b-it-qat
     context_limit: 64000
-    # Ollama typically needs no key; leave unset or use a placeholder.
+  qwen-27b:
+    base_url: http://127.0.0.1:11434/v1
+    model: qwen3.6:27b
+    context_limit: 64000
   deepseek:
     base_url: https://api.deepseek.com/v1
     model: deepseek-chat
     context_limit: 128000
     api_key: ${DEEPSEEK_API_KEY}
 
-github:
-  gh_command: gh
-  env: {}
-
-repos:
-  - owner/repo
-
-workflows:
-  daily-work: {}
-  review-radar: {}
+# --- Optional GitHub (uncomment when using workflows / harness tools) ---
+# github:
+#   gh_command: gh
+#   env: {}
+#
+# repos:
+#   - owner/repo
+#
+# workflows:
+#   daily-work: {}
+#   review-radar: {}
 
 chat:
+  workspace: .
   history_messages: 32
 
 web:
   bind: 127.0.0.1:8787
+
+storage:
+  backend: json
+  path: ./data
 
 theme: light

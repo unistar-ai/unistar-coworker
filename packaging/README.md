@@ -18,6 +18,7 @@
 ├── coworker.yaml          # active config (from template)
 ├── AGENTS.md
 ├── coworker.example.yaml
+├── coworker.minimal.yaml
 ├── README.md
 ├── QUICKSTART.md
 ├── QUICKSTART_CN.md

@@ -4,7 +4,7 @@
 [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![CI](https://github.com/unistar-ai/unistar-coworker/actions/workflows/ci.yml/badge.svg)](./.github/workflows/ci.yml)
 
-**A local GitHub ops secretary** — terminal-first TUI, browser Web UI, in-process GitHub harness, optional MCP federation, and a local LLM. It watches PRs and CI, classifies failures, produces digests, and queues every mutating action behind **human approval**.
+**A local-first general agent for local LLMs** — terminal TUI, browser Web UI, native tool calling, workspace tools, optional MCP federation, and an in-process GitHub harness. Runs on Ollama / OpenAI-compatible APIs; queues risky mutating actions behind **human approval** when configured.
 
 [English](./README.md) · [中文](./README_CN.md)
 
@@ -22,15 +22,13 @@
 
 ## Overview
 
-`unistar-coworker` is **not** an unconstrained coding agent and **not** a replacement for GitHub Actions. It is an ops secretary that:
+`unistar-coworker` is a **general agent runtime** optimized for **local models**, not a hosted agent platform or a CI runner. It:
 
-- Runs scheduled **workflows** (`daily-work` triage, `review-radar`) and an interactive **chat** mode for ad-hoc Q&A and light local work.
-- Calls GitHub/CI **in-process** in Rust via the [`GithubHarness`](./crates/core/src/github/harness.rs) → `gh` CLI — no MCP subprocess for GitHub.
-- Mounts optional **third-party MCP** servers (Slack, filesystem, HTTP gateways) through `mcp.servers[]` (stdio or Streamable HTTP).
-- Uses a **local LLM** (Ollama / OpenAI-compatible) for classification, chat planning, and digests.
-- **Never** auto-executes mutating actions — rerun CI, backport, post comment, and MCP mutating tools all go through a TUI/Web approval queue unless `chat.auto_approve_mutations` is explicitly enabled.
-
-Chat can still use workspace tools (`read_file`, `grep`, `bash_run`, …) for light local coding; file/bash mutating paths go through LLM safety review, while GitHub/MCP mutating paths require human approval.
+- Runs **chat** (TUI, CLI, Web) and scheduled **workflows** with skills + prompts — coding, Q&A, and ops in `chat.workspace`.
+- Uses a **local LLM** (Ollama / OpenAI-compatible) for planning, tool calls, and summarization; supports named profiles and runtime switching.
+- Exposes **workspace tools** (`read_file`, `grep`, `bash_run`, …) for repo-local work; optional **MCP** servers via `mcp.servers[]`.
+- Integrates **GithubHarness** in-process (`gh` CLI) when GitHub/CI is in scope — daily triage, review radar, and related workflows are skill packs, not the product ceiling.
+- **Defaults to safety** — GitHub/MCP mutating tools go through TUI/Web approval unless `chat.auto_approve_mutations` is explicitly enabled.
 
 ---
 
@@ -71,18 +69,18 @@ Chat can still use workspace tools (`read_file`, `grep`, `bash_run`, …) for li
 
 | Area | Capability |
 |------|------------|
-| **Workflows** | `daily-work` (morning PR/CI triage → digest + flaky ledger), `review-radar` (CI-green PRs blocked on review); cron, daemon, or one-shot |
-| **Chat** | Natural-language REPL in TUI, CLI, or Web; LLM plans tool chains across GitHub harness, workspace, and federated MCP |
-| **GithubHarness** | GitHub/CI tools in-process via `gh`; capped payloads; no MCP subprocess for GitHub |
+| **Chat** | Natural-language agent in TUI, CLI, or Web; LLM plans multi-step tool chains across workspace tools, optional MCP, and GitHub harness |
+| **LLM** | Named `llm:` profile map + runtime switch (Web Config, RPC `switch_profile`, sidecar `coworker.llm-profile`); tuned for **25B+** local models (e.g. qwen3.6-27B, gemma 26B A4B; 64K–128K context) |
+| **Workspace** | `read_file`, `grep`, `glob`, `edit_file`, `bash_run`, `python_run`, … in `chat.workspace` with LLM safety review on mutating paths |
+| **Safety** | External mutating tools (GitHub harness, MCP) require TUI/Web approval unless `chat.auto_approve_mutations` or per-server `approval.mutating: auto` |
 | **MCP federation** | `mcp.servers[]` with stdio + HTTP, lazy discovery, mutating approval, per-server skills, cancel in flight |
-| **Safety** | Rerun CI, backport, post comment, MCP mutating tools require TUI/Web approval (unless `chat.auto_approve_mutations` or per-server `approval.mutating: auto`) |
+| **GithubHarness** | Optional in-process GitHub/CI via `gh`; capped payloads; no MCP subprocess for GitHub |
+| **Workflows** | Optional `daily-work` (PR/CI triage → digest + flaky ledger), `review-radar`; cron, daemon, or one-shot |
 | **TUI** | Dashboard, PR list, approvals, logs, config, flaky report, release queue, issues, full-screen chat |
 | **Web UI** | Browser chat (`serve`), sessions, light/dark theme, streaming tool/reasoning cards, LLM profile switcher, branch regenerate, approval modal, Markdown/JSONL export |
 | **Scripting** | `doctor`, `init`, `rpc` (JSONL stdin/stdout), `export session`, shell completions, stable exit codes (`0/2/3/4`) |
 | **Ops** | `SIGHUP` / `POST /api/reload` hot-reload config, skills, prompts, MCP; `GET /api/doctor` health JSON |
 | **Sessions** | Pi-style message tree — regenerate / branch from any assistant reply; export active branch as JSONL or HTML |
-| **LLM** | Named `llm:` profile map + runtime switch (Web Config, RPC `switch_profile`, sidecar `coworker.llm-profile`) |
-| **Safety** | Secret redaction in UI, approvals, and CLI output; mutating tools still require human approval |
 | **Store** | JSON (default) or SQLite for digests, snapshots, flaky ledger, chat sessions, audit log; `store migrate` and `store compact` commands |
 
 ---
@@ -108,20 +106,21 @@ See [docs/docker.md](docs/docker.md) for config template, volumes, and `gh auth`
 
 ```bash
 cd unistar-coworker
-unistar-coworker init --repos acme/widget --llm-url http://localhost:11434/v1
-# Or: cp coworker.example.yaml coworker.yaml and edit manually
+unistar-coworker init --llm-url http://localhost:11434/v1
+# Or: cp coworker.minimal.yaml coworker.yaml and edit (25B+ model recommended, e.g. gemma4:26b-a4b or qwen3.6:27b)
 
-export GH_TOKEN=ghp_...   # or: gh auth login
-
-unistar-coworker doctor          # config / gh / LLM / MCP / store health
+unistar-coworker doctor          # config / LLM / store health (GitHub optional)
 
 # Frontend: build once (dev serves from disk; release embeds into the binary)
 (cd web-ui && npm install && npm run build:fast)
 
 cargo build --release --features embed-web-ui
 
-./target/release/unistar-coworker                                   # TUI + cron scheduler
 ./target/release/unistar-coworker serve                             # Web → http://127.0.0.1:8787
+./target/release/unistar-coworker                                   # TUI + cron scheduler
+
+# Optional GitHub:
+export GH_TOKEN=ghp_...   # or: gh auth login
 ./target/release/unistar-coworker run-once                          # headless daily-work
 ./target/release/unistar-coworker chat --once "Summarize open PRs in acme/widget" --json
 ```
@@ -524,12 +523,12 @@ Implementation: [`crates/core/src/mcp/`](./crates/core/src/mcp/).
 
 | It is | It is not |
 |-------|-----------|
-| Reads capped GitHub/CI signals; local LLM assists triage and digests | A replacement for GitHub Actions or a CI runner |
-| Ledger, digests, drafts, approval-gated mutating actions | Unapproved auto-merge or repo-wide autonomous edits |
-| TUI + Web UI for ops; terminal-first | A hosted SaaS dashboard |
-| **Workflow** batch jobs + **Chat** ad-hoc Q&A and light coding | A second `gh` wrapper or a required `unistar-mcp` subprocess |
+| A **local-first general agent** for local LLMs (chat + workflows + tools) | A cloud-hosted agent platform or multi-tenant SaaS |
+| Workspace coding/Q&A, skills, MCP, optional GitHub harness | Unapproved auto-merge or silent full-repo autonomous edits |
+| TUI + Web UI + RPC for scripting; terminal-friendly | A replacement for GitHub Actions or CI runners |
+| Approval-gated external mutating tools by default | A second `gh` wrapper with no broader agent surface |
 
-**Non-goals:** no unapproved auto-merge; no full-repo semantic RAG; workflows do not call third-party MCP by default (chat may when configured).
+**Non-goals:** no hosted telemetry; no unapproved auto-merge; workflows do not call third-party MCP by default (chat may when configured). GitHub ops (`daily-work`, `review-radar`, …) is a **shipped domain pack**, not the only supported use case.
 
 ### Skill / Prompt / Harness
 
@@ -670,7 +669,8 @@ unistar-coworker/
 │   └── dist/                # vite build output (gitignored, generated)
 ├── vendor/chromiumoxide/    # Patched CDP dependency
 ├── web-e2e/                 # Playwright smoke tests
-├── coworker.example.yaml    # Config template
+├── coworker.example.yaml    # Config template (+ optional GitHub)
+├── coworker.minimal.yaml    # Workspace-only template
 └── Cargo.lock
 ```
 

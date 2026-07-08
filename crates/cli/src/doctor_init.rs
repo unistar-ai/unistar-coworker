@@ -238,7 +238,7 @@ pub(crate) async fn run_init(
         }
     } else {
         eprintln!(
-            "  {} edit `repos:` and `llm.base_url`, then run 'unistar-coworker doctor' to verify",
+            "  {} edit `llm.model` (25B+ recommended, e.g. gemma4:26b-a4b or qwen3.6:27b) and `chat.workspace`, then run `unistar-coworker doctor`",
             hint_prefix()
         );
     }
@@ -290,7 +290,7 @@ async fn probe_ollama() -> bool {
 }
 
 fn prompt_repos() -> Result<Option<String>> {
-    print!("GitHub repos (comma-separated owner/repo, Enter to skip): ");
+    print!("GitHub repos (comma-separated owner/repo, Enter to skip — workspace-only is fine): ");
     io::stdout().flush().ok();
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `coworker.minimal.yaml` — workspace-only config template (no GitHub).
+- `doctor` checks: `llm-model` / `llm-context` hints for **25B+** reference tier (e.g. qwen3.6-27B, gemma 26B A4B); GitHub auth is **warn** when `repos:` is empty.
+
+### Changed
+
+- Product positioning: **local-first general agent** for local LLMs; GitHub/MCP/workflows are optional capability packs.
+- Default chat prompt (`prompts/chat.md`): general workspace agent tone; GitHub only when skills/user ask.
+- `QUICKSTART*` / README: workspace + Ollama first; GitHub optional second section.
+- `coworker.example.yaml`: GitHub blocks commented optional; default model `gemma4:26b-a4b-it-qat`.
+- `skills/code-edit`: full explore → patch → verify workflow.
+- README Features table: Chat / LLM / workspace before GitHub workflows.
+
 ## [2.1.0] - 2026-07-08
 
 ### Added

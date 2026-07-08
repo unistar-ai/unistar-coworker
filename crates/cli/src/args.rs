@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "unistar-coworker",
-    about = "Local GitHub ops secretary with TUI",
+    about = "Local-first general agent for local LLMs",
     after_help = "EXAMPLES:\n    unistar-coworker tui                                  Terminal UI (default)\n    unistar-coworker serve                            Web UI server\n    unistar-coworker chat                             interactive chat REPL\n    unistar-coworker chat --once \"summarize PR 123\" --json\n    unistar-coworker run-once --workflow daily-work\n    unistar-coworker triage-pr --repo acme/widget --pr 42 --json\n    unistar-coworker report oncall\n    unistar-coworker store compact --dry-run --audit-days 30\n\nGlobal flags (--config / -v / -q / --attach) go before the subcommand."
 )]
 pub(crate) struct Cli {

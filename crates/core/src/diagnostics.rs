@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_yaml::Value;
 
 use crate::agent::redact::looks_like_secret;
-use crate::config::{is_unresolved_env_placeholder, Config};
+use crate::config::{is_unresolved_env_placeholder, Config, LlmConfig};
 use crate::store::open_store;
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,21 +116,54 @@ pub async fn run_checks_with_extras(
                 .find(|l| !l.trim().is_empty())
                 .unwrap_or("not authenticated")
                 .to_string();
-            report.push_check(DoctorCheck {
-                name: "github",
-                status: "fail",
-                detail: first,
-                latency_ms: None,
-                hint: Some("run `gh auth login`".into()),
-            });
+            let github_needed = cfg
+                .as_ref()
+                .is_some_and(|c| !c.repos.is_empty());
+            if github_needed {
+                report.push_check(DoctorCheck {
+                    name: "github",
+                    status: "fail",
+                    detail: first,
+                    latency_ms: None,
+                    hint: Some("run `gh auth login`".into()),
+                });
+            } else {
+                report.push_check(DoctorCheck {
+                    name: "github",
+                    status: "warn",
+                    detail: format!("{first} (optional — no repos configured)"),
+                    latency_ms: None,
+                    hint: Some(
+                        "workspace-only agent needs no GitHub; add repos: and auth for workflows"
+                            .into(),
+                    ),
+                });
+            }
         }
-        Err(e) => report.push_check(DoctorCheck {
-            name: "github",
-            status: "fail",
-            detail: format!("gh CLI not found: {e}"),
-            latency_ms: None,
-            hint: Some("install GitHub CLI: https://cli.github.com".into()),
-        }),
+        Err(e) => {
+            let github_needed = cfg
+                .as_ref()
+                .is_some_and(|c| !c.repos.is_empty());
+            if github_needed {
+                report.push_check(DoctorCheck {
+                    name: "github",
+                    status: "fail",
+                    detail: format!("gh CLI not found: {e}"),
+                    latency_ms: None,
+                    hint: Some("install GitHub CLI: https://cli.github.com".into()),
+                });
+            } else {
+                report.push_check(DoctorCheck {
+                    name: "github",
+                    status: "warn",
+                    detail: format!("gh CLI not found: {e} (optional — no repos configured)"),
+                    latency_ms: None,
+                    hint: Some(
+                        "install gh only if you use GitHub harness or workflows".into(),
+                    ),
+                });
+            }
+        }
     }
 
     if let Some(cfg) = cfg {
@@ -147,10 +180,14 @@ pub async fn run_checks_with_extras(
             report.push_check(DoctorCheck {
                 name: "llm",
                 status: "ok",
-                detail: format!("{} reachable ({lat})", cfg.llm.base_url),
+                detail: format!(
+                    "{} reachable ({lat}) — model `{}`",
+                    cfg.llm.base_url, cfg.llm.model
+                ),
                 latency_ms: latency,
                 hint: None,
             });
+            push_llm_model_tier_checks(&mut report, &cfg.llm);
         } else {
             report.push_check(DoctorCheck {
                 name: "llm",
@@ -357,6 +394,78 @@ fn bind_port(bind: &str) -> Option<u16> {
     bind.rsplit(':').next()?.parse().ok()
 }
 
+/// Reference-tier local models (see design-plans/agent-evolution.md).
+pub const MODEL_REFERENCE_BILLIONS: u32 = 25;
+
+/// Recommended minimum `context_limit` for the 25B+ reference tier.
+pub const CONTEXT_RECOMMENDED_MIN: u32 = 64_000;
+
+/// Best-effort parse of parameter count from Ollama-style model tags (e.g. `qwen2.5:32b` → 32).
+pub fn estimate_model_billions(model: &str) -> Option<u32> {
+    let lower = model.to_ascii_lowercase();
+    let mut max = 0u32;
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'b' {
+            if let Ok(n) = lower[start..i].parse::<u32>() {
+                max = max.max(n);
+            }
+            i += 1;
+        }
+    }
+    if max > 0 { Some(max) } else { None }
+}
+
+fn push_llm_model_tier_checks(report: &mut DoctorReport, llm: &LlmConfig) {
+    if let Some(billions) = estimate_model_billions(&llm.model) {
+        if billions < MODEL_REFERENCE_BILLIONS {
+            report.push_check(DoctorCheck {
+                name: "llm-model",
+                status: "warn",
+                detail: format!(
+                    "model `{}` ≈ {billions}B — below {MODEL_REFERENCE_BILLIONS}B reference tier",
+                    llm.model
+                ),
+                latency_ms: None,
+                hint: Some(
+                    "25B+ local models are the design target (e.g. qwen3.6-27B, gemma 26B A4B); smaller models may work with reduced reliability"
+                        .into(),
+                ),
+            });
+        }
+    }
+
+    if llm.context_limit < CONTEXT_RECOMMENDED_MIN {
+        report.push_check(DoctorCheck {
+            name: "llm-context",
+            status: "warn",
+            detail: format!(
+                "context_limit {} < recommended {CONTEXT_RECOMMENDED_MIN} for 25B+ agent sessions",
+                llm.context_limit
+            ),
+            latency_ms: None,
+            hint: Some("set context_limit to 64000–128000 when your model supports it".into()),
+        });
+    } else if llm.context_limit >= 128_000 {
+        report.push_check(DoctorCheck {
+            name: "llm-context",
+            status: "ok",
+            detail: format!("context_limit {} (128K tier)", llm.context_limit),
+            latency_ms: None,
+            hint: None,
+        });
+    }
+}
+
 /// Redact `api_key` fields in raw coworker.yaml for diagnostic bundles.
 pub fn redact_coworker_yaml(raw: &str) -> String {
     let Ok(mut value) = serde_yaml::from_str::<Value>(raw) else {
@@ -411,5 +520,58 @@ repos: [acme/widget]
     fn bind_port_parses_host_port() {
         assert_eq!(bind_port("127.0.0.1:8787"), Some(8787));
         assert_eq!(bind_port("0.0.0.0:9999"), Some(9999));
+    }
+
+    #[test]
+    fn estimate_model_billions_parses_tags() {
+        assert_eq!(estimate_model_billions("qwen3.6:27b"), Some(27));
+        assert_eq!(estimate_model_billions("qwen3.6-27b"), Some(27));
+        assert_eq!(estimate_model_billions("gemma4:26b-a4b-it-qat"), Some(26));
+        assert_eq!(estimate_model_billions("qwen2.5:32b"), Some(32));
+        assert_eq!(estimate_model_billions("llama3.1:70b-instruct-q4_K_M"), Some(70));
+        assert_eq!(estimate_model_billions("mistral-nemo"), None);
+    }
+
+    #[test]
+    fn model_tier_accepts_reference_models() {
+        let mut report = DoctorReport {
+            ok: 0,
+            warn: 0,
+            fail: 0,
+            checks: Vec::new(),
+        };
+        for model in ["gemma4:26b-a4b-it-qat", "qwen3.6:27b"] {
+            push_llm_model_tier_checks(
+                &mut report,
+                &LlmConfig {
+                    base_url: "http://localhost:11434/v1".into(),
+                    model: model.into(),
+                    context_limit: 64_000,
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(!report.checks.iter().any(|c| c.name == "llm-model"));
+    }
+
+    #[test]
+    fn model_tier_warns_below_reference() {
+        let mut report = DoctorReport {
+            ok: 0,
+            warn: 0,
+            fail: 0,
+            checks: Vec::new(),
+        };
+        push_llm_model_tier_checks(
+            &mut report,
+            &LlmConfig {
+                base_url: "http://localhost:11434/v1".into(),
+                model: "qwen2.5:7b".into(),
+                context_limit: 32_000,
+                ..Default::default()
+            },
+        );
+        assert!(report.checks.iter().any(|c| c.name == "llm-model" && c.status == "warn"));
+        assert!(report.checks.iter().any(|c| c.name == "llm-context" && c.status == "warn"));
     }
 }
