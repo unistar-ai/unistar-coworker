@@ -22,8 +22,9 @@ secrets/
 .cursor/settings.json
 .claude/settings.local.json
 
-# leftover if old root npm tooling was installed locally
+# leftover if old root npm / husky tooling was installed locally
 node_modules/
+.husky/
 
 # web-ui (React / Vite) — do not commit deps, build output, or tooling caches
 web-ui/node_modules/
