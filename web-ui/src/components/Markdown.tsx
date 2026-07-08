@@ -1,4 +1,4 @@
-import type { ReactElement } from "react";
+import { isValidElement } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -60,7 +60,10 @@ const components: Components = {
     // react-markdown + remark-gfm renders task items with an <input
     // type="checkbox"> as the first child.
     const isTask = Array.isArray(children) && children.some(
-      (c) => typeof c === "object" && c !== null && "props" in c && (c as ReactElement).props?.type === "checkbox",
+      (c) =>
+        isValidElement(c) &&
+        c.type === "input" &&
+        (c.props as { type?: string }).type === "checkbox",
     );
     return (
       <li className={isTask ? `task ${className || ""}`.trim() : className} {...rest}>
