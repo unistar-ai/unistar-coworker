@@ -15,7 +15,7 @@
     "@radix-ui/react-dialog": "^1.1.4",
     "@radix-ui/react-tabs": "^1.1.2",
     "@radix-ui/react-toast": "^1.2.4",
-    "@tanstack/react-virtual": "^3.1.4",
+    "@tanstack/react-virtual": "^3.14.5",
     "highlight.js": "^11.11.1",
     "lucide-react": "^0.469.0",
     "next-themes": "^0.4.4",
