@@ -259,6 +259,7 @@ async fn run_interactive_prompts() -> Result<(
             "{} Ollama detected at http://127.0.0.1:11434 — using http://127.0.0.1:11434/v1",
             green("✓", use_color_stdout())
         );
+        print_reference_model_hint();
         Some("http://127.0.0.1:11434/v1".into())
     } else {
         println!(
@@ -272,6 +273,15 @@ async fn run_interactive_prompts() -> Result<(
     let remote_profile = prompt_remote_profile()?;
 
     Ok((repos, llm_url, remote_profile))
+}
+
+fn print_reference_model_hint() {
+    println!();
+    println!("  Reference-tier models (25B+):");
+    println!("    ollama pull gemma4:26b-a4b-it-qat");
+    println!("    ollama pull qwen3.6:27b");
+    println!("  Set llm.model in coworker.yaml after init (see docs/local-models.md).");
+    println!();
 }
 
 async fn probe_ollama() -> bool {

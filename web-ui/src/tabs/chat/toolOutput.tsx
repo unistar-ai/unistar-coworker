@@ -73,6 +73,29 @@ export function formatDiffHtml(text: string): string {
     .join("\n");
 }
 
+/** Bash / shell tool transcripts: exit line, stdout/stderr prefixes. */
+export function looksLikeBashOutput(text: string): boolean {
+  return /^exit:\s*\d+/m.test(text) || /^stdout:/m.test(text) || /^stderr:/m.test(text);
+}
+
+/** Collapsed view: keep head + tail so long build logs still show the exit line. */
+export function collapseLongOutput(
+  text: string,
+  headLines = 4,
+  tailLines = 3,
+): string {
+  const lines = text.split("\n");
+  if (lines.length <= headLines + tailLines + 1) {
+    return text;
+  }
+  const omitted = lines.length - headLines - tailLines;
+  return [
+    ...lines.slice(0, headLines),
+    `… (${omitted} lines omitted) …`,
+    ...lines.slice(-tailLines),
+  ].join("\n");
+}
+
 export function ToolOutputView({
   output,
   outputKey,
@@ -87,12 +110,20 @@ export function ToolOutputView({
   const collapsible = lines.length > 6 || output.length > 480;
   const isDiff = looksLikeDiff(output);
   const isJson = !isDiff && looksLikeJson(output) && (output.length > 480 || lines.length > 6);
+  const isBash = looksLikeBashOutput(output);
 
   // For long JSON, allow toggling between pretty-printed and raw.
   const effectiveOutput = isJson && pretty ? tryPrettyJson(output) : output;
   const effLines = effectiveOutput.split("\n");
-  const displayText =
-    collapsible && !expanded ? effLines.slice(0, 5).join("\n") + "\n…" : effectiveOutput;
+  const displayText = (() => {
+    if (!collapsible || expanded) {
+      return effectiveOutput;
+    }
+    if (isBash && effLines.length > 8) {
+      return collapseLongOutput(effectiveOutput);
+    }
+    return effLines.slice(0, 5).join("\n") + "\n…";
+  })();
 
   const html = isDiff ? formatDiffHtml(displayText) : formatToolOutputHtml(displayText);
 

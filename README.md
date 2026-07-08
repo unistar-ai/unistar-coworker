@@ -685,6 +685,7 @@ See [SUPPORT.md](./SUPPORT.md) — **GitHub Issues only** (bug / feature / quest
 | Resource | Topic |
 |----------|-------|
 | [docs/local-models.md](./docs/local-models.md) | 25B+ local models, `tool_mode`, chat knobs |
+| [docs/context-budget.md](./docs/context-budget.md) | Context window, compaction, trim behavior |
 | [docs/troubleshooting.md](./docs/troubleshooting.md) | Common problems |
 | [docs/upgrading.md](./docs/upgrading.md) | Version upgrades |
 | [docs/RPC.md](./docs/RPC.md) | JSONL scripting |

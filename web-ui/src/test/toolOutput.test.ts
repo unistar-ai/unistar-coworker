@@ -5,7 +5,27 @@ import {
   formatToolOutputHtml,
   looksLikeJson,
   tryPrettyJson,
+  looksLikeBashOutput,
+  collapseLongOutput,
 } from "../tabs/chat/toolOutput";
+
+describe("collapseLongOutput", () => {
+  it("keeps head and tail with an omission marker", () => {
+    const lines = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+    const out = collapseLongOutput(lines, 2, 2);
+    expect(out).toContain("line 0");
+    expect(out).toContain("line 19");
+    expect(out).toContain("lines omitted");
+    expect(out).not.toContain("line 10");
+  });
+});
+
+describe("looksLikeBashOutput", () => {
+  it("detects exit and stdout prefixes", () => {
+    expect(looksLikeBashOutput("stdout: ok\nexit: 0")).toBe(true);
+    expect(looksLikeBashOutput("plain text")).toBe(false);
+  });
+});
 
 describe("looksLikeDiff", () => {
   it("detects a `diff --git` header", () => {

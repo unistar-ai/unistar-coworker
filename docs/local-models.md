@@ -59,4 +59,12 @@ ollama pull gemma4:26b-a4b   # or qwen3.6:27b
 
 `doctor` reports `llm-model` / `llm-context` when below the reference tier.
 
-See also: [QUICKSTART.md](../QUICKSTART.md), [coworker.minimal.yaml](../coworker.minimal.yaml), [troubleshooting.md](./troubleshooting.md).
+See also: [QUICKSTART.md](../QUICKSTART.md), [coworker.minimal.yaml](../coworker.minimal.yaml), [context-budget.md](./context-budget.md), [troubleshooting.md](./troubleshooting.md).
+
+## Context and long sessions
+
+For **64K+** multi-turn workspace tasks, defaults (`compaction: code`, unlimited `max_turns`) are tuned for 25B+ models. Trimming keeps recent tool results in the tail. Details: [context-budget.md](./context-budget.md).
+
+### Reasoning-only streams
+
+Some thinking models emit long internal reasoning before tool calls. Set `chat.reasoning_only_warn_secs` (default `30`) so the Web UI can surface slow streams; raise `llm_step_timeout_secs` if the local model regularly exceeds 180s per step.

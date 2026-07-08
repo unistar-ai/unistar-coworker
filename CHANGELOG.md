@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `coworker.minimal.yaml` — workspace-only config template (no GitHub).
 - `skills/general-agent-tone` — default always-on reply style (tool-grounded, non-secretary).
 - `docs/local-models.md` — 25B+ reference models (gemma 26B A4B, qwen3.6-27B), `tool_mode`, and chat knobs.
+- `docs/context-budget.md` — context window, `chat.compaction`, and trim behavior for long sessions.
 - `doctor` checks: `llm-model` / `llm-context` hints for **25B+** reference tier; GitHub auth is **warn** when `repos:` is empty.
+- `init --interactive` prints 25B+ Ollama model pull hints when Ollama is detected.
+- Web UI: collapsed bash tool output shows head + tail (exit line visible on long logs).
 
 ### Changed
 

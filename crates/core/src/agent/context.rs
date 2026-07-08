@@ -2206,4 +2206,58 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
             "recent edit result should remain visible after trim"
         );
     }
+
+    #[test]
+    fn long_session_trim_preserves_parallel_read_markers() {
+        use crate::llm::chat::LlmToolCall;
+
+        let mut messages = vec![LlmTurnMessage::new("system", "agent")];
+        for i in 0..10 {
+            messages.push(LlmTurnMessage::new("user", format!("step {i} {}", "a".repeat(400))));
+            messages.push(LlmTurnMessage::assistant_tool_call(
+                "",
+                vec![LlmToolCall {
+                    id: format!("c{i}"),
+                    name: if i % 2 == 0 { "grep" } else { "read_file" }.into(),
+                    arguments: serde_json::json!({"path": "src/lib.rs"}),
+                }],
+            ));
+            let marker = format!("PARALLEL_MARKER_{i}");
+            messages.push(LlmTurnMessage::tool_result_with_id(
+                Some(format!("c{i}")),
+                if i % 2 == 0 { "grep" } else { "read_file" },
+                format_tool_context_message(
+                    if i % 2 == 0 { "grep" } else { "read_file" },
+                    &serde_json::json!({"path": "src/lib.rs"}),
+                    true,
+                    &marker,
+                ),
+            ));
+        }
+        const FINAL: &str = "FINAL_EDIT_PATCHED";
+        messages.push(LlmTurnMessage::tool_result_with_id(
+            Some("final".into()),
+            "edit_file",
+            format_tool_context_message(
+                "edit_file",
+                &serde_json::json!({"path": "src/lib.rs"}),
+                true,
+                FINAL,
+            ),
+        ));
+
+        trim_llm_messages(&mut messages, 3_500, CompactionStrategy::Code);
+        let joined: String = messages.iter().map(|m| m.content.as_str()).collect();
+        assert!(
+            joined.contains(FINAL),
+            "latest edit_file result should survive long-session trim"
+        );
+    }
+
+    #[test]
+    fn code_compaction_preserves_exit_line_in_bash_summary() {
+        let body = "line\n".repeat(30) + "exit: 1\nfailed tests";
+        let out = summarize_coding_tool_content("bash_run", &body);
+        assert!(out.contains("exit: 1"));
+    }
 }
