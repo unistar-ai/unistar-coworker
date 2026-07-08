@@ -7,6 +7,7 @@
 coworker.yaml
 .coworker/coworker.yaml
 !web-e2e/fixtures/coworker.yaml
+!packaging/workdir-template/coworker.yaml
 
 # env / secrets — never commit tokens or webhook URLs
 .env

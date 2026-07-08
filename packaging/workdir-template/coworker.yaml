@@ -1,0 +1,35 @@
+# Deploy template — copied into the runtime workdir by scripts/start-agent.sh.
+# Edit repos, LLM endpoints, and secrets for your environment after first launch.
+
+llm_profile: ollama-local
+
+llm:
+  ollama-local:
+    base_url: http://127.0.0.1:11434/v1
+    model: gemma4:26b-a4b-it-qat
+    context_limit: 64000
+    api_key: ollama
+  deepseek:
+    base_url: https://api.deepseek.com/v1
+    model: deepseek-chat
+    context_limit: 128000
+    api_key: ${DEEPSEEK_API_KEY}
+
+github:
+  gh_command: gh
+  env: {}
+
+repos:
+  - owner/repo
+
+workflows:
+  daily-work: {}
+  review-radar: {}
+
+chat:
+  history_messages: 32
+
+web:
+  bind: 127.0.0.1:8787
+
+theme: light
