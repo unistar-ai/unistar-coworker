@@ -12,7 +12,6 @@ pub mod github;
 pub mod llm;
 pub mod logging;
 pub mod mcp;
-pub mod output;
 pub mod repo;
 pub mod store;
 pub mod terminal;

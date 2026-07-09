@@ -11,7 +11,7 @@ use crate::agent::context::harness_nudge_base;
 use crate::error::{CoworkerError, Result};
 use crate::store::{
     Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole,
-    ChatRuntimeState, ChatSession, Digest, PrSnapshot, Store, Transcript,
+    ChatRuntimeState, ChatSession, Store,
 };
 use async_trait::async_trait;
 
@@ -23,14 +23,11 @@ pub struct JsonStore {
 impl JsonStore {
     pub fn open(root: PathBuf) -> Result<Self> {
         fs::create_dir_all(&root)?;
-        fs::create_dir_all(root.join("digests"))?;
-        fs::create_dir_all(root.join("pr_snapshots"))?;
         fs::create_dir_all(root.join("approvals"))?;
         fs::create_dir_all(root.join("audit"))?;
         fs::create_dir_all(root.join("backport_queue"))?;
         fs::create_dir_all(root.join("chat/sessions"))?;
         fs::create_dir_all(root.join("chat/messages"))?;
-        fs::create_dir_all(root.join("transcripts"))?;
 
         Ok(Self { root })
     }
@@ -113,81 +110,6 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 
 #[async_trait]
 impl Store for JsonStore {
-    async fn save_digest(&self, digest: &Digest) -> Result<()> {
-        let path = self
-            .root
-            .join("digests")
-            .join(format!("{}.json", digest.date));
-        Self::write_json(&path, digest)
-    }
-
-    async fn latest_digest(&self) -> Result<Option<Digest>> {
-        let dir = self.root.join("digests");
-        let mut files: Vec<_> = fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .collect();
-        files.sort_by_key(|e| e.file_name());
-        if let Some(last) = files.pop() {
-            return Ok(Some(read_json(&last.path())?));
-        }
-        Ok(None)
-    }
-
-    async fn list_digests(&self, limit: usize) -> Result<Vec<Digest>> {
-        let dir = self.root.join("digests");
-        let mut digests = Vec::new();
-        if !dir.exists() {
-            return Ok(digests);
-        }
-        let mut files: Vec<_> = fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .collect();
-        files.sort_by_key(|e| e.file_name());
-        for entry in files.into_iter().rev().take(limit) {
-            digests.push(read_json(&entry.path())?);
-        }
-        Ok(digests)
-    }
-
-    async fn upsert_pr_snapshot(&self, snap: &PrSnapshot) -> Result<()> {
-        let path = self
-            .root
-            .join("pr_snapshots")
-            .join(format!("{}.json", Self::repo_file(&snap.repo)));
-        let mut map: HashMap<u32, PrSnapshot> = if path.exists() {
-            read_json(&path)?
-        } else {
-            HashMap::new()
-        };
-        map.insert(snap.number, snap.clone());
-        Self::write_json(&path, &map)
-    }
-
-    async fn list_pr_snapshots(&self, repo: Option<&str>) -> Result<Vec<PrSnapshot>> {
-        let dir = self.root.join("pr_snapshots");
-        if !dir.exists() {
-            return Ok(vec![]);
-        }
-        let mut out = Vec::new();
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            if repo.is_some_and(|r| {
-                !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains(&Self::repo_file(r))
-            }) {
-                continue;
-            }
-            let map: HashMap<u32, PrSnapshot> = read_json(&entry.path())?;
-            out.extend(map.into_values());
-        }
-        out.sort_by_key(|b| std::cmp::Reverse(b.fetched_at));
-        Ok(out)
-    }
-
     async fn push_approval(&self, item: &Approval) -> Result<()> {
         let path = self.root.join("approvals/pending.json");
         let mut pending: Vec<Approval> = if path.exists() {
@@ -418,29 +340,6 @@ impl Store for JsonStore {
         Ok(msgs)
     }
 
-    async fn save_transcript(&self, t: &Transcript) -> Result<()> {
-        self.with_lock(|| {
-            let path = self.root.join("transcripts/all.jsonl");
-            Self::append_jsonl(&path, t)
-        })
-    }
-
-    async fn list_transcripts(&self, limit: usize) -> Result<Vec<Transcript>> {
-        let path = self.root.join("transcripts/all.jsonl");
-        if !path.exists() {
-            return Ok(vec![]);
-        }
-        let raw = fs::read_to_string(&path)?;
-        let mut list: Vec<Transcript> = raw
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        list.sort_by_key(|t| std::cmp::Reverse(t.created_at));
-        list.truncate(limit);
-        Ok(list)
-    }
-
     async fn list_chat_sessions(&self, limit: usize) -> Result<Vec<ChatSession>> {
         let dir = self.root.join("chat/sessions");
         if !dir.exists() {
@@ -464,33 +363,7 @@ impl Store for JsonStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::DigestSummary;
     use chrono::Utc;
-
-    #[tokio::test]
-    async fn digest_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = JsonStore::open(dir.path().to_path_buf()).unwrap();
-        let digest = Digest {
-            id: Uuid::new_v4(),
-            date: Utc::now().date_naive(),
-            summary: DigestSummary {
-                needs_attention: 1,
-                ignorable: 2,
-                flaky_candidates: 0,
-                policy_gates: 0,
-                duration_secs: 1.5,
-                complete: true,
-            },
-            body_md: "# Daily".into(),
-            created_at: Utc::now(),
-            skill: None,
-        };
-        store.save_digest(&digest).await.unwrap();
-        let loaded = store.latest_digest().await.unwrap().unwrap();
-        assert_eq!(loaded.id, digest.id);
-        assert_eq!(loaded.summary.duration_secs, 1.5);
-    }
 
     #[tokio::test]
     async fn approval_history_lists_decided_recent_first() {

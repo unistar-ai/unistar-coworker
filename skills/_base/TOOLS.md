@@ -432,34 +432,12 @@ When MCP runs in `--lazy` mode:
 
 ## Harness (local Store — no GitHub API)
 
-### `store_get_latest_digest`
-Latest daily digest summary + pending approvals (first 5).
-
-| Param | Required |
-|-------|----------|
-| (none) | |
-
 ### `store_list_pending_approvals`
-Pending mutating-action queue without loading digest body.
+Pending mutating-action queue.
 
 | Param | Required | Notes |
 |-------|----------|-------|
 | `limit` | no | Max rows (default **20**, max **50**) |
-
-### `store_get_oncall_handoff`
-On-call handoff markdown from local Store (same source as `report oncall`).
-
-| Param | Required | Notes |
-|-------|----------|-------|
-| _(none)_ | — | Output capped at ~6k chars in chat |
-
-### `harness_triage_pr`
-Run full PR triage (same as TUI **`t`** on PRs tab). Updates `PrSnapshot.triage_note` in Store.
-
-| Param | Required |
-|-------|----------|
-| `repo` | yes |
-| `pr_number` | yes |
 
 ---
 
@@ -587,7 +565,7 @@ Post a compact Slack message via incoming webhook (mutating — not in default c
 | `text` | yes | Short summary; avoid raw logs |
 | `webhook_url` | no | Else `SLACK_WEBHOOK_URL` on MCP server |
 
-Coworker digest still uses `config.output.slack_webhook` directly; this tool is for agent-driven notifications from MCP.
+Use `config.output.slack_webhook` for automated Slack posts from coworker; this MCP tool is for agent-driven notifications.
 
 ### `event_list_recent`
 List recent GitHub webhook events (read-only). Events persist to **`~/.cache/unistar-mcp/events.jsonl`** by default (`UNISTAR_MCP_EVENT_FILE`; set `off` for memory-only) so stdio coworker and HTTP webhook ingest share the buffer.

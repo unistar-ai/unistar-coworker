@@ -946,7 +946,7 @@ pub async fn run_chat_turn(
         .iter()
         .map(|s| s.name.clone())
         .collect();
-    let focus_lines = build_message_focus_lines(store.as_ref(), user_task, &config.repos).await?;
+    let focus_lines = build_message_focus_lines(store.as_ref(), user_task).await?;
     let prev_state =
         if session.runtime_state.revision > 0 || !session.runtime_state.workspace_path.is_empty() {
             Some(&session.runtime_state)
@@ -1473,7 +1473,7 @@ from tool results already in context.";
                 let prepared: Vec<PreparedToolCall> = step
                     .tool_calls
                     .iter()
-                    .map(|c| prepare_tool_call(c, &config.repos, user_task))
+                    .map(|c| prepare_tool_call(c, user_task))
                     .collect();
 
                 if let Some(nudge) = validate_prepared_tool_calls(&prepared, &tool_catalog) {
@@ -1531,7 +1531,6 @@ from tool results already in context.";
                         tool_calls: &mut tool_calls,
                         tool_exec_records: &mut tool_exec_records,
                         tool_catalog: &tool_catalog,
-                        configured_repos: &config.repos,
                         user_task,
                         discovery: discovery.clone(),
                     };
@@ -1572,7 +1571,6 @@ from tool results already in context.";
                             progress: progress.clone(),
                         },
                         ReadonlyToolContext {
-                            configured_repos: &config.repos,
                             user_task,
                             bash: &config.chat.bash,
                             python: &config.chat.python,
@@ -1626,7 +1624,6 @@ from tool results already in context.";
                                         tool_calls: &mut tool_calls,
                                         tool_exec_records: &mut tool_exec_records,
                                         tool_catalog: &tool_catalog,
-                                        configured_repos: &config.repos,
                                         user_task,
                                         discovery: discovery.clone(),
                                     };
@@ -1676,7 +1673,6 @@ from tool results already in context.";
                             tool_calls: &mut tool_calls,
                             tool_exec_records: &mut tool_exec_records,
                             tool_catalog: &tool_catalog,
-                            configured_repos: &config.repos,
                             user_task,
                             discovery: discovery.clone(),
                         };
@@ -1995,22 +1991,6 @@ pub(crate) fn is_mutating_tool(name: &str) -> bool {
     MUTATING_TOOLS.contains(&name)
 }
 
-fn autofill_default_repo(configured_repos: &[String], tool_name: &str, tool_args: &mut Value) {
-    if configured_repos.len() != 1 || !tool_catalog::tool_accepts_repo(tool_name) {
-        return;
-    }
-    let Some(map) = tool_args.as_object_mut() else {
-        return;
-    };
-    let empty = map
-        .get("repo")
-        .and_then(|v| v.as_str())
-        .is_none_or(|s| s.trim().is_empty());
-    if empty {
-        map.insert("repo".to_string(), json!(configured_repos[0].as_str()));
-    }
-}
-
 fn autofill_repo_from_task(user_task: &str, tool_name: &str, tool_args: &mut Value) {
     if !tool_catalog::tool_accepts_repo(tool_name) {
         return;
@@ -2050,7 +2030,6 @@ fn autofill_pr_from_task(user_task: &str, tool_name: &str, tool_args: &mut Value
 pub(crate) fn finalize_tool_args(
     tool_name: &str,
     tool_args: &mut Value,
-    configured_repos: &[String],
     user_task: &str,
 ) {
     if tool_name == "tool_call" {
@@ -2063,25 +2042,19 @@ pub(crate) fn finalize_tool_args(
                 tool_args["args"] = json!({});
             }
             if let Some(inner_args) = tool_args.get_mut("args") {
-                finalize_tool_args_inner(&inner, inner_args, configured_repos, user_task);
+                finalize_tool_args_inner(&inner, inner_args, user_task);
             }
         }
         return;
     }
-    finalize_tool_args_inner(tool_name, tool_args, configured_repos, user_task);
+    finalize_tool_args_inner(tool_name, tool_args, user_task);
 }
 
-fn finalize_tool_args_inner(
-    tool_name: &str,
-    tool_args: &mut Value,
-    configured_repos: &[String],
-    user_task: &str,
-) {
+fn finalize_tool_args_inner(tool_name: &str, tool_args: &mut Value, user_task: &str) {
     coerce_numeric_tool_args(tool_name, tool_args);
     normalize_pr_tool_args(tool_name, tool_args);
     fill_default_diff_max_bytes(tool_name, tool_args);
     autofill_repo_from_task(user_task, tool_name, tool_args);
-    autofill_default_repo(configured_repos, tool_name, tool_args);
     autofill_pr_from_task(user_task, tool_name, tool_args);
     normalize_pr_tool_args(tool_name, tool_args);
 }
@@ -2623,19 +2596,14 @@ pub(crate) struct ToolRoundState<'a> {
     pub(crate) tool_calls: &'a mut Vec<ToolCallSummary>,
     pub(crate) tool_exec_records: &'a mut HashMap<String, ToolExecRecord>,
     pub(crate) tool_catalog: &'a crate::agent::tool_catalog::ToolCatalog,
-    pub(crate) configured_repos: &'a [String],
     pub(crate) user_task: &'a str,
     pub(crate) discovery: Arc<Mutex<ChatDiscoveryState>>,
 }
 
-fn prepare_tool_call(
-    call: &ResolvedToolCall,
-    configured_repos: &[String],
-    user_task: &str,
-) -> PreparedToolCall {
+fn prepare_tool_call(call: &ResolvedToolCall, user_task: &str) -> PreparedToolCall {
     let mut args = call.args.clone();
     normalize_model_tool_args(&call.name, &mut args);
-    finalize_tool_args(&call.name, &mut args, configured_repos, user_task);
+    finalize_tool_args(&call.name, &mut args, user_task);
     let fingerprint = tool_call_fingerprint(&call.name, &args);
     PreparedToolCall {
         id: call.id.clone(),
@@ -2904,7 +2872,6 @@ mod tests {
             "pr_get_overview",
             &args,
             "failed to get pull request",
-            &["acme/widget".into()],
         );
         assert!(msg.contains("pr_number"));
         assert!(msg.contains("[Harness]"));
@@ -2967,8 +2934,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tool_call_autofills_repo_and_pr() {
-        let repos = vec!["acme/widget".to_string()];
+    fn finalize_tool_call_autofills_repo_and_pr_from_message() {
         let mut args = json!({
             "name": "pr_get_overview",
             "args": {}
@@ -2976,8 +2942,7 @@ mod tests {
         finalize_tool_args(
             "tool_call",
             &mut args,
-            &repos,
-            "Why is CI failing on PR #19264?",
+            "Why is CI failing on https://github.com/acme/widget/pull/19264 ?",
         );
         assert_eq!(args["args"]["repo"], json!("acme/widget"));
         assert_eq!(args["args"]["pr_number"], json!(19264));

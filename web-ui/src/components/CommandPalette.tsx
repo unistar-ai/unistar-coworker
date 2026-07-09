@@ -5,8 +5,6 @@ import { useStore } from "../store/wsStore";
 import { apiPost } from "../lib/api";
 import {
   MessageSquare,
-  LayoutDashboard,
-  GitPullRequest,
   Hand,
   ScrollText,
   Settings,
@@ -51,16 +49,12 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
     // Tab switching
     const tabIcons: Record<string, LucideIcon> = {
       chat: MessageSquare,
-      dashboard: LayoutDashboard,
-      prs: GitPullRequest,
       approvals: Hand,
       logs: ScrollText,
       config: Settings,
     };
     const tabLabels: Record<string, string> = {
       chat: "Chat",
-      dashboard: "Dashboard",
-      prs: "PRs",
       approvals: "Approvals",
       logs: "Logs",
       config: "Config",
@@ -83,9 +77,9 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
     cmds.push({
       id: "refresh-store",
       label: "Refresh store",
-      hint: "Reload digests, PRs, approvals from disk",
+      hint: "Reload approvals from disk",
       icon: RefreshCw,
-      keywords: "refresh store hydrate reload dashboard prs",
+      keywords: "refresh store hydrate reload approvals",
       action: () => {
         void apiPost("/api/store/refresh");
         close();

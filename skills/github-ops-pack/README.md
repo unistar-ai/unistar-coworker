@@ -1,18 +1,15 @@
 # GitHub ops pack (optional integration)
 
-GitHub and CI behavior is **not** the product identity — it is an optional **domain pack** loaded via skills, `repos:` + `github:` config, and chat tools.
+GitHub and CI behavior is **not** the product identity — it is an optional **domain pack** loaded via skills, `github:` config, and chat tools.
 
 - **Harness:** in-process `GithubHarness` (`gh` CLI) — no external GitHub MCP required.
-- **Chat:** load skills on demand; use `harness_triage_pr` or `triage-pr` CLI for single-PR triage.
-- **Store:** digests and PR snapshots from past runs may still display in TUI/Web; nothing generates new batch digests automatically.
+- **Chat:** load skills on demand (`ci-triage`, `my-prs`, …) and call harness tools with explicit `repo` (or PR links in the message).
 
 Enable in `coworker.yaml`:
 
 ```yaml
 github:
   gh_command: gh
-repos:
-  - owner/repo
 ```
 
 Workspace-only setups can omit all of the above.
@@ -35,7 +32,6 @@ Workspace-only setups can omit all of the above.
 | [`release-backport`](../release-backport/SKILL.md) | Tags, release notes, backports |
 | [`security-alerts`](../security-alerts/SKILL.md) | Dependabot alerts |
 | [`issue-tracker`](../issue-tracker/SKILL.md) | Issues search |
-| [`oncall-store`](../oncall-store/SKILL.md) | On-call handoff from store |
 | [`git-workflow`](../git-workflow/SKILL.md) | Local git in workspace |
 | [`gh-cli`](../gh-cli/SKILL.md) | When to use `gh` via bash vs harness |
 | [`repo-explore`](../repo-explore/SKILL.md) | Repo metadata |

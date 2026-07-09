@@ -13,7 +13,6 @@ tools:
   - ci_get_run_summary
   - ci_failure_fingerprint
   - policy_classify_failure
-  - harness_triage_pr
 ---
 
 # CI Triage

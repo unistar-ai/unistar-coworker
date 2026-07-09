@@ -24,9 +24,6 @@ llm:
 # github:
 #   gh_command: gh
 #   env: {}
-#
-# repos:
-#   - owner/repo
 
 chat:
   workspace: .

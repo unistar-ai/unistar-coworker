@@ -75,12 +75,12 @@
 | **Safety** | External mutating tools (GitHub harness, MCP) require TUI/Web approval unless `chat.auto_approve_mutations` or per-server `approval.mutating: auto` |
 | **MCP federation** | `mcp.servers[]` with stdio + HTTP, lazy discovery, mutating approval, per-server skills, cancel in flight |
 | **GithubHarness** | Optional in-process GitHub/CI via `gh`; capped payloads; no MCP subprocess for GitHub |
-| **TUI** | Dashboard, PR list, approvals, logs, config, flaky report, release queue, issues, full-screen chat |
+| **TUI** | Chat, approvals, logs, config, full-screen chat |
 | **Web UI** | Browser chat (`serve`), sessions, light/dark theme, streaming tool/reasoning cards, LLM profile switcher, branch regenerate, approval modal, Markdown/JSONL export |
 | **Scripting** | `doctor`, `init`, `rpc` (JSONL stdin/stdout), `export session`, shell completions, stable exit codes (`0/2/3/4`) |
 | **Ops** | `SIGHUP` / `POST /api/reload` hot-reload config, skills, prompts, MCP; `GET /api/doctor` health JSON |
 | **Sessions** | Pi-style message tree — regenerate / branch from any assistant reply; export active branch as JSONL or HTML |
-| **Store** | JSON (default) or SQLite for digests, snapshots, flaky ledger, chat sessions, audit log; `store migrate` and `store compact` commands |
+| **Store** | JSON (default) or SQLite for approvals, chat sessions, audit log; `store migrate` and `store compact` commands |
 
 ---
 
@@ -121,7 +121,7 @@ cargo build --release --features embed-web-ui
 # Optional GitHub:
 export GH_TOKEN=ghp_...   # or: gh auth login
 ./target/release/unistar-coworker chat --once "Summarize open PRs in acme/widget" --json
-./target/release/unistar-coworker triage-pr --repo acme/widget --pr 42
+./target/release/unistar-coworker chat --once "triage open PRs in acme/widget"
 ```
 
 ---
@@ -171,14 +171,9 @@ cargo run --release
 | Key | Tab |
 |-----|-----|
 | `0` / `?` | Chat |
-| `1` | Dashboard |
-| `2` | PR list |
-| `3` | Approvals (`y` / `n`) |
-| `4` | Logs |
-| `5` | Config (github + `mcp[id]` status) |
-| `6` | Flaky |
-| `7` | Release |
-| `8` | Issues |
+| `1` | Approvals (`y` / `n`) |
+| `2` | Logs |
+| `3` | Config (GitHub + `mcp[id]` status, `R` re-probe) |
 
 `Tab` / `Shift+Tab` cycle tabs · `r` refresh store · `q` quit · `Esc` cancel the current chat turn.
 
@@ -294,14 +289,12 @@ Mutating GitHub and MCP tools enqueue **Approvals** unless `chat.auto_approve_mu
 | `chat [--once MSG] [--session UUID] [--list-sessions] [--title NAME] [--json] [--yes] [--timeout SECS]` | Interactive or one-shot chat |
 | `rpc [--session UUID] [--yes] [--timeout SECS]` | JSONL machine protocol on stdin/stdout — see [docs/RPC.md](./docs/RPC.md) |
 | `doctor [--json]` | Health check: config, `gh`, LLM, MCP servers, store |
-| `init [--force] [--path FILE] [--repos A,B] [--llm-url URL]` | Create starter `coworker.yaml` |
+| `init [--force] [--path FILE] [--llm-url URL]` | Create starter `coworker.yaml` |
 | `export session <UUID> [--format jsonl\|html] [--output FILE]` | Export active chat branch (JSONL or HTML) |
 | `completions {bash,zsh,fish,powershell}` | Shell completion scripts |
-| `triage-pr --repo O/R --pr N [--json] [--timeout SECS]` | Debug triage for a single PR |
-| `report oncall [--json]` | On-call handoff pack from local store (no MCP) |
-| `report ci [--since-days 7] [--json]` | CI efficiency report (requires MCP) |
+| `report ci --repo owner/name [--repo other/name] [--since-days 7] [--json]` | CI efficiency report (requires GitHub harness) |
 | `store migrate --from json --to sqlite --source DIR --dest FILE` | Migrate store backend |
-| `store compact [--audit-days 90] [--digest-keep 30] [--dry-run]` | Prune old audit entries and digests |
+| `store compact [--audit-days 90] [--dry-run]` | Prune old audit entries and legacy store artifacts |
 | `skills list [--json]` | Print skill catalog |
 
 `--json` is available on script-oriented commands for machine-readable stdout; human progress stays on stderr. `store compact --dry-run` reports what *would* be pruned without deleting.
@@ -338,9 +331,6 @@ Implemented in [`crates/core/src/github/harness.rs`](./crates/core/src/github/ha
 `coworker.yaml` loads from the current directory or `~/.config/unistar-coworker/coworker.yaml` (both gitignored). Start from [coworker.example.yaml](./coworker.example.yaml).
 
 ```yaml
-repos:
-  - acme/widget
-
 # Named LLM presets — switch at runtime (Web Config / RPC / sidecar coworker.llm-profile)
 llm_profile: default
 llm:
@@ -420,8 +410,8 @@ cargo run --release -- store migrate --from json --to sqlite \
 Prune old data to keep the store compact:
 
 ```bash
-cargo run --release -- store compact            # defaults: audit 90d, keep 30 digests
-cargo run --release -- store compact --audit-days 180 --digest-keep 60
+cargo run --release -- store compact            # defaults: audit 90d + purge legacy artifacts
+cargo run --release -- store compact --audit-days 180 --dry-run
 cargo run --release -- store compact --dry-run  # preview what would be pruned, delete nothing
 ```
 
@@ -433,7 +423,7 @@ The core product is a **local-first general agent** (workspace + LLM). These are
 
 | Integration | Config | Docs |
 |-------------|--------|------|
-| **GitHub / CI harness** | `github:`, `repos:`, GitHub ops skills | [skills/github-ops-pack/README.md](skills/github-ops-pack/README.md) |
+| **GitHub / CI harness** | `github:`, GitHub ops skills | [skills/github-ops-pack/README.md](skills/github-ops-pack/README.md) |
 | **Third-party MCP** | `mcp.servers[]` (Slack, HTTP, filesystem, …) | [docs/mcp-recipes.md](docs/mcp-recipes.md) |
 
 Authoring skills: [skills/_base/SKILL_TEMPLATE.md](skills/_base/SKILL_TEMPLATE.md). Local models: [docs/local-models.md](docs/local-models.md). Context budget: [docs/context-budget.md](docs/context-budget.md).

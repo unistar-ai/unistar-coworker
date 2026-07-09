@@ -17,7 +17,7 @@ Full docs: [README.md](README.md) · Docker details: [docs/docker.md](docs/docke
 3. Make the binary executable: `chmod +x unistar-coworker`
 4. Start Ollama and pull a **25B+** model, e.g. `ollama pull gemma4:26b-a4b` or `ollama pull qwen3.6:27b` (see [coworker.example.yaml](./coworker.example.yaml)).
 5. Create config: `./unistar-coworker init --interactive`  
-   (Non-interactive: `./unistar-coworker init --llm-url http://127.0.0.1:11434/v1` — skip `--repos` for workspace-only.)
+   (Non-interactive: `./unistar-coworker init --llm-url http://127.0.0.1:11434/v1`.)
 6. Check health: `./unistar-coworker doctor`
 7. Start Web UI: `./unistar-coworker serve`
 8. Open [http://127.0.0.1:8787](http://127.0.0.1:8787) and chat in the workspace (`chat.workspace` in config).
@@ -25,9 +25,9 @@ Full docs: [README.md](README.md) · Docker details: [docs/docker.md](docs/docke
 ### Optional — GitHub
 
 9. Set GitHub auth: `export GH_TOKEN=...` or run `gh auth login` on the host.
-10. Add `repos:` to `coworker.yaml` (or re-run `init --interactive` with repos).
+10. For GitHub/CI: `gh auth login`, then chat with PR links or explicit `owner/repo` in messages.
 11. Try GitHub in chat: `./unistar-coworker chat --once "Summarize open PRs in owner/repo"`  
-    Or debug one PR: `./unistar-coworker triage-pr --repo owner/repo --pr 42`
+    Or use chat: `./unistar-coworker chat --once "triage PR #42 in owner/repo"`
 12. Read `coworker.example.yaml` or [coworker.minimal.yaml](./coworker.minimal.yaml) for advanced settings.
 
 ---

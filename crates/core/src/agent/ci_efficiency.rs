@@ -6,22 +6,28 @@ use crate::config::Config;
 use crate::error::{CoworkerError, Result};
 use crate::github::GithubHarness;
 
-/// Build CI efficiency markdown without publishing a digest (for `report ci`).
+/// Build CI efficiency markdown (for `report ci`).
 pub async fn build_ci_efficiency_markdown(
     config: &Config,
     github: &GithubHarness,
+    repos: &[String],
 ) -> Result<String> {
     if !github.is_available() {
         return Err(CoworkerError::Workflow(
             "GitHub harness (gh) is required for CI report".into(),
         ));
     }
+    if repos.is_empty() {
+        return Err(CoworkerError::Workflow(
+            "pass at least one --repo owner/name (repeat for multiple repos)".into(),
+        ));
+    }
 
     let limit = config.main_guard.recent_runs.clamp(10, 50);
     let mut out = String::from("# CI efficiency report\n\n");
 
-    for repo in config.repos.clone() {
-        let sample = fetch_branch_runs(github, &repo, limit).await?;
+    for repo in repos {
+        let sample = fetch_branch_runs(github, repo, limit).await?;
         out.push_str(&format!("## {repo} ({})\n\n", sample.branch));
 
         let by_workflow = aggregate_workflow_stats(&sample.runs);

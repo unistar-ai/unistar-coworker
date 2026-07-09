@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-07-09
+
+### Removed (BREAKING)
+
+- Config key `repos:` — GitHub scope is per tool call / chat message (PR links, explicit `repo` args), not a global list.
+- `init --repos` and interactive init repo prompt.
+- Web/TUI snapshot field `repos`; Config tab "Repos" section; footer `repos:` display.
+- Auto-fill of harness `repo` from a single configured repo.
+
+### Changed
+
+- `report ci` requires `--repo owner/name` (repeat for multiple repos).
+- `doctor` GitHub check is always optional (`warn` when `gh` is missing or unauthenticated).
+- Legacy `repos:` keys in existing YAML are ignored on load.
+
+[4.2.0]: https://github.com/unistar-ai/unistar-coworker/compare/v4.1.0...v4.2.0
+
+## [4.1.0] - 2026-07-09
+
+### Removed (BREAKING)
+
+- Store APIs: `save_digest`, `latest_digest`, `list_digests`, `upsert_pr_snapshot`, `list_pr_snapshots`, `save_transcript`, `list_transcripts`.
+- Store model types: `Digest`, `DigestSummary`, `DigestMeta`, `PrSnapshot`, `Transcript`.
+- CLI: `triage-pr`, `report oncall`.
+- Chat harness tools: `store_get_latest_digest`, `store_get_oncall_handoff`, `harness_triage_pr`.
+- Agent modules: `triage`, `oncall`, `workflow_harness`, `playbook`; `output::export`.
+- Skill pack: `oncall-store`.
+- Config: `output.export_digest_md`, `output.digest_export_path`.
+- `store compact --digest-keep` (replaced by purging legacy digest/PR/transcript artifacts).
+
+### Changed
+
+- `store compact` now removes legacy digest / PR snapshot / triage transcript files (JSON dirs or SQLite rows) in addition to audit pruning.
+- `store_list_pending_approvals` is the only local Store harness tool.
+- PR/CI work is chat + GitHub harness tools only (`ci-triage` skill, `pr_*`, `ci_*`).
+
+[4.1.0]: https://github.com/unistar-ai/unistar-coworker/compare/v4.0.0...v4.1.0
+
+## [4.0.0] - 2026-07-09
+
+### Removed (BREAKING)
+
+- **Dashboard** and **PRs** tabs from TUI and Web UI. GitHub discovery and triage are chat-first (skills + harness tools).
+- Web API routes: `/api/prs/*`, `/api/digest/*`.
+- WS snapshot fields: `digest_history`, `digest_bodies`, `prs`, `pr_filter`, `pr_sort`, `pr_overview`, etc.
+- TUI `digest_nav` module; `fetch_pr_overview` engine helper; `DigestReady` / `PrOverviewReady` events.
+- `AppState` digest/PR UI fields; `hydrate_from_store` no longer loads digests/PR snapshots for tabs.
+
+### Changed
+
+- Tab order: Chat `0`, Approvals `1`, Logs `2`, Config `3` (when chat enabled).
+- `hydrate_from_store` loads pending approvals only.
+- TUI `r` still refreshes store; triage uses live `pr_list_open` instead of in-memory PR list.
+
+[4.0.0]: https://github.com/unistar-ai/unistar-coworker/compare/v3.1.1...v4.0.0
+
 ## [3.1.1] - 2026-07-09
 
 ### Fixed

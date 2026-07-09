@@ -1,4 +1,3 @@
-use chrono::NaiveDate;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -49,20 +48,10 @@ pub struct WebSnapshot {
     pub chat_context: Option<Value>,
     pub chat_pending_approval: Option<Value>,
     pub approval_dialog: Option<Value>,
-    pub digest_history: Vec<Value>,
-    pub digest_bodies: std::collections::HashMap<String, String>,
-    pub selected_digest_date: Option<String>,
-    pub prs: Vec<Value>,
-    pub pr_filter: String,
-    pub pr_sort: String,
-    pub selected_pr_index: usize,
-    pub pr_overview: Option<String>,
-    pub pr_overview_loading: bool,
     pub approvals: Vec<Value>,
     pub log_filter: String,
     pub logs: Vec<Value>,
     pub config_path: String,
-    pub repos: Vec<String>,
     pub llm_model: String,
     /// Active named preset from `llm_profiles`, if any.
     pub llm_profile: Option<String>,
@@ -131,16 +120,10 @@ pub struct WebChatPatch {
 fn tab_name(tab: Tab) -> &'static str {
     match tab {
         Tab::Chat => "chat",
-        Tab::Dashboard => "dashboard",
-        Tab::Prs => "prs",
         Tab::Approvals => "approvals",
         Tab::Logs => "logs",
         Tab::Config => "config",
     }
-}
-
-fn date_key(d: NaiveDate) -> String {
-    d.format("%Y-%m-%d").to_string()
 }
 
 pub async fn build_snapshot(state: &coworker_core::app::SharedState) -> WebSnapshot {
@@ -153,54 +136,6 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
         .into_iter()
         .map(|t| tab_name(t).to_string())
         .collect();
-
-    let digest_history: Vec<Value> = s
-        .digest_history
-        .iter()
-        .map(|m| {
-            json!({
-                "date": m.date.format("%Y-%m-%d").to_string(),
-                "complete": m.summary.complete,
-                "needs_attention": m.summary.needs_attention,
-                "ignorable": m.summary.ignorable,
-                "flaky_candidates": m.summary.flaky_candidates,
-                "policy_gates": m.summary.policy_gates,
-                "duration_label": m.summary.duration_label(),
-            })
-        })
-        .collect();
-
-    let digest_bodies: std::collections::HashMap<String, String> = s
-        .digest_bodies
-        .iter()
-        .map(|(d, body)| (date_key(*d), body.clone()))
-        .collect();
-
-    let selected_digest_date = s
-        .digest_history
-        .get(s.selected_index)
-        .map(|m| date_key(m.date));
-
-    let prs: Vec<Value> = s
-        .sorted_filtered_prs()
-        .into_iter()
-        .map(|p| {
-            json!({
-                "repo": p.repo,
-                "number": p.number,
-                "title": p.title,
-                "author": p.author,
-                "fetched_at": p.fetched_at.to_rfc3339(),
-                "ci_summary": p.ci_summary,
-                "review_summary": p.review_summary,
-                "triage_note": p.triage_note,
-                "is_draft": p.is_draft,
-            })
-        })
-        .collect();
-
-    let pr_overview = s.selected_pr_overview().map(str::to_string);
-    let pr_overview_loading = s.selected_pr_overview_loading();
 
     let approvals: Vec<Value> = s
         .approvals
@@ -281,20 +216,10 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
         chat_context,
         chat_pending_approval,
         approval_dialog,
-        digest_history,
-        digest_bodies,
-        selected_digest_date,
-        prs,
-        pr_filter: s.pr_filter.label().to_string(),
-        pr_sort: s.pr_sort.label().to_string(),
-        selected_pr_index: s.selected_index,
-        pr_overview,
-        pr_overview_loading,
         approvals,
         log_filter: s.log_filter.label().to_string(),
         logs,
         config_path: s.config_path.clone(),
-        repos: s.config.repos.clone(),
         llm_model: s.config.llm.model.clone(),
         llm_profile: s.config.llm_profile.clone(),
         llm_profile_options: build_llm_profile_options(s),
@@ -573,7 +498,6 @@ chat:
   enabled: true
   auto_approve_mutations: {auto_approve}
 storage: {{ backend: json, path: ./data }}
-repos: [acme/widget]
 "#
         );
         Config::load_from_str(&yaml).unwrap()
@@ -823,8 +747,6 @@ repos: [acme/widget]
             "chat_context_visible",
             "chat_context",
             "approval_dialog",
-            "digest_history",
-            "prs",
             "approvals",
             "logs",
             "mcp_servers",

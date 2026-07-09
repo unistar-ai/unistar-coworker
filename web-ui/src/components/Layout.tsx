@@ -7,8 +7,6 @@ import {
   Moon,
   Sparkles,
   MessageSquare,
-  LayoutDashboard,
-  GitPullRequest,
   Hand,
   ScrollText,
   Settings,
@@ -24,8 +22,6 @@ const ApprovalsTab = lazy(() => import("../tabs/approvals/ApprovalsTab"));
 const ApprovalModal = lazy(() => import("../tabs/approvals/ApprovalModal"));
 const CommandPalette = lazy(() => import("./CommandPalette"));
 const ChatTab = lazy(() => import("../tabs/chat/ChatTab"));
-const DashboardTab = lazy(() => import("../tabs/dashboard/DashboardTab"));
-const PrsTab = lazy(() => import("../tabs/prs/PrsTab"));
 const LogsTab = lazy(() => import("../tabs/logs/LogsTab"));
 const ConfigTab = lazy(() => import("../tabs/config/ConfigTab"));
 
@@ -33,12 +29,10 @@ interface LayoutProps {
   tabLabels: Record<string, string>;
 }
 
-const TAB_ORDER = ["chat", "dashboard", "prs", "approvals", "logs", "config"] as const;
+const TAB_ORDER = ["chat", "approvals", "logs", "config"] as const;
 
 const TAB_ICONS: Record<string, LucideIcon> = {
   chat: MessageSquare,
-  dashboard: LayoutDashboard,
-  prs: GitPullRequest,
   approvals: Hand,
   logs: ScrollText,
   config: Settings,
@@ -63,18 +57,14 @@ export default function Layout({ tabLabels }: LayoutProps) {
   };
 
   // Global keyboard shortcuts:
-  //  Ctrl/Cmd+1..6 — switch to the Nth tab (in TAB_ORDER).
+  //  Ctrl/Cmd+1..4 — switch to the Nth tab (in TAB_ORDER).
   //  Ctrl/Cmd+K    — open command palette.
-  // Skipped when the user is typing in an input/textarea/contentEditable so we
-  // don't swallow printable combos, except for the explicit Cmd/Ctrl modifiers
-  // which are safe.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
 
-      // Cmd/Ctrl + 1..6 → tab switch
-      if (e.key >= "1" && e.key <= "6") {
+      if (e.key >= "1" && e.key <= "4") {
         const idx = Number(e.key) - 1;
         const candidate = TAB_ORDER[idx];
         if (candidate && tabs.includes(candidate)) {
@@ -84,7 +74,6 @@ export default function Layout({ tabLabels }: LayoutProps) {
         return;
       }
 
-      // Cmd/Ctrl + K → open command palette
       if (e.key.toLowerCase() === "k") {
         e.preventDefault();
         setCmdOpen(true);
@@ -160,7 +149,6 @@ export default function Layout({ tabLabels }: LayoutProps) {
         </div>
       )}
       <main id="main" className="flex-1 overflow-hidden" tabIndex={0}>
-        {/* key={tab} remounts on tab switch to trigger the fade-in animation. */}
         <div key={tab} className="tab-content-enter h-full">
           <TabContent tab={tab} />
         </div>
@@ -191,7 +179,6 @@ function CtxUsage() {
   const pct = Math.min(100, Math.round((used / budget) * 100));
   const barCls = pct >= 95 ? "err" : pct >= 80 ? "warn" : "";
 
-  // Legacy: topbar mini meter when the context panel is open.
   if (!contextVisible) return null;
 
   return (
@@ -241,10 +228,6 @@ function TabPanel({ tab }: { tab: string }) {
   switch (tab) {
     case "chat":
       return <ChatTab />;
-    case "dashboard":
-      return <DashboardTab />;
-    case "prs":
-      return <PrsTab />;
     case "approvals":
       return <ApprovalsTab />;
     case "logs":

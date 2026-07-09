@@ -23,8 +23,6 @@ pub struct Config {
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
-    pub repos: Vec<String>,
-    #[serde(default)]
     pub policy: PolicyConfig,
     #[serde(default)]
     pub flaky: FlakyConfig,
@@ -449,17 +447,9 @@ fn default_fingerprint_fallback() -> String {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct OutputConfig {
-    #[serde(default)]
-    pub export_digest_md: bool,
-    #[serde(default = "default_digest_path")]
-    pub digest_export_path: String,
-    /// Optional Slack incoming webhook URL for digest summaries.
+    /// Optional Slack incoming webhook URL for agent-driven notifications.
     #[serde(default)]
     pub slack_webhook: Option<String>,
-}
-
-fn default_digest_path() -> String {
-    "./digests/{date}.md".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1284,7 +1274,7 @@ repos: [acme/widget]
     }
 
     #[test]
-    fn workspace_only_yaml_without_repos_parses() {
+    fn workspace_only_yaml_parses() {
         let yaml = r#"
 llm:
   default:
@@ -1295,11 +1285,11 @@ chat:
   workspace: .
 "#;
         let cfg = Config::load_from_str(yaml).unwrap();
-        assert!(cfg.repos.is_empty());
+        assert_eq!(cfg.llm.model, "gemma4:26b-a4b-it-qat");
     }
 
     #[test]
-    fn minimal_yaml_parses() {
+    fn legacy_repos_key_ignored() {
         let yaml = r#"
 llm:
   base_url: http://localhost:11434/v1
@@ -1309,8 +1299,19 @@ repos:
   - acme/widget
 "#;
         let cfg = Config::load_from_str(yaml).unwrap();
+        assert_eq!(cfg.llm.model, "m");
+    }
+
+    #[test]
+    fn minimal_yaml_parses() {
+        let yaml = r#"
+llm:
+  base_url: http://localhost:11434/v1
+  model: m
+  context_limit: 64000
+"#;
+        let cfg = Config::load_from_str(yaml).unwrap();
         assert_eq!(cfg.github.gh_command, "gh");
-        assert_eq!(cfg.repos, vec!["acme/widget".to_string()]);
         assert_eq!(cfg.storage.backend, StorageBackend::Json);
         assert_eq!(cfg.storage.path, "./data");
     }

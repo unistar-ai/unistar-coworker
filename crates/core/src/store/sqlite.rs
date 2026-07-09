@@ -11,7 +11,7 @@ use crate::agent::context::harness_nudge_base;
 use crate::error::{CoworkerError, Result};
 use crate::store::{
     Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole,
-    ChatRuntimeState, ChatSession, Digest, PrSnapshot, Store, Transcript,
+    ChatRuntimeState, ChatSession, Store,
 };
 
 pub struct SqliteStore {
@@ -43,20 +43,6 @@ impl SqliteStore {
 fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
-        CREATE TABLE IF NOT EXISTS digests (
-            id TEXT PRIMARY KEY,
-            date TEXT NOT NULL,
-            summary_json TEXT NOT NULL,
-            body_md TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS pr_snapshots (
-            repo TEXT NOT NULL,
-            pr_number INTEGER NOT NULL,
-            snapshot_json TEXT NOT NULL,
-            fetched_at TEXT NOT NULL,
-            PRIMARY KEY (repo, pr_number)
-        );
         CREATE TABLE IF NOT EXISTS approvals (
             id TEXT PRIMARY KEY,
             payload_json TEXT NOT NULL,
@@ -84,103 +70,13 @@ fn migrate(conn: &Connection) -> Result<()> {
             payload_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, ts);
-        CREATE TABLE IF NOT EXISTS transcripts (
-            id TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
         ",
     )?;
-    let _ = conn.execute("ALTER TABLE digests ADD COLUMN skill TEXT", []);
     Ok(())
 }
 
 #[async_trait]
 impl Store for SqliteStore {
-    async fn save_digest(&self, digest: &Digest) -> Result<()> {
-        let digest = digest.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO digests (id, date, summary_json, body_md, created_at, skill) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![
-                    digest.id.to_string(),
-                    digest.date.to_string(),
-                    serde_json::to_string(&digest.summary)?,
-                    digest.body_md,
-                    digest.created_at.to_rfc3339(),
-                    digest.skill,
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
-    async fn latest_digest(&self) -> Result<Option<Digest>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, date, summary_json, body_md, created_at, skill FROM digests ORDER BY date DESC LIMIT 1",
-            )?;
-            let mut rows = stmt.query([])?;
-            if let Some(row) = rows.next()? {
-                Ok(Some(row_to_digest(row)?))
-            } else {
-                Ok(None)
-            }
-        })
-    }
-
-    async fn list_digests(&self, limit: usize) -> Result<Vec<Digest>> {
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, date, summary_json, body_md, created_at, skill FROM digests ORDER BY date DESC LIMIT ?1",
-            )?;
-            let rows = stmt.query_map([limit as i64], row_to_digest)?;
-            let mut digests = Vec::new();
-            for row in rows {
-                digests.push(row?);
-            }
-            Ok(digests)
-        })
-    }
-
-    async fn upsert_pr_snapshot(&self, snap: &PrSnapshot) -> Result<()> {
-        let snap = snap.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO pr_snapshots (repo, pr_number, snapshot_json, fetched_at) VALUES (?1,?2,?3,?4)",
-                params![
-                    snap.repo,
-                    snap.number,
-                    serde_json::to_string(&snap)?,
-                    snap.fetched_at.to_rfc3339(),
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
-    async fn list_pr_snapshots(&self, repo: Option<&str>) -> Result<Vec<PrSnapshot>> {
-        let repo = repo.map(str::to_string);
-        self.with_conn(move |conn| {
-            let mut out = Vec::new();
-            if let Some(r) = repo {
-                let mut stmt =
-                    conn.prepare("SELECT snapshot_json FROM pr_snapshots WHERE repo = ?1")?;
-                let rows = stmt.query_map([&r], |row| row.get::<_, String>(0))?;
-                for row in rows {
-                    out.push(serde_json::from_str(&row?)?);
-                }
-            } else {
-                let mut stmt = conn.prepare("SELECT snapshot_json FROM pr_snapshots")?;
-                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-                for row in rows {
-                    out.push(serde_json::from_str(&row?)?);
-                }
-            }
-            Ok(out)
-        })
-    }
-
     async fn push_approval(&self, item: &Approval) -> Result<()> {
         let item = item.clone();
         self.with_conn(move |conn| {
@@ -455,35 +351,6 @@ impl Store for SqliteStore {
         })
     }
 
-    async fn save_transcript(&self, t: &Transcript) -> Result<()> {
-        let t = t.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO transcripts (id, payload_json, created_at) VALUES (?1,?2,?3)",
-                params![
-                    t.id.to_string(),
-                    serde_json::to_string(&t)?,
-                    t.created_at.to_rfc3339(),
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
-    async fn list_transcripts(&self, limit: usize) -> Result<Vec<Transcript>> {
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT payload_json FROM transcripts ORDER BY created_at DESC LIMIT ?1",
-            )?;
-            let rows = stmt.query_map([limit as i64], |row| row.get::<_, String>(0))?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(serde_json::from_str(&row?)?);
-            }
-            Ok(out)
-        })
-    }
-
     async fn list_chat_sessions(&self, limit: usize) -> Result<Vec<ChatSession>> {
         self.with_conn(move |conn| {
             let mut stmt = conn
@@ -496,27 +363,4 @@ impl Store for SqliteStore {
             Ok(out)
         })
     }
-}
-
-fn row_to_digest(row: &rusqlite::Row<'_>) -> rusqlite::Result<Digest> {
-    use chrono::NaiveDate;
-    let id: String = row.get(0)?;
-    let date: String = row.get(1)?;
-    let summary_json: String = row.get(2)?;
-    let body_md: String = row.get(3)?;
-    let created_at: String = row.get(4)?;
-    let skill: Option<String> = row.get(5).ok();
-    Ok(Digest {
-        id: Uuid::parse_str(&id)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-        date: NaiveDate::parse_from_str(&date, "%Y-%m-%d")
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-        summary: serde_json::from_str(&summary_json)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-        body_md,
-        created_at: created_at
-            .parse()
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-        skill,
-    })
 }

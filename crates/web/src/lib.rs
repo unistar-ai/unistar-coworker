@@ -99,13 +99,7 @@ pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>)
         .route("/api/approvals/{id}", post(api_approval))
         .route("/api/approvals/history", get(api_approval_history))
         .route("/api/store/refresh", post(api_refresh_store))
-        .route("/api/prs/filter", post(api_prs_filter))
-        .route("/api/prs/sort", post(api_prs_sort))
-        .route("/api/prs/{index}/select", post(api_prs_select))
-        .route("/api/prs/{index}/triage", post(api_prs_triage))
-        .route("/api/prs/{index}/overview", post(api_pr_overview))
         .route("/api/logs/filter", post(api_logs_filter))
-        .route("/api/digest/{index}/select", post(api_digest_select))
         .route("/api/config/probe", post(api_config_probe))
         .route("/api/config/llm-profile", post(api_config_llm_profile))
         .route("/api/reload", post(api_reload))
@@ -324,8 +318,6 @@ async fn api_set_tab(State(rt): State<Arc<WebRuntime>>, Path(tab): Path<String>)
         let mut s = rt.state.write().await;
         s.tab = match tab.as_str() {
             "chat" if s.config.chat.enabled => Tab::Chat,
-            "dashboard" => Tab::Dashboard,
-            "prs" => Tab::Prs,
             "approvals" => Tab::Approvals,
             "logs" => Tab::Logs,
             "config" => Tab::Config,
@@ -716,94 +708,11 @@ async fn api_refresh_store(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
     }
 }
 
-async fn api_pr_overview(
-    State(rt): State<Arc<WebRuntime>>,
-    Path(index): Path<usize>,
-) -> StatusCode {
-    let (repo, number) = {
-        let s = rt.state.read().await;
-        let filtered = s.sorted_filtered_prs();
-        let Some(p) = filtered.get(index) else {
-            return StatusCode::NOT_FOUND;
-        };
-        (p.repo.clone(), p.number)
-    };
-    let engine = Arc::clone(&rt.engine);
-    let state = rt.state.clone();
-    let snap_tx = rt.snap_tx.clone();
-    tokio::spawn(async move {
-        engine.fetch_pr_overview(repo, number).await;
-        publish_snapshot(&state, &snap_tx).await;
-    });
-    StatusCode::ACCEPTED
-}
-
-async fn api_prs_filter(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
-    {
-        let mut s = rt.state.write().await;
-        s.pr_filter = s.pr_filter.next();
-        s.status = format!("PR filter: {}", s.pr_filter.label());
-    }
-    publish_snapshot(&rt.state, &rt.snap_tx).await;
-    StatusCode::NO_CONTENT
-}
-
-async fn api_prs_sort(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
-    {
-        let mut s = rt.state.write().await;
-        s.pr_sort = s.pr_sort.next();
-        s.status = format!("PR sort: {}", s.pr_sort.label());
-    }
-    publish_snapshot(&rt.state, &rt.snap_tx).await;
-    StatusCode::NO_CONTENT
-}
-
-async fn api_prs_select(State(rt): State<Arc<WebRuntime>>, Path(index): Path<usize>) -> StatusCode {
-    {
-        let mut s = rt.state.write().await;
-        if index >= s.sorted_filtered_prs().len() {
-            return StatusCode::NOT_FOUND;
-        }
-        s.selected_index = index;
-    }
-    publish_snapshot(&rt.state, &rt.snap_tx).await;
-    StatusCode::NO_CONTENT
-}
-
-async fn api_prs_triage(State(rt): State<Arc<WebRuntime>>, Path(index): Path<usize>) -> StatusCode {
-    let (repo, number) = {
-        let s = rt.state.read().await;
-        let filtered = s.sorted_filtered_prs();
-        let Some(p) = filtered.get(index) else {
-            return StatusCode::NOT_FOUND;
-        };
-        (p.repo.clone(), p.number)
-    };
-    rt.engine.spawn_triage_pr(repo, number);
-    publish_snapshot(&rt.state, &rt.snap_tx).await;
-    StatusCode::ACCEPTED
-}
-
 async fn api_logs_filter(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
     {
         let mut s = rt.state.write().await;
         s.log_filter = s.log_filter.next();
         s.status = format!("Log filter: {}", s.log_filter.label());
-    }
-    publish_snapshot(&rt.state, &rt.snap_tx).await;
-    StatusCode::NO_CONTENT
-}
-
-async fn api_digest_select(
-    State(rt): State<Arc<WebRuntime>>,
-    Path(index): Path<usize>,
-) -> StatusCode {
-    {
-        let mut s = rt.state.write().await;
-        if index >= s.digest_history.len() {
-            return StatusCode::NOT_FOUND;
-        }
-        s.selected_index = index;
     }
     publish_snapshot(&rt.state, &rt.snap_tx).await;
     StatusCode::NO_CONTENT

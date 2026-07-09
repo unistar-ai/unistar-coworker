@@ -1,16 +1,7 @@
 //! Engine → UI state updates (shared by TUI and WebUI).
 
-use super::{AppEvent, AppState, ChatPendingApproval, SharedState};
+use super::{AppEvent, ChatPendingApproval, SharedState};
 use crate::agent::chat_loop::{ChatActivityFlow, ChatProgress};
-
-pub fn parse_triage_task_label(rest: &str) -> Option<(String, u32)> {
-    let (repo, num) = rest.rsplit_once('#')?;
-    let number: u32 = num.parse().ok()?;
-    if repo.is_empty() {
-        return None;
-    }
-    Some((repo.to_string(), number))
-}
 
 pub async fn apply_event(state: &SharedState, ev: AppEvent) {
     let mut s = state.write().await;
@@ -19,18 +10,6 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
             let prev = s.last_pending_approval_count;
             s.maybe_notify_new_approvals(prev);
             s.status = "store updated".into();
-        }
-        AppEvent::DigestReady(d) => {
-            s.latest_digest = Some(d.clone());
-            s.status = if d.summary.complete {
-                "digest ready".into()
-            } else {
-                format!(
-                    "digest updating ({} PRs, {} attention)",
-                    d.summary.needs_attention + d.summary.ignorable + d.summary.flaky_candidates,
-                    d.summary.needs_attention
-                )
-            };
         }
         AppEvent::LogLine(l) => s.push_log(&l.level, l.message),
         AppEvent::BackgroundTaskStarted { label } => {
@@ -41,21 +20,11 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
         AppEvent::BackgroundTaskFinished { label, ok, message } => {
             s.engine_busy = false;
             s.engine_task_label = None;
-            let mut status = if ok {
+            s.status = if ok {
                 message.clone()
             } else {
                 format!("error: {message}")
             };
-            if let Some(rest) = label.strip_prefix("triage:") {
-                if let Some((repo, number)) = parse_triage_task_label(rest) {
-                    let key = AppState::pr_overview_key(&repo, number);
-                    s.pr_overview_cache.remove(&key);
-                    if ok {
-                        status = format!("triage {repo}#{number} done");
-                    }
-                }
-            }
-            s.status = status;
             s.push_log("info", format!("{label} finished: {message}"));
         }
         AppEvent::StatusMessage(m) => {
@@ -184,8 +153,6 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                     s.set_chat_tool_pending(None);
                     s.set_chat_reasoning_compressing(false);
                     s.set_chat_tool_running(None);
-                    // Only append while the turn is active. A lagging summary event after
-                    // `load_chat_session_ui` would duplicate the persisted reasoning row.
                     if s.chat_busy {
                         let line = p.display_line();
                         if !s.chat_lines.iter().any(|existing| existing == &line) {
@@ -222,10 +189,6 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
             s.set_chat_activity_flow(None);
             s.set_chat_reasoning_compressing(false);
             s.status = "chat ready".into();
-        }
-        AppEvent::PrOverviewReady { repo, pr_number } => {
-            s.reset_detail_scroll();
-            s.status = format!("pr overview ready ({repo}#{pr_number})");
         }
     }
 }

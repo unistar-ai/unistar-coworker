@@ -79,7 +79,6 @@ pub(crate) fn maybe_push_tool_failure_harness_nudge(
     tool_name: &str,
     tool_args: &Value,
     body: &str,
-    configured_repos: &[String],
     messages: &mut Vec<LlmTurnMessage>,
 ) -> String {
     let (effective_name, effective_args) = effective_tool_for_nudge(tool_name, tool_args);
@@ -88,7 +87,10 @@ pub(crate) fn maybe_push_tool_failure_harness_nudge(
         .filter(|field| !tool_catalog::ToolCatalog::tool_arg_field_satisfied(effective_args, field))
         .collect();
     let schema_missing = catalog.missing_required_fields(effective_name, effective_args);
-    let example_repo = configured_repos.first().map(String::as_str);
+    let example_repo = effective_args
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let nudge = if tool_name == "tool_call" && body.contains("JSON object") {
         format!(
             "Tool `tool_call` requires `args` as a JSON object, not a string. \
@@ -100,7 +102,7 @@ Example: {{\"name\":\"pr_get_overview\",\"args\":{{\"repo\":\"{}\",\"pr_number\"
     } else if let Some(field) = schema_missing.first() {
         catalog.format_tool_args_nudge(effective_name, field, None, example_repo)
     } else {
-        catalog.format_tool_failure_nudge(effective_name, effective_args, body, configured_repos)
+        catalog.format_tool_failure_nudge(effective_name, effective_args, body)
     };
     push_harness_nudge(messages, nudge)
 }
@@ -542,7 +544,6 @@ mod tests {
             "pr_get_overview",
             &args,
             "failed to get pull request: HTTP 404: Not Found",
-            &["acme/widget".into()],
             &mut msgs,
         );
         assert_eq!(msgs.len(), 1);
@@ -599,7 +600,6 @@ mod tests {
             "tool_call",
             &args,
             "args must be a JSON object",
-            &["acme/widget".into()],
             &mut msgs,
         );
         assert_eq!(msgs.len(), 1);

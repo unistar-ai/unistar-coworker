@@ -30,7 +30,7 @@ Product boundaries and architecture: [README.md](./README.md), [README_CN.md](./
 | Real `owner/repo` names from your org | `acme/widget`, `owner/repo` (match existing tests) |
 | Real PR/issue numbers tied to production | Fictional numbers (`19263`, `42`, …) |
 | User home paths, internal hostnames, VPN URLs | `/path/to/unistar-mcp`, `http://localhost:11434/v1` |
-| Contents of `coworker.yaml`, `data/`, `digests/` | [coworker.example.yaml](./coworker.example.yaml) for shape only |
+| Contents of `coworker.yaml`, `data/` | [coworker.example.yaml](./coworker.example.yaml) for shape only |
 | Chat session exports, audit logs, approval IDs from a live run | Synthetic UUIDs and placeholder text |
 
 `coworker.yaml` and `data/` are **gitignored** — never add them to the repo. If you touch example config, keep models/paths generic.
@@ -106,7 +106,7 @@ Default store backend is JSON under `./data` (gitignored). SQLite backend and `s
 
 - Example: [`coworker.example.yaml`](./coworker.example.yaml).
 - Loaded from cwd or `~/.config/unistar-coworker/coworker.yaml` (see [`crates/core/src/config.rs`](./crates/core/src/config.rs)).
-- Key knobs: `repos`, `llm.context_limit` (64K), `chat.tool_mode` (`auto` for 25B+), `chat.max_turns`, `chat.max_tool_calls`, `policy.auto_rerun_flaky`, `github:`, `mcp.servers[]`. See [docs/local-models.md](./docs/local-models.md).
+- Key knobs: `llm.context_limit` (64K), `chat.tool_mode` (`auto` for 25B+), `chat.max_turns`, `chat.max_tool_calls`, `policy.auto_rerun_flaky`, `github:`, `mcp.servers[]`. See [docs/local-models.md](./docs/local-models.md).
 
 ---
 

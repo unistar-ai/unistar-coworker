@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "unistar-coworker",
     about = "Local-first general agent for local LLMs",
-    after_help = "EXAMPLES:\n    unistar-coworker tui                                  Terminal UI (default)\n    unistar-coworker serve                            Web UI server\n    unistar-coworker chat                             interactive chat REPL\n    unistar-coworker chat --once \"summarize PR 123\" --json\n    unistar-coworker triage-pr --repo acme/widget --pr 42 --json\n    unistar-coworker report oncall\n    unistar-coworker store compact --dry-run --audit-days 30\n\nGlobal flags (--config / -v / -q) go before the subcommand."
+    after_help = "EXAMPLES:\n    unistar-coworker tui                                  Terminal UI (default)\n    unistar-coworker serve                            Web UI server\n    unistar-coworker chat                             interactive chat REPL\n    unistar-coworker chat --once \"summarize PR 123\" --json\n    unistar-coworker report ci --repo owner/name\n    unistar-coworker store compact --dry-run --audit-days 30\n\nGlobal flags (--config / -v / -q) go before the subcommand."
 )]
 pub(crate) struct Cli {
     /// Override config file path (skips discover in cwd / .coworker/)
@@ -31,22 +31,6 @@ pub(crate) enum Commands {
     Report {
         #[command(subcommand)]
         kind: ReportKind,
-    },
-    /// Debug triage for a single PR
-    #[command(
-        after_help = "EXAMPLES:\n    unistar-coworker triage-pr --repo acme/widget --pr 42\n    unistar-coworker triage-pr --repo acme/widget --pr 42 --json"
-    )]
-    TriagePr {
-        #[arg(long)]
-        repo: String,
-        #[arg(long)]
-        pr: u32,
-        /// Emit machine-readable JSON on stdout
-        #[arg(long)]
-        json: bool,
-        /// Wall-clock timeout in seconds
-        #[arg(long)]
-        timeout: Option<u64>,
     },
     /// Terminal UI
     Tui,
@@ -113,9 +97,6 @@ pub(crate) enum Commands {
         /// Target path (defaults to ./coworker.yaml)
         #[arg(long)]
         path: Option<PathBuf>,
-        /// Comma-separated repos to seed (e.g. acme/widget,acme/api)
-        #[arg(long)]
-        repos: Option<String>,
         /// LLM base_url to seed (e.g. http://localhost:11434/v1)
         #[arg(long)]
         llm_url: Option<String>,
@@ -197,14 +178,11 @@ pub(crate) enum StoreCommands {
         #[arg(long)]
         dest: String,
     },
-    /// Prune old audit entries and digests
+    /// Prune old audit entries and legacy store artifacts
     Compact {
         /// Prune audit entries older than N days
         #[arg(long, default_value_t = 90)]
         audit_days: u32,
-        /// Keep only the N most recent digests
-        #[arg(long, default_value_t = 30)]
-        digest_keep: u32,
         /// Preview what would be pruned without deleting anything
         #[arg(long)]
         dry_run: bool,
@@ -213,14 +191,11 @@ pub(crate) enum StoreCommands {
 
 #[derive(Subcommand)]
 pub(crate) enum ReportKind {
-    /// On-call handoff pack from local store (no MCP)
-    Oncall {
-        /// Wrap the report in a JSON object on stdout
-        #[arg(long)]
-        json: bool,
-    },
-    /// CI efficiency report (requires MCP)
+    /// CI efficiency report (requires GitHub harness)
     Ci {
+        /// Repository slug(s) owner/name (repeat flag for multiple)
+        #[arg(long = "repo", value_delimiter = ',')]
+        repo: Vec<String>,
         #[arg(long, default_value_t = 7)]
         since_days: u32,
         /// Wrap the report in a JSON object on stdout
@@ -240,7 +215,7 @@ use coworker_core::store::open_store;
 
 use super::terminal::set_plain;
 use super::{
-    catalog, chat, doctor_init, export, report, rpc, runtime, store, triage, upgrade_check,
+    catalog, chat, doctor_init, export, report, rpc, runtime, store, upgrade_check,
 };
 
 pub async fn run() -> Result<()> {
@@ -271,7 +246,6 @@ pub async fn run() -> Result<()> {
     if let Some(Commands::Init {
         force,
         path,
-        repos,
         llm_url,
         interactive,
     }) = &cli.command
@@ -280,7 +254,6 @@ pub async fn run() -> Result<()> {
             *force,
             cli.config.clone(),
             path.clone(),
-            repos.clone(),
             llm_url.clone(),
             *interactive,
         )
@@ -297,14 +270,6 @@ pub async fn run() -> Result<()> {
     match cli.command {
         Some(Commands::Report { kind }) => {
             report::run_report(&config, store.as_ref(), kind).await?;
-        }
-        Some(Commands::TriagePr {
-            repo,
-            pr,
-            json,
-            timeout,
-        }) => {
-            triage::run_triage_pr(config, store, &repo, pr, json, timeout).await?;
         }
         Some(Commands::Tui) | None => {
             runtime::run_tui(config, config_path, store).await?;

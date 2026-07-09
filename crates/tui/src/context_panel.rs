@@ -102,7 +102,7 @@ pub fn context_status_spans(th: ThemePalette, state: &AppState) -> Vec<Span<'sta
     ]
 }
 
-/// Compact store snapshot on non-Chat tabs (digest / approvals / flaky / alerts).
+/// Compact store snapshot on non-Chat tabs (pending approvals).
 pub fn store_status_spans(th: ThemePalette, state: &AppState) -> Vec<Span<'static>> {
     use coworker_core::app::Tab;
 
@@ -114,33 +114,15 @@ pub fn store_status_spans(th: ThemePalette, state: &AppState) -> Vec<Span<'stati
         " │ store ",
         Style::default().fg(th.border).bg(th.surface),
     )];
-    if let Some(d) = &state.latest_digest {
-        let attn = d.summary.needs_attention;
-        let attn_fg = if attn > 0 { th.warn } else { th.muted };
-        spans.push(Span::styled(
-            format!("digest {} ", d.date),
-            Style::default().fg(th.muted).bg(th.surface),
-        ));
-        spans.push(Span::styled(
-            format!("attn:{attn} "),
-            Style::default().fg(attn_fg).bg(th.surface),
-        ));
-        if !d.summary.complete {
-            spans.push(Span::styled(
-                "◷ ",
-                Style::default().fg(th.accent).bg(th.surface),
-            ));
-        }
-    } else {
-        spans.push(Span::styled(
-            "no digest ",
-            Style::default().fg(th.muted).bg(th.surface),
-        ));
-    }
     if !state.approvals.is_empty() {
         spans.push(Span::styled(
             format!("appr:{} ", state.approvals.len()),
             Style::default().fg(th.warn).bg(th.surface),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "ok ",
+            Style::default().fg(th.muted).bg(th.surface),
         ));
     }
     spans.push(Span::styled(" ", surface));
@@ -680,7 +662,7 @@ repos: [acme/widget]
 "#;
         let cfg: coworker_core::config::Config = serde_yaml::from_str(yaml).unwrap();
         let mut state = AppState::new(cfg, "coworker.yaml".into());
-        state.tab = coworker_core::app::Tab::Dashboard;
+        state.tab = coworker_core::app::Tab::Approvals;
         let spans = store_status_spans(th, &state);
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(joined.contains("store"));

@@ -21,7 +21,6 @@ use super::{build_router, WebRuntime};
 const MINIMAL_CONFIG: &str = r#"
 llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
 storage: { backend: json, path: ./data }
-repos: [acme/widget]
 "#;
 
 const SNAPSHOT_KEYS: &[&str] = &[
@@ -31,11 +30,9 @@ const SNAPSHOT_KEYS: &[&str] = &[
     "engine_busy",
     "chat_enabled",
     "chat_busy",
-    "prs",
     "approvals",
     "logs",
     "config_path",
-    "repos",
     "llm_model",
     "llm_profile",
     "llm_profile_options",
@@ -264,7 +261,6 @@ async fn api_state_returns_snapshot_json() {
         );
     }
     assert_eq!(json["status"], "ready");
-    assert_eq!(json["repos"], serde_json::json!(["acme/widget"]));
 }
 
 #[tokio::test]

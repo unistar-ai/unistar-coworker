@@ -4,11 +4,9 @@ mod events;
 pub use approval::spawn_approval_decision;
 pub use events::apply_event;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::NaiveDate;
 use tokio::sync::broadcast;
 
 use crate::agent::budget::TokenBudget;
@@ -18,62 +16,7 @@ use crate::agent::chat_loop::{
 use crate::agent::context::chat_message_to_llm;
 use crate::agent::tool_catalog::ToolCatalog;
 use crate::config::Config;
-use crate::store::{
-    Approval, AuditEntry, ChatMessage, ChatRole, Digest, DigestMeta, LogLine, PrSnapshot, Store,
-};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrFilter {
-    All,
-    ReviewBlocked,
-    CiFailing,
-    MyPrs,
-}
-
-impl PrFilter {
-    pub fn label(self) -> &'static str {
-        match self {
-            PrFilter::All => "all",
-            PrFilter::ReviewBlocked => "review-blocked",
-            PrFilter::CiFailing => "CI failing",
-            PrFilter::MyPrs => "my PRs",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            PrFilter::All => PrFilter::ReviewBlocked,
-            PrFilter::ReviewBlocked => PrFilter::CiFailing,
-            PrFilter::CiFailing => PrFilter::MyPrs,
-            PrFilter::MyPrs => PrFilter::All,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrSort {
-    Updated,
-    CiStatus,
-    Number,
-}
-
-impl PrSort {
-    pub fn label(self) -> &'static str {
-        match self {
-            PrSort::Updated => "updated",
-            PrSort::CiStatus => "CI status",
-            PrSort::Number => "PR #",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            PrSort::Updated => PrSort::CiStatus,
-            PrSort::CiStatus => PrSort::Number,
-            PrSort::Number => PrSort::Updated,
-        }
-    }
-}
+use crate::store::{Approval, AuditEntry, ChatMessage, ChatRole, LogLine, Store};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFilter {
@@ -119,11 +62,9 @@ impl LogFilter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Chat = 0,
-    Dashboard = 1,
-    Prs = 2,
-    Approvals = 3,
-    Logs = 4,
-    Config = 5,
+    Approvals = 1,
+    Logs = 2,
+    Config = 3,
 }
 
 impl Tab {
@@ -132,24 +73,16 @@ impl Tab {
         if config.chat.enabled {
             tabs.push(Tab::Chat);
         }
-        tabs.extend([
-            Tab::Dashboard,
-            Tab::Prs,
-            Tab::Approvals,
-            Tab::Logs,
-            Tab::Config,
-        ]);
+        tabs.extend([Tab::Approvals, Tab::Logs, Tab::Config]);
         tabs
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Chat => "0 Chat",
-            Tab::Dashboard => "1 Dashboard",
-            Tab::Prs => "2 PRs",
-            Tab::Approvals => "3 Approvals",
-            Tab::Logs => "4 Logs",
-            Tab::Config => "5 Config",
+            Tab::Approvals => "1 Approvals",
+            Tab::Logs => "2 Logs",
+            Tab::Config => "3 Config",
         }
     }
 
@@ -169,7 +102,6 @@ impl Tab {
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     StoreUpdated,
-    DigestReady(Digest),
     LogLine(LogLine),
     BackgroundTaskStarted {
         label: String,
@@ -182,11 +114,6 @@ pub enum AppEvent {
     StatusMessage(String),
     ChatReply,
     ChatProgress(ChatProgress),
-    /// PR tab detail: `pr_get_overview` body loaded asynchronously.
-    PrOverviewReady {
-        repo: String,
-        pr_number: u32,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -239,55 +166,14 @@ impl ApprovalDialog {
     }
 }
 
-/// Collapsed Dashboard list sections (`true` = items hidden, header only).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DashboardFoldState {
-    pub digests: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DashboardSection {
-    Digests,
-}
-
-impl DashboardSection {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Digests => "digests",
-        }
-    }
-}
-
-impl DashboardFoldState {
-    pub fn is_collapsed(self, section: DashboardSection) -> bool {
-        match section {
-            DashboardSection::Digests => self.digests,
-        }
-    }
-}
-
-fn default_folded_digest_sections() -> std::collections::HashSet<String> {
-    ["Ignorable", "Clear", "Waiting for review", "Notes"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
-}
-
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: Config,
     pub config_path: String,
     pub tab: Tab,
-    pub latest_digest: Option<Digest>,
-    pub digest_history: Vec<DigestMeta>,
-    pub prs: Vec<PrSnapshot>,
     pub approvals: Vec<Approval>,
-    pub pr_filter: PrFilter,
-    pub pr_sort: PrSort,
     pub log_filter: LogFilter,
     pub logs: Vec<LogLine>,
-    /// Digest markdown bodies keyed by date (for Dashboard detail).
-    pub digest_bodies: HashMap<NaiveDate, String>,
     pub selected_index: usize,
     pub status: String,
     pub engine_busy: bool,
@@ -356,18 +242,6 @@ pub struct AppState {
     /// Inclusive line range for mouse drag-to-copy in Detail (`lo`, `hi`).
     pub detail_select: Option<(u16, u16)>,
     pub detail_selecting: bool,
-    /// Dashboard list section collapse (alerts / security / digests).
-    pub dashboard_fold: DashboardFoldState,
-    /// `##` section titles folded in digest Detail markdown (`z` / `Z` on Dashboard).
-    pub digest_folded_sections: std::collections::HashSet<String>,
-    /// `pr_get_overview` bodies keyed by `repo#number` for the PRs tab Detail pane.
-    pub pr_overview_cache: HashMap<String, String>,
-    /// In-flight overview fetch (`repo#number`).
-    pub pr_overview_fetching: Option<String>,
-    /// PR cursor within the selected Dashboard digest (`n` / `N`).
-    pub dashboard_digest_pr_index: usize,
-    /// Digest list index the PR cursor applies to.
-    pub dashboard_digest_pr_digest_idx: Option<usize>,
     /// Running binary version (for Web Config).
     pub app_version: String,
     /// Set by background upgrade check after `serve` starts.
@@ -383,18 +257,12 @@ impl AppState {
             tab: if config.chat.enabled {
                 Tab::Chat
             } else {
-                Tab::Dashboard
+                Tab::Approvals
             },
             config,
-            latest_digest: None,
-            digest_history: vec![],
-            prs: vec![],
             approvals: vec![],
-            pr_filter: PrFilter::All,
-            pr_sort: PrSort::Updated,
             log_filter: LogFilter::All,
             logs: vec![],
-            digest_bodies: HashMap::new(),
             selected_index: 0,
             status: "ready".into(),
             engine_busy: false,
@@ -436,12 +304,6 @@ impl AppState {
             detail_scroll_line: 0,
             detail_select: None,
             detail_selecting: false,
-            dashboard_fold: DashboardFoldState::default(),
-            digest_folded_sections: default_folded_digest_sections(),
-            pr_overview_cache: HashMap::new(),
-            pr_overview_fetching: None,
-            dashboard_digest_pr_index: 0,
-            dashboard_digest_pr_digest_idx: None,
             app_version: String::new(),
             upgrade_available: false,
             latest_release: None,
@@ -459,49 +321,6 @@ impl AppState {
             s.release_url = info.release_url;
             s.upgrade_available = info.update_available;
         });
-    }
-
-    pub fn pr_overview_key(repo: &str, number: u32) -> String {
-        format!("{repo}#{number}")
-    }
-
-    pub fn selected_pr_overview(&self) -> Option<&str> {
-        let filtered = self.sorted_filtered_prs();
-        let pr = filtered.get(self.selected_index)?;
-        self.pr_overview_cache
-            .get(&Self::pr_overview_key(&pr.repo, pr.number))
-            .map(|s| s.as_str())
-    }
-
-    pub fn selected_pr_overview_loading(&self) -> bool {
-        let filtered = self.sorted_filtered_prs();
-        let Some(pr) = filtered.get(self.selected_index) else {
-            return false;
-        };
-        let key = Self::pr_overview_key(&pr.repo, pr.number);
-        self.pr_overview_fetching.as_ref() == Some(&key)
-            && !self.pr_overview_cache.contains_key(&key)
-    }
-
-    pub fn toggle_dashboard_section_fold(&mut self, section: DashboardSection) {
-        match section {
-            DashboardSection::Digests => self.dashboard_fold.digests = !self.dashboard_fold.digests,
-        }
-    }
-
-    pub fn toggle_digest_section_fold(&mut self, title: &str) {
-        if self.digest_folded_sections.contains(title) {
-            self.digest_folded_sections.remove(title);
-        } else {
-            self.digest_folded_sections.insert(title.to_string());
-        }
-    }
-
-    /// Collapse empty Dashboard list sections after store hydration.
-    pub fn sync_dashboard_fold(&mut self) {
-        if self.digest_history.is_empty() {
-            self.dashboard_fold.digests = true;
-        }
     }
 
     pub fn push_log(&mut self, level: &str, message: impl Into<String>) {
@@ -913,58 +732,6 @@ impl AppState {
         self.approvals.get(self.selected_index)
     }
 
-    pub fn filtered_prs(&self) -> Vec<&PrSnapshot> {
-        use crate::agent::parse::{ci_is_failing, ci_is_passing, is_review_required};
-        self.prs
-            .iter()
-            .filter(|p| match self.pr_filter {
-                PrFilter::All => true,
-                PrFilter::ReviewBlocked => {
-                    p.triage_note.as_deref() == Some("review blocked")
-                        || (is_review_required(&p.review_summary) && ci_is_passing(&p.ci_summary))
-                }
-                PrFilter::CiFailing => ci_is_failing(&p.ci_summary),
-                PrFilter::MyPrs => p
-                    .triage_note
-                    .as_deref()
-                    .is_some_and(|n| n.starts_with("my pr:")),
-            })
-            .collect()
-    }
-
-    pub fn sorted_filtered_prs(&self) -> Vec<&PrSnapshot> {
-        let mut prs = self.filtered_prs();
-        match self.pr_sort {
-            PrSort::Updated => {
-                prs.sort_by_key(|p| std::cmp::Reverse(p.fetched_at));
-            }
-            PrSort::CiStatus => {
-                prs.sort_by_key(|p| ci_sort_key(&p.ci_summary));
-            }
-            PrSort::Number => {
-                prs.sort_by_key(|p| std::cmp::Reverse(p.number));
-            }
-        }
-        prs
-    }
-
-    /// Switch to PRs tab and select `repo#number` when present in store snapshots.
-    pub fn jump_to_pr(&mut self, repo: &str, number: u32) -> bool {
-        self.tab = Tab::Prs;
-        self.pr_filter = PrFilter::All;
-        let idx = self
-            .sorted_filtered_prs()
-            .iter()
-            .position(|p| p.repo == repo && p.number == number);
-        if let Some(i) = idx {
-            self.selected_index = i;
-            self.reset_detail_scroll();
-            true
-        } else {
-            false
-        }
-    }
-
     pub fn filtered_logs(&self) -> Vec<&LogLine> {
         self.logs
             .iter()
@@ -1043,20 +810,6 @@ impl AppState {
         self.detail_scroll_line = 0;
         self.detail_select = None;
         self.detail_selecting = false;
-        self.dashboard_digest_pr_digest_idx = None;
-    }
-}
-
-fn ci_sort_key(summary: &str) -> u8 {
-    let lower = summary.to_ascii_lowercase();
-    if lower.contains("fail") || lower.contains("red") {
-        0
-    } else if lower.contains("pending") || lower.contains("wait") {
-        1
-    } else if lower.contains("ok") || lower.contains("green") || lower.contains("pass") {
-        2
-    } else {
-        3
     }
 }
 
@@ -1070,24 +823,11 @@ pub async fn hydrate_from_store(
     state: &SharedState,
     store: &dyn Store,
 ) -> crate::error::Result<()> {
-    let digest = store.latest_digest().await?;
-    let recent_digests = store.list_digests(20).await?;
-    let digest_history: Vec<DigestMeta> = recent_digests.iter().map(|d| d.meta()).collect();
-    let digest_bodies: HashMap<NaiveDate, String> = recent_digests
-        .into_iter()
-        .map(|d| (d.date, d.body_md))
-        .collect();
-    let prs = store.list_pr_snapshots(None).await?;
     let approvals = store.list_pending_approvals().await?;
 
     let mut s = state.write().await;
-    s.latest_digest = digest;
-    s.digest_history = digest_history;
-    s.digest_bodies = digest_bodies;
-    s.prs = prs;
     s.approvals = approvals;
     s.last_pending_approval_count = s.approvals.len();
-    s.sync_dashboard_fold();
     Ok(())
 }
 

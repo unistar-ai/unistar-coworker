@@ -51,20 +51,10 @@ function snap(overrides: Partial<WebSnapshot> = {}): WebSnapshot {
     },
     chat_pending_approval: null,
     approval_dialog: null,
-    digest_history: [],
-    digest_bodies: {},
-    selected_digest_date: null,
-    prs: [],
-    pr_filter: "all",
-    pr_sort: "default",
-    selected_pr_index: 0,
-    pr_overview: null,
-    pr_overview_loading: false,
     approvals: [],
     log_filter: "all",
     logs: [],
     config_path: "",
-    repos: [],
     llm_model: "",
     llm_profile: null,
     llm_profile_options: [],
@@ -159,18 +149,18 @@ describe("wsStore", () => {
   });
 
   it("applySnapshot sets hasSnapshot + connected and clears reconnect attempts", () => {
-    useStore.getState().applySnapshot(snap({ tab: "prs", status: "ready" }));
+    useStore.getState().applySnapshot(snap({ tab: "approvals", status: "ready" }));
     const s = useStore.getState();
     expect(s.hasSnapshot).toBe(true);
     expect(s.connected).toBe(true);
     expect(s.reconnectAttempts).toBe(0);
-    expect(s.tab).toBe("prs");
+    expect(s.tab).toBe("approvals");
   });
 
   it("applyWsMessage with a snapshot sets hasSnapshot", () => {
-    useStore.getState().applyWsMessage(snap({ tab: "dashboard" }));
+    useStore.getState().applyWsMessage(snap({ tab: "logs" }));
     expect(useStore.getState().hasSnapshot).toBe(true);
-    expect(useStore.getState().tab).toBe("dashboard");
+    expect(useStore.getState().tab).toBe("logs");
   });
 
   it("applyWsMessage with a live patch does NOT set hasSnapshot", () => {

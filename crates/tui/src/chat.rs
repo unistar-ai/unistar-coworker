@@ -69,7 +69,7 @@ fn welcome_lines(th: ThemePalette) -> Vec<Line<'static>> {
             Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "  Ask about PRs, CI, reviews, or digests.",
+            "  Ask about PRs, CI, reviews, or your workspace.",
             Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
         )),
         Line::from(Span::styled(

@@ -116,47 +116,24 @@ pub async fn run_checks_with_extras(
                 .find(|l| !l.trim().is_empty())
                 .unwrap_or("not authenticated")
                 .to_string();
-            let github_needed = cfg.as_ref().is_some_and(|c| !c.repos.is_empty());
-            if github_needed {
-                report.push_check(DoctorCheck {
-                    name: "github",
-                    status: "fail",
-                    detail: first,
-                    latency_ms: None,
-                    hint: Some("run `gh auth login`".into()),
-                });
-            } else {
-                report.push_check(DoctorCheck {
-                    name: "github",
-                    status: "warn",
-                    detail: format!("{first} (optional — no repos configured)"),
-                    latency_ms: None,
-                    hint: Some(
-                        "workspace-only agent needs no GitHub; add repos: and auth for PR/CI harness"
-                            .into(),
-                    ),
-                });
-            }
+            report.push_check(DoctorCheck {
+                name: "github",
+                status: "warn",
+                detail: first,
+                latency_ms: None,
+                hint: Some(
+                    "run `gh auth login` when using GitHub harness or PR/CI tools".into(),
+                ),
+            });
         }
         Err(e) => {
-            let github_needed = cfg.as_ref().is_some_and(|c| !c.repos.is_empty());
-            if github_needed {
-                report.push_check(DoctorCheck {
-                    name: "github",
-                    status: "fail",
-                    detail: format!("gh CLI not found: {e}"),
-                    latency_ms: None,
-                    hint: Some("install GitHub CLI: https://cli.github.com".into()),
-                });
-            } else {
-                report.push_check(DoctorCheck {
-                    name: "github",
-                    status: "warn",
-                    detail: format!("gh CLI not found: {e} (optional — no repos configured)"),
-                    latency_ms: None,
-                    hint: Some("install gh only if you use GitHub harness or PR/CI tools".into()),
-                });
-            }
+            report.push_check(DoctorCheck {
+                name: "github",
+                status: "warn",
+                detail: format!("gh CLI not found: {e}"),
+                latency_ms: None,
+                hint: Some("install gh only if you use GitHub harness or PR/CI tools".into()),
+            });
         }
     }
 

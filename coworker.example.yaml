@@ -36,9 +36,6 @@ llm:
 #   gh_command: gh
 #   env: {}
 #   timeout_secs: 120
-#
-# repos:
-#   - owner/repo
 
 chat:
   workspace: .

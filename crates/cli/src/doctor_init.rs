@@ -153,7 +153,6 @@ pub(crate) async fn run_init(
     force: bool,
     config_override: Option<PathBuf>,
     path: Option<PathBuf>,
-    repos: Option<String>,
     llm_url: Option<String>,
     interactive: bool,
 ) -> Result<()> {
@@ -170,18 +169,15 @@ pub(crate) async fn run_init(
 
     let use_interactive = interactive && io::stdin().is_terminal() && io::stdout().is_terminal();
 
-    let (repos_csv, llm_url_seed, remote_profile) = if use_interactive {
+    let (llm_url_seed, remote_profile) = if use_interactive {
         run_interactive_prompts().await?
     } else {
-        (repos, llm_url, None)
+        (llm_url, None)
     };
 
     let template = include_str!("../../../coworker.example.yaml");
     let mut lines: Vec<String> = template.lines().map(String::from).collect();
 
-    if let Some(repos) = &repos_csv {
-        apply_init_repos(&mut lines, repos);
-    }
     if let Some(url) = &llm_url_seed {
         if let Some(idx) = lines.iter().position(|l| {
             let t = l.trim_start();
@@ -234,69 +230,8 @@ pub(crate) async fn run_init(
     Ok(())
 }
 
-/// When `--repos` is passed, enable the GitHub block in `coworker.example.yaml` (commented by default).
-fn apply_init_repos(lines: &mut Vec<String>, repos_csv: &str) {
-    let slugs: Vec<String> = repos_csv
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect();
-    if slugs.is_empty() {
-        return;
-    }
-
-    for line in lines.iter_mut() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("# github:")
-            || trimmed.starts_with("#   gh_command:")
-            || trimmed.starts_with("#   env:")
-            || trimmed.starts_with("#   timeout_secs:")
-        {
-            if let Some(rest) = trimmed.strip_prefix("# ") {
-                *line = rest.to_string();
-            } else if let Some(rest) = trimmed.strip_prefix('#') {
-                *line = rest.trim_start().to_string();
-            }
-        }
-    }
-
-    let repos_idx = lines.iter().position(|l| {
-        let t = l.trim();
-        t == "repos:" || t == "# repos:"
-    });
-
-    if let Some(idx) = repos_idx {
-        lines[idx] = "repos:".to_string();
-        let j = idx + 1;
-        while j < lines.len()
-            && (lines[j].starts_with("  - ") || lines[j].trim_start().starts_with("#   - "))
-        {
-            lines.remove(j);
-        }
-        for (k, r) in slugs.iter().enumerate() {
-            lines.insert(idx + 1 + k, format!("  - {r}"));
-        }
-        return;
-    }
-
-    if let Some(chat_idx) = lines.iter().position(|l| l.trim() == "chat:") {
-        let mut block = vec!["github:".into(), "  gh_command: gh".into(), "repos:".into()];
-        for r in &slugs {
-            block.push(format!("  - {r}"));
-        }
-        block.push(String::new());
-        for (i, line) in block.into_iter().enumerate() {
-            lines.insert(chat_idx + i, line);
-        }
-    }
-}
-
-async fn run_interactive_prompts() -> Result<(
-    Option<String>,
-    Option<String>,
-    Option<(String, String, String, String)>,
-)> {
+async fn run_interactive_prompts(
+) -> Result<(Option<String>, Option<(String, String, String, String)>)> {
     println!("unistar-coworker init (interactive)");
     println!();
 
@@ -316,10 +251,9 @@ async fn run_interactive_prompts() -> Result<(
         None
     };
 
-    let repos = prompt_repos()?;
     let remote_profile = prompt_remote_profile()?;
 
-    Ok((repos, llm_url, remote_profile))
+    Ok((llm_url, remote_profile))
 }
 
 fn print_reference_model_hint() {
@@ -344,48 +278,6 @@ async fn probe_ollama() -> bool {
         .await
         .ok()
         .is_some_and(|r| r.status().is_success())
-}
-
-fn prompt_repos() -> Result<Option<String>> {
-    print!("GitHub repos (comma-separated owner/repo, Enter to skip — workspace-only is fine): ");
-    io::stdout().flush().ok();
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let mut valid = Vec::new();
-    for part in trimmed.split(',') {
-        let r = part.trim();
-        if r.is_empty() {
-            continue;
-        }
-        if !is_valid_repo_slug(r) {
-            eprintln!("{} invalid repo `{r}` — expected owner/repo", hint_prefix());
-            continue;
-        }
-        valid.push(r.to_string());
-    }
-    if valid.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(valid.join(",")))
-    }
-}
-
-fn is_valid_repo_slug(slug: &str) -> bool {
-    let Some((owner, repo)) = slug.split_once('/') else {
-        return false;
-    };
-    !owner.is_empty()
-        && !repo.is_empty()
-        && owner
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-        && repo
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 fn prompt_remote_profile() -> Result<Option<(String, String, String, String)>> {
@@ -453,45 +345,32 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn valid_repo_slug_accepts_owner_repo() {
-        assert!(is_valid_repo_slug("acme/widget"));
-        assert!(is_valid_repo_slug("my-org/my_repo"));
-        assert!(!is_valid_repo_slug("invalid"));
-        assert!(!is_valid_repo_slug("/repo"));
-    }
-
     #[tokio::test]
-    async fn init_without_repos_stays_workspace_first() {
+    async fn init_writes_workspace_first_template() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("coworker.yaml");
-        run_init(false, None, Some(path.clone()), None, None, false)
+        run_init(false, None, Some(path.clone()), None, false)
             .await
             .unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains("acme/widget"));
         assert!(raw.contains("tool_mode: auto"));
     }
 
     #[tokio::test]
-    async fn init_non_interactive_writes_template() {
+    async fn init_non_interactive_seeds_llm_url() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("coworker.yaml");
         run_init(
             false,
             None,
             Some(path.clone()),
-            Some("acme/widget,acme/api".into()),
             Some("http://127.0.0.1:11434/v1".into()),
             false,
         )
         .await
         .unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("acme/widget"));
-        assert!(raw.contains("acme/api"));
         assert!(raw.contains("http://127.0.0.1:11434/v1"));
-        assert!(raw.contains("github:"));
     }
 
     #[tokio::test]
@@ -499,27 +378,26 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("coworker.yaml");
         std::fs::write(&path, "existing").unwrap();
-        run_init(false, None, Some(path.clone()), None, None, false)
+        run_init(false, None, Some(path.clone()), None, false)
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
     }
 
     #[tokio::test]
-    async fn init_interactive_without_tty_uses_cli_args() {
+    async fn init_interactive_without_tty_uses_cli_llm_url() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("coworker.yaml");
         run_init(
             false,
             None,
             Some(path.clone()),
-            Some("acme/widget".into()),
-            None,
+            Some("http://127.0.0.1:11434/v1".into()),
             true,
         )
         .await
         .unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("acme/widget"));
+        assert!(raw.contains("http://127.0.0.1:11434/v1"));
     }
 }

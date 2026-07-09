@@ -329,8 +329,7 @@ fn ops_tool_result_char_cap(tool_name: &str) -> usize {
         | "ci_failure_fingerprint" => 5_250,
         "ci_compare_runs" | "ci_list_external_checks" => 3_000,
         "repo_get_info" => 2_500,
-        "store_get_latest_digest" | "store_list_pending_approvals" => 3_000,
-        "store_get_oncall_handoff" => 6_500,
+        "store_list_pending_approvals" => 3_000,
         _ => 9_000,
     }
 }

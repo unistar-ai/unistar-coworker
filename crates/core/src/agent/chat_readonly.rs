@@ -18,7 +18,6 @@ use crate::agent::harness_tools;
 use crate::agent::python_tool;
 use crate::agent::review_gate::ReviewGateOutcome;
 use crate::agent::web_fetch_tool;
-use crate::agent::workflow_harness::{self, WorkflowHarnessCtx};
 use crate::config::{BashToolConfig, Config, PythonToolConfig};
 use crate::engine::SkillRegistry;
 use crate::error::{CoworkerError, Result};
@@ -59,7 +58,6 @@ pub(crate) struct ReadonlyToolHarness {
 }
 
 pub(crate) struct ReadonlyToolContext<'a> {
-    pub(crate) configured_repos: &'a [String],
     pub(crate) user_task: &'a str,
     pub(crate) bash: &'a BashToolConfig,
     pub(crate) python: &'a PythonToolConfig,
@@ -84,7 +82,6 @@ pub(crate) async fn execute_readonly_tools_parallel(
             cancel: harness.cancel.clone(),
             progress: harness.progress.clone(),
         };
-        let configured_repos = ctx.configured_repos.to_vec();
         let user_task = ctx.user_task.to_string();
         let bash = ctx.bash.clone();
         let python = ctx.python.clone();
@@ -121,7 +118,6 @@ pub(crate) async fn execute_readonly_tools_parallel(
                     harness,
                     &discovery,
                     ReadonlyToolContext {
-                        configured_repos: &configured_repos,
                         user_task: &user_task,
                         bash: &bash,
                         python: &python,
@@ -252,7 +248,6 @@ pub(crate) async fn record_tool_outcome(
             &name,
             &args,
             &output,
-            round.configured_repos,
             round.llm_messages,
         );
         append_message(
@@ -385,27 +380,7 @@ async fn execute_readonly_tool(
     tool_name: &str,
     mut tool_args: Value,
 ) -> Result<ReadonlyToolExecuteResult> {
-    finalize_tool_args(
-        tool_name,
-        &mut tool_args,
-        ctx.configured_repos,
-        ctx.user_task,
-    );
-    if workflow_harness::is_workflow_harness_tool(tool_name) {
-        return Ok(ReadonlyToolExecuteResult::Output(
-            workflow_harness::execute_workflow_harness(
-                WorkflowHarnessCtx {
-                    config: ctx.config.clone(),
-                    store,
-                    github,
-                    llm: ctx.llm.clone(),
-                },
-                tool_name,
-                tool_args,
-            )
-            .await?,
-        ));
-    }
+    finalize_tool_args(tool_name, &mut tool_args, ctx.user_task);
     if harness_tools::is_harness_tool(tool_name) {
         return Ok(ReadonlyToolExecuteResult::Output(
             harness_tools::execute_harness_tool(store.as_ref(), tool_name, tool_args).await?,

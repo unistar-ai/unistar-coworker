@@ -7,7 +7,6 @@ mod chat;
 mod clipboard;
 mod context_panel;
 mod detail_cache;
-mod digest_nav;
 mod markdown;
 mod scroll;
 mod spinner;
@@ -37,7 +36,7 @@ use unicode_width::UnicodeWidthStr;
 use coworker_core::agent::chat_loop::is_chat_cancelled;
 use coworker_core::app::{
     apply_event, export_chat_transcript_markdown, load_chat_session_ui, spawn_approval_decision,
-    AppEvent, AppState, ChatPaneFocus, DashboardSection, SharedState, Tab,
+    AppEvent, AppState, ChatPaneFocus, SharedState, Tab,
 };
 use coworker_core::engine::Engine;
 use coworker_core::error::Result;
@@ -61,8 +60,6 @@ pub async fn run(
             while let Ok(ev) = events_rx.try_recv() {
                 apply_event(&state, ev).await;
             }
-
-            maybe_request_pr_overview(&state, &engine).await;
 
             {
                 let s = state.read().await;
@@ -157,11 +154,9 @@ async fn handle_key(
         {
             set_tab(state, Tab::Chat, list_state).await;
         }
-        KeyCode::Char('1') => set_tab(state, Tab::Dashboard, list_state).await,
-        KeyCode::Char('2') => set_tab(state, Tab::Prs, list_state).await,
-        KeyCode::Char('3') => set_tab(state, Tab::Approvals, list_state).await,
-        KeyCode::Char('4') => set_tab(state, Tab::Logs, list_state).await,
-        KeyCode::Char('5') => set_tab(state, Tab::Config, list_state).await,
+        KeyCode::Char('1') => set_tab(state, Tab::Approvals, list_state).await,
+        KeyCode::Char('2') => set_tab(state, Tab::Logs, list_state).await,
+        KeyCode::Char('3') => set_tab(state, Tab::Config, list_state).await,
         KeyCode::Char('?') => {
             let mut s = state.write().await;
             if s.config.chat.enabled {
@@ -182,37 +177,16 @@ async fn handle_key(
             s.selected_index = 0;
             list_state.select(Some(0));
         }
-        KeyCode::Char('m') => {
-            set_tab(state, Tab::Prs, list_state).await;
-        }
         KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             set_tab(state, Tab::Chat, list_state).await;
         }
         KeyCode::Char('/') => {
             let mut s = state.write().await;
-            match s.tab {
-                Tab::Prs => {
-                    s.pr_filter = s.pr_filter.next();
-                    s.selected_index = 0;
-                    list_state.select(Some(0));
-                    s.status = format!("PR filter: {}", s.pr_filter.label());
-                }
-                Tab::Logs => {
-                    s.log_filter = s.log_filter.next();
-                    s.selected_index = 0;
-                    list_state.select(Some(0));
-                    s.status = format!("Log filter: {}", s.log_filter.label());
-                }
-                _ => {}
-            }
-        }
-        KeyCode::Char('s') => {
-            let mut s = state.write().await;
-            if s.tab == Tab::Prs {
-                s.pr_sort = s.pr_sort.next();
+            if s.tab == Tab::Logs {
+                s.log_filter = s.log_filter.next();
                 s.selected_index = 0;
                 list_state.select(Some(0));
-                s.status = format!("PR sort: {}", s.pr_sort.label());
+                s.status = format!("Log filter: {}", s.log_filter.label());
             }
         }
         KeyCode::Char('r') => {
@@ -233,104 +207,13 @@ async fn handle_key(
                 });
             }
         }
-        KeyCode::Char('z') => {
-            let mut s = state.write().await;
-            if s.tab == Tab::Dashboard {
-                if let Some(kind) = dashboard_row_kind_at(&s, s.selected_index) {
-                    if let Some(section) = dashboard_section_for_row(&kind) {
-                        s.toggle_dashboard_section_fold(section);
-                        clamp_dashboard_selection(&mut s);
-                        list_state.select(Some(s.selected_index));
-                        s.status = format!(
-                            "Dashboard {} {}",
-                            section.label(),
-                            if s.dashboard_fold.is_collapsed(section) {
-                                "collapsed"
-                            } else {
-                                "expanded"
-                            }
-                        );
-                    }
-                }
-            }
-        }
-        KeyCode::Char('Z') => {
-            let mut s = state.write().await;
-            if s.tab == Tab::Dashboard {
-                if let Some(title) = cycle_digest_section_fold(&mut s) {
-                    let folded = s.digest_folded_sections.contains(&title);
-                    s.reset_detail_scroll();
-                    s.status = format!(
-                        "digest section '{title}' {}",
-                        if folded { "folded" } else { "expanded" }
-                    );
-                }
-            }
-        }
-        KeyCode::Char('t') => {
-            let triage = {
-                let s = state.read().await;
-                if s.tab == Tab::Prs && s.github_ok {
-                    s.sorted_filtered_prs()
-                        .get(s.selected_index)
-                        .map(|pr| (pr.repo.clone(), pr.number))
-                } else {
-                    None
-                }
-            };
-            if let Some((repo, number)) = triage {
-                let engine = Arc::clone(engine);
-                engine.spawn_triage_pr(repo, number);
-            }
-        }
-        KeyCode::Char('p') => {
-            jump_to_pr_from_context(state, list_state).await;
-        }
-        KeyCode::Char('o') => {
-            let pr_refresh = {
-                let s = state.read().await;
-                if s.tab == Tab::Prs && s.github_ok {
-                    s.sorted_filtered_prs()
-                        .get(s.selected_index)
-                        .map(|pr| (pr.repo.clone(), pr.number))
-                } else {
-                    None
-                }
-            };
-            if let Some((repo, number)) = pr_refresh {
-                let key = AppState::pr_overview_key(&repo, number);
-                {
-                    let mut s = state.write().await;
-                    s.pr_overview_cache.remove(&key);
-                    s.pr_overview_fetching = Some(key.clone());
-                    s.status = format!("refreshing overview {repo}#{number}");
-                }
-                let engine = Arc::clone(engine);
-                tokio::spawn(async move {
-                    engine.fetch_pr_overview(repo, number).await;
-                });
-            }
-        }
         KeyCode::Char('y') => {
             try_decide_approval(state, engine, true).await;
         }
         KeyCode::Char('n') => {
             let tab = state.read().await.tab;
-            if tab == Tab::Dashboard {
-                let mut s = state.write().await;
-                if let Some(msg) = cycle_dashboard_digest_pr(&mut s, 1) {
-                    s.status = msg;
-                }
-            } else if tab == Tab::Approvals {
+            if tab == Tab::Approvals {
                 try_decide_approval(state, engine, false).await;
-            }
-        }
-        KeyCode::Char('N') => {
-            let mut s = state.write().await;
-            if s.tab == Tab::Dashboard {
-                if let Some(msg) = cycle_dashboard_digest_pr(&mut s, -1) {
-                    s.status = msg;
-                }
             }
         }
         KeyCode::Char('{')
@@ -372,19 +255,7 @@ async fn handle_key(
             }
         }
         KeyCode::Enter => {
-            let jump_digest = {
-                let s = state.read().await;
-                s.tab == Tab::Dashboard
-                    && matches!(
-                        dashboard_row_kind_at(&s, s.selected_index),
-                        Some(DashboardRowKind::Digest(_))
-                    )
-            };
-            if jump_digest {
-                jump_to_pr_from_context(state, list_state).await;
-            } else {
-                try_submit_chat(state, engine, store).await;
-            }
+            try_submit_chat(state, engine, store).await;
         }
         KeyCode::Backspace => {}
         _ => {}
@@ -401,7 +272,7 @@ async fn handle_chat_key(
     list_state: &mut ListState,
 ) -> Result<bool> {
     match key.code {
-        KeyCode::Char(c @ '0'..='5') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(c @ '0'..='3') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             let snapshot = {
                 let s = state.read().await;
                 (s.chat_input.is_empty(), s.config.chat.enabled)
@@ -414,11 +285,9 @@ async fn handle_chat_key(
             } else {
                 match c {
                     '0' if snapshot.1 => set_tab(state, Tab::Chat, list_state).await,
-                    '1' => set_tab(state, Tab::Dashboard, list_state).await,
-                    '2' => set_tab(state, Tab::Prs, list_state).await,
-                    '3' => set_tab(state, Tab::Approvals, list_state).await,
-                    '4' => set_tab(state, Tab::Logs, list_state).await,
-                    '5' => set_tab(state, Tab::Config, list_state).await,
+                    '1' => set_tab(state, Tab::Approvals, list_state).await,
+                    '2' => set_tab(state, Tab::Logs, list_state).await,
+                    '3' => set_tab(state, Tab::Config, list_state).await,
                     _ => {}
                 }
             }
@@ -760,7 +629,7 @@ async fn handle_chat_slash_command(
                 "system> **Chat**: Enter send; Shift+Enter newline; ↑/↓ input history; j/k scroll msgs; o expand tool (input empty); Esc cancel; End latest; \\ toggle ctx panel",
             );
             s.push_chat_line(
-                "system> **Tabs**: Tab/BackTab cycle; 1–8 jump; q quit; Ctrl+c quit; ? open Chat; Dashboard r/R/g/v/m/c/f/o/A Enter/p open PR; PRs / filter s sort t triage; Flaky u/U reclassify",
+                "system> **Tabs**: Tab/BackTab cycle; 0–3 jump; q quit; Ctrl+c quit; ? open Chat; r refresh store; Approvals y/n; Logs / filter; Config R probe",
             );
             s.status = "chat help".into();
         }
@@ -883,210 +752,9 @@ async fn set_tab(state: &SharedState, tab: Tab, list_state: &mut ListState) {
     list_state.select(Some(0));
 }
 
-#[derive(Debug, Clone)]
-enum DashboardRowKind {
-    SectionHeader(DashboardSection),
-    Digest(usize),
-    Placeholder,
-}
-
-struct DashboardRow {
-    kind: DashboardRowKind,
-    label: String,
-}
-
-fn dashboard_rows(state: &AppState) -> Vec<DashboardRow> {
-    let fold = state.dashboard_fold;
-    let mut rows = Vec::new();
-    let digest_n = state.digest_history.len();
-    rows.push(DashboardRow {
-        kind: DashboardRowKind::SectionHeader(DashboardSection::Digests),
-        label: format!(
-            "{} Daily digests ({digest_n})",
-            if fold.digests { "▸" } else { "▾" }
-        ),
-    });
-    if !fold.digests {
-        if digest_n == 0 {
-            rows.push(DashboardRow {
-                kind: DashboardRowKind::Placeholder,
-                label: "  No digest — press r".into(),
-            });
-        } else {
-            for (i, d) in state.digest_history.iter().enumerate() {
-                let updating = if d.summary.complete { "" } else { " ◷" };
-                rows.push(DashboardRow {
-                    kind: DashboardRowKind::Digest(i),
-                    label: format!(
-                        "  ▸ {} — attention:{} flaky:{} policy:{} ok:{}{} ({})",
-                        d.date,
-                        d.summary.needs_attention,
-                        d.summary.flaky_candidates,
-                        d.summary.policy_gates,
-                        d.summary.ignorable,
-                        updating,
-                        d.summary.duration_label()
-                    ),
-                });
-            }
-        }
-    }
-
-    if rows.is_empty() {
-        rows.push(DashboardRow {
-            kind: DashboardRowKind::Placeholder,
-            label: "No digest — press r".into(),
-        });
-    }
-    rows
-}
-
-fn dashboard_row_kind_at(state: &AppState, index: usize) -> Option<DashboardRowKind> {
-    dashboard_rows(state).get(index).map(|row| row.kind.clone())
-}
-
-fn dashboard_section_for_row(kind: &DashboardRowKind) -> Option<DashboardSection> {
-    match kind {
-        DashboardRowKind::SectionHeader(section) => Some(*section),
-        DashboardRowKind::Digest(_) => Some(DashboardSection::Digests),
-        DashboardRowKind::Placeholder => None,
-    }
-}
-
-fn clamp_dashboard_selection(state: &mut AppState) {
-    let max = dashboard_rows(state).len().saturating_sub(1);
-    if state.selected_index > max {
-        state.selected_index = max;
-        state.reset_detail_scroll();
-    }
-}
-
-fn dashboard_digest_body(state: &AppState, digest_idx: usize) -> Option<String> {
-    if digest_idx == 0 {
-        state.latest_digest.as_ref().map(|d| d.body_md.clone())
-    } else {
-        state.digest_history.get(digest_idx).and_then(|meta| {
-            state.digest_bodies.get(&meta.date).cloned().or_else(|| {
-                Some(format!(
-                    "Digest {}\nattention: {}  flaky: {}  policy: {}  ok: {}\nrun time: {}",
-                    meta.date,
-                    meta.summary.needs_attention,
-                    meta.summary.flaky_candidates,
-                    meta.summary.policy_gates,
-                    meta.summary.ignorable,
-                    meta.summary.duration_label()
-                ))
-            })
-        })
-    }
-}
-
-fn cycle_digest_section_fold(state: &mut AppState) -> Option<String> {
-    let kind = dashboard_row_kind_at(state, state.selected_index)?;
-    let digest_idx = match kind {
-        DashboardRowKind::Digest(idx) => idx,
-        _ => return None,
-    };
-    let body = dashboard_digest_body(state, digest_idx)?;
-    let sections = markdown::markdown_h2_section_titles(&body);
-    if sections.is_empty() {
-        return None;
-    }
-    let next = sections
-        .iter()
-        .find(|title| !state.digest_folded_sections.contains(title.as_str()))
-        .or_else(|| sections.first())?;
-    let title = next.clone();
-    state.toggle_digest_section_fold(&title);
-    Some(title)
-}
-
-fn dashboard_digest_pr_refs(state: &AppState, digest_idx: usize) -> Vec<(String, u32)> {
-    let fallback = state
-        .config
-        .repos
-        .first()
-        .map(String::as_str)
-        .unwrap_or("unknown/repo");
-    dashboard_digest_body(state, digest_idx)
-        .map(|body| digest_nav::extract_pr_refs_from_digest(&body, fallback))
-        .unwrap_or_default()
-}
-
-fn selected_dashboard_digest_pr(state: &AppState) -> Option<(String, u32)> {
-    let digest_idx = match dashboard_row_kind_at(state, state.selected_index)? {
-        DashboardRowKind::Digest(i) => i,
-        _ => return None,
-    };
-    let refs = dashboard_digest_pr_refs(state, digest_idx);
-    if refs.is_empty() {
-        let fallback = state.config.repos.first().map(String::as_str)?;
-        return dashboard_digest_body(state, digest_idx).and_then(|body| {
-            digest_nav::pr_ref_at_source_line(&body, state.detail_scroll_line as usize, fallback)
-        });
-    }
-    let idx = if state.dashboard_digest_pr_digest_idx == Some(digest_idx) {
-        state
-            .dashboard_digest_pr_index
-            .min(refs.len().saturating_sub(1))
-    } else {
-        0
-    };
-    refs.get(idx).cloned()
-}
-
-fn cycle_dashboard_digest_pr(state: &mut AppState, delta: isize) -> Option<String> {
-    let digest_idx = match dashboard_row_kind_at(state, state.selected_index)? {
-        DashboardRowKind::Digest(i) => i,
-        _ => return None,
-    };
-    let refs = dashboard_digest_pr_refs(state, digest_idx);
-    if refs.is_empty() {
-        return None;
-    }
-    if state.dashboard_digest_pr_digest_idx != Some(digest_idx) {
-        state.dashboard_digest_pr_digest_idx = Some(digest_idx);
-        state.dashboard_digest_pr_index = 0;
-    }
-    let len = refs.len() as isize;
-    let next = (state.dashboard_digest_pr_index as isize + delta).rem_euclid(len) as usize;
-    state.dashboard_digest_pr_index = next;
-    let (repo, number) = &refs[next];
-    Some(format!(
-        "digest PR {}/{}: {repo}#{number} (Enter/p open)",
-        next + 1,
-        refs.len()
-    ))
-}
-
-enum JumpTarget {
-    Pr { repo: String, number: u32 },
-}
-
-fn jump_target_from_state(state: &AppState) -> Option<JumpTarget> {
-    match state.tab {
-        Tab::Dashboard => match dashboard_row_kind_at(state, state.selected_index)? {
-            DashboardRowKind::Digest(_) => selected_dashboard_digest_pr(state)
-                .map(|(repo, number)| JumpTarget::Pr { repo, number }),
-            _ => None,
-        },
-        Tab::Prs => {
-            let prs = state.sorted_filtered_prs();
-            let p = prs.get(state.selected_index)?;
-            Some(JumpTarget::Pr {
-                repo: p.repo.clone(),
-                number: p.number,
-            })
-        }
-        _ => None,
-    }
-}
-
 fn list_len(s: &AppState) -> usize {
     match s.tab {
         Tab::Chat => s.chat_lines.len().max(1),
-        Tab::Dashboard => dashboard_rows(s).len().max(1),
-        Tab::Prs => s.sorted_filtered_prs().len().max(1),
         Tab::Approvals => s.approvals.len().max(1),
         Tab::Logs => s.filtered_logs().len().max(1),
         Tab::Config => 4,
@@ -1127,59 +795,6 @@ fn scroll_list_selection(s: &mut AppState, list_state: &mut ListState, delta: i3
         s.selected_index = next;
         s.reset_detail_scroll();
         list_state.select(Some(s.selected_index));
-    }
-}
-
-async fn maybe_request_pr_overview(state: &SharedState, engine: &Arc<Engine>) {
-    let (repo, number, key) = {
-        let s = state.read().await;
-        if s.tab != Tab::Prs || !s.github_ok {
-            return;
-        }
-        let filtered = s.sorted_filtered_prs();
-        let Some(pr) = filtered.get(s.selected_index) else {
-            return;
-        };
-        let key = AppState::pr_overview_key(&pr.repo, pr.number);
-        if s.pr_overview_cache.contains_key(&key) || s.pr_overview_fetching.as_ref() == Some(&key) {
-            return;
-        }
-        (pr.repo.clone(), pr.number, key)
-    };
-    {
-        let mut s = state.write().await;
-        if s.pr_overview_cache.contains_key(&key) {
-            return;
-        }
-        s.pr_overview_fetching = Some(key);
-    }
-    engine.fetch_pr_overview(repo, number).await;
-}
-
-async fn jump_to_pr_from_context(state: &SharedState, list_state: &mut ListState) {
-    let target = {
-        let s = state.read().await;
-        jump_target_from_state(&s)
-    };
-    let Some(target) = target else {
-        return;
-    };
-    let mut s = state.write().await;
-    let (ok, ok_msg, fail_msg) = match target {
-        JumpTarget::Pr { repo, number } => {
-            let ok = s.jump_to_pr(&repo, number);
-            (
-                ok,
-                format!("PRs {repo}#{number}"),
-                format!("PR {repo}#{number} not in store — refresh store or triage in chat"),
-            )
-        }
-    };
-    if ok {
-        list_state.select(Some(s.selected_index));
-        s.status = ok_msg;
-    } else {
-        s.status = fail_msg;
     }
 }
 
@@ -1377,7 +992,7 @@ fn draw_ui(frame: &mut ratatui::Frame, state: &AppState, list_state: &mut ListSt
 fn tab_header_label(state: &AppState, tab: Tab) -> String {
     match tab {
         Tab::Approvals if !state.approvals.is_empty() => {
-            format!("3 Approvals({})", state.approvals.len())
+            format!("1 Approvals({})", state.approvals.len())
         }
         _ => tab.label().to_string(),
     }
@@ -1462,21 +1077,6 @@ fn draw_hints(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: Them
                 )
             }
         }
-        Tab::Dashboard => {
-            "r: refresh store  m: PRs  c: chat  Enter/p: open PR  n/N: cycle PR  z: fold list  Z: fold digest  {/}: detail scroll".into()
-        }
-        Tab::Prs => return frame.render_widget(
-            Paragraph::new(theme::hint_bar(
-                th,
-                &format!(
-                    "filter: {} (/)  sort: {} (s)  t: triage  o: refresh  p: focus PR  j/k scroll  q: quit",
-                    state.pr_filter.label(),
-                    state.pr_sort.label()
-                ),
-            ))
-            .style(Style::default().bg(th.title_bg)),
-            area,
-        ),
         Tab::Approvals => "y: approve (runs tool)  n: deny  q: quit".into(),
         Tab::Logs => return frame.render_widget(
             Paragraph::new(theme::hint_bar(
@@ -1506,58 +1106,6 @@ fn draw_list(
 ) {
     let items: Vec<ListItem> = match state.tab {
         Tab::Chat => vec![ListItem::new("use chat pane →")],
-        Tab::Dashboard => dashboard_rows(state)
-            .into_iter()
-            .map(|row| {
-                let style = match row.kind {
-                    DashboardRowKind::SectionHeader(_) => {
-                        Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
-                    }
-                    _ => Style::default().fg(th.text),
-                };
-                ListItem::new(Line::from(Span::styled(row.label, style)))
-            })
-            .collect(),
-        Tab::Prs => {
-            let filtered = state.sorted_filtered_prs();
-            if filtered.is_empty() {
-                vec![ListItem::new(format!(
-                    "No PRs ({}) — configure repos: and refresh",
-                    state.pr_filter.label()
-                ))]
-            } else {
-                filtered
-                    .into_iter()
-                    .map(|p| {
-                        ListItem::new(Line::from(vec![
-                            Span::styled(
-                                format!("{} ", theme::pr_ci_glyph(&p.ci_summary)),
-                                theme::ci_status_style(th, &p.ci_summary),
-                            ),
-                            Span::styled(
-                                format!("{} ", theme::pr_review_glyph(&p.review_summary)),
-                                theme::review_status_style(th, &p.review_summary),
-                            ),
-                            Span::styled(
-                                format!("#{} ", p.number),
-                                Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(trunc(&p.title, 24), Style::default().fg(th.text)),
-                            Span::styled(format!(" [{}] ", p.repo), Style::default().fg(th.muted)),
-                            if p.triage_note.is_some() {
-                                Span::styled("◆ ", Style::default().fg(th.accent_dim))
-                            } else {
-                                Span::raw("")
-                            },
-                            Span::styled(
-                                p.ci_summary.clone(),
-                                theme::ci_status_style(th, &p.ci_summary),
-                            ),
-                        ]))
-                    })
-                    .collect()
-            }
-        }
         Tab::Approvals => {
             if state.approvals.is_empty() {
                 vec![ListItem::new("No pending approvals")]
@@ -1600,7 +1148,6 @@ fn draw_list(
         Tab::Config => {
             let mut items = vec![
                 ListItem::new(format!("config: {}", state.config_path)),
-                ListItem::new(format!("repos: {}", state.config.repos.join(", "))),
                 ListItem::new(format!("storage: {:?}", state.config.storage.backend)),
                 ListItem::new(format!("llm: {}", state.config.llm.model)),
                 ListItem::new(format!(
@@ -1706,82 +1253,6 @@ fn detail_body(state: &AppState) -> (String, bool) {
             text: String::new(),
             markdown: false,
         },
-        Tab::Dashboard => match dashboard_row_kind_at(state, state.selected_index) {
-            Some(DashboardRowKind::Digest(idx)) => {
-                let raw = dashboard_digest_body(state, idx)
-                    .unwrap_or_else(|| "No digest in store yet.".into());
-                let has_md = idx == 0
-                    || state
-                        .digest_history
-                        .get(idx)
-                        .is_some_and(|meta| state.digest_bodies.contains_key(&meta.date));
-                DetailBody {
-                    text: if has_md {
-                        markdown::filter_folded_markdown_sections(
-                            &raw,
-                            &state.digest_folded_sections,
-                            "Z",
-                        )
-                    } else {
-                        raw
-                    },
-                    markdown: has_md,
-                }
-            }
-            Some(DashboardRowKind::SectionHeader(_)) => DetailBody {
-                text: "Select an item in this section, or press **z** to fold/unfold.".into(),
-                markdown: true,
-            },
-            _ => DetailBody {
-                text: "Press **r** to refresh store.".into(),
-                markdown: true,
-            },
-        },
-        Tab::Prs => {
-            if let Some(overview) = state.selected_pr_overview() {
-                let triage = state
-                    .sorted_filtered_prs()
-                    .get(state.selected_index)
-                    .and_then(|p| p.triage_note.as_deref())
-                    .map(|n| format!("\n\n## Triage note\n\n{n}"))
-                    .unwrap_or_default();
-                DetailBody {
-                    text: format!("{overview}{triage}"),
-                    markdown: true,
-                }
-            } else if state.selected_pr_overview_loading() {
-                DetailBody {
-                    text: "_Loading `pr_get_overview`…_".into(),
-                    markdown: true,
-                }
-            } else {
-                DetailBody {
-                    text: state
-                        .sorted_filtered_prs()
-                        .get(state.selected_index)
-                        .map(|p| {
-                            format!(
-                                "# #{} {}\n\n\
-                                | Field | Value |\n|---|---|\n\
-                                | Author | @{} |\n\
-                                | Repo | {} |\n\
-                                | CI | {} |\n\
-                                | Review | {} |\n\n\
-                                ## Triage\n\n{}",
-                                p.number,
-                                p.title,
-                                p.author,
-                                p.repo,
-                                p.ci_summary,
-                                p.review_summary,
-                                p.triage_note.as_deref().unwrap_or("_No triage yet._")
-                            )
-                        })
-                        .unwrap_or_else(|| "Select a PR".into()),
-                    markdown: true,
-                }
-            }
-        }
         Tab::Approvals => DetailBody {
             text: state
                 .selected_approval()

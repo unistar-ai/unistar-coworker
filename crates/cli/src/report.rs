@@ -8,19 +8,15 @@ use super::terminal::{emit_json, err_prefix, render_markdown, use_color_stdout};
 
 pub(crate) async fn run_report(
     config: &Config,
-    store: &dyn store::Store,
+    _store: &dyn store::Store,
     kind: ReportKind,
 ) -> Result<()> {
-    use coworker_core::agent::oncall::build_handoff_markdown;
-
     let json = match &kind {
-        ReportKind::Oncall { json } | ReportKind::Ci { json, .. } => *json,
+        ReportKind::Ci { json, .. } => *json,
     };
     let result: Result<(&'static str, String, Option<u32>)> = match kind {
-        ReportKind::Oncall { json: _ } => build_handoff_markdown(store)
-            .await
-            .map(|md| ("oncall", md, None)),
         ReportKind::Ci {
+            repo,
             since_days,
             json: _,
         } => {
@@ -28,6 +24,7 @@ pub(crate) async fn run_report(
             coworker_core::agent::ci_efficiency::build_ci_efficiency_markdown(
                 config,
                 github.as_ref(),
+                &repo,
             )
             .await
             .map(|md| ("ci", md, Some(since_days)))
@@ -43,8 +40,6 @@ pub(crate) async fn run_report(
                 emit_json(obj);
             } else {
                 let tty = use_color_stdout();
-                // Render markdown (headings cyan, code dim, rules) on a TTY for a
-                // cleaner handoff pack; keep raw markdown when piped.
                 println!("{}", render_markdown(&md, tty));
             }
         }

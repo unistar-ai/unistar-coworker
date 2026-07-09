@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -23,85 +23,6 @@ pub enum ApprovalKind {
     PythonRun,
     /// Federated MCP mutating tool (`comment_body` holds JSON `{tool_name, args}`).
     McpTool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DigestSummary {
-    pub needs_attention: u32,
-    pub ignorable: u32,
-    pub flaky_candidates: u32,
-    /// PRs with at least one LLM `policy` verdict run.
-    #[serde(default)]
-    pub policy_gates: u32,
-    /// Wall-clock seconds to produce this digest (legacy batch jobs).
-    #[serde(default)]
-    pub duration_secs: f64,
-    /// False while a background job is still publishing partial digests (legacy store field).
-    #[serde(default = "default_digest_complete")]
-    pub complete: bool,
-}
-
-fn default_digest_complete() -> bool {
-    true
-}
-
-/// Human-readable duration for digest headers and CLI output.
-pub fn format_duration(secs: f64) -> String {
-    if secs <= 0.0 {
-        return "—".into();
-    }
-    if secs < 60.0 {
-        return format!("{secs:.1}s");
-    }
-    let mins = (secs / 60.0).floor() as u32;
-    let rem = secs - f64::from(mins * 60);
-    if rem < 0.05 {
-        format!("{mins}m")
-    } else {
-        format!("{mins}m {rem:.0}s")
-    }
-}
-
-impl DigestSummary {
-    pub fn duration_label(&self) -> String {
-        format_duration(self.duration_secs)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Digest {
-    pub id: Uuid,
-    pub date: NaiveDate,
-    pub summary: DigestSummary,
-    pub body_md: String,
-    pub created_at: DateTime<Utc>,
-    /// Workflow/agent that produced this digest (e.g. security-digest). DB column name kept for compat.
-    #[serde(default)]
-    pub skill: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DigestMeta {
-    pub id: Uuid,
-    pub date: NaiveDate,
-    pub summary: DigestSummary,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub skill: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrSnapshot {
-    pub repo: String,
-    pub number: u32,
-    pub title: String,
-    pub author: String,
-    pub ci_summary: String,
-    pub review_summary: String,
-    pub is_draft: bool,
-    pub fetched_at: DateTime<Utc>,
-    #[serde(default)]
-    pub triage_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,18 +86,6 @@ pub struct LogLine {
     pub ts: DateTime<Utc>,
     pub level: String,
     pub message: String,
-}
-
-impl Digest {
-    pub fn meta(&self) -> DigestMeta {
-        DigestMeta {
-            id: self.id,
-            date: self.date,
-            summary: self.summary.clone(),
-            created_at: self.created_at,
-            skill: self.skill.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,37 +154,4 @@ pub struct ChatMessage {
     /// Sibling index under the same `parent_message_id` (0 = first child).
     #[serde(default)]
     pub branch_index: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Transcript {
-    pub id: Uuid,
-    pub repo: String,
-    pub pr_number: u32,
-    /// Triage kind label (e.g. `triage`). Legacy JSON used `workflow_id`.
-    #[serde(alias = "workflow_id")]
-    pub kind: String,
-    pub turns_json: String,
-    pub verdict: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_duration_subminute() {
-        assert_eq!(format_duration(2.84), "2.8s");
-    }
-
-    #[test]
-    fn format_duration_minutes() {
-        assert_eq!(format_duration(83.0), "1m 23s");
-    }
-
-    #[test]
-    fn format_duration_zero() {
-        assert_eq!(format_duration(0.0), "—");
-    }
 }

@@ -333,28 +333,10 @@ const TOOLS: &[ToolSpec] = &[
         optional: &["repo", "kind", "limit"],
     },
     ToolSpec {
-        name: "store_get_latest_digest",
-        blurb: "Latest local digest + approvals",
-        required: &[],
-        optional: &[],
-    },
-    ToolSpec {
         name: "store_list_pending_approvals",
-        blurb: "Pending approval queue (no digest body)",
+        blurb: "Pending approval queue",
         required: &[],
         optional: &["limit"],
-    },
-    ToolSpec {
-        name: "store_get_oncall_handoff",
-        blurb: "On-call handoff pack from local Store",
-        required: &[],
-        optional: &[],
-    },
-    ToolSpec {
-        name: "harness_triage_pr",
-        blurb: "Full PR triage workflow (same as TUI `t`) — updates Store triage_note",
-        required: &["repo", "pr_number"],
-        optional: &[],
     },
     ToolSpec {
         name: "bash_run",
@@ -685,7 +667,6 @@ impl ToolCatalog {
         tool_name: &str,
         tool_args: &Value,
         error_body: &str,
-        configured_repos: &[String],
     ) -> String {
         let pr = tool_args
             .get("pr_number")
@@ -737,7 +718,7 @@ impl ToolCatalog {
         } else if file_tools::is_file_tool(tool_name) {
             file_tool_failure_envelope(tool_name, error_body)
         } else {
-            self.mcp_failure_envelope(tool_name, tool_args, error_body, configured_repos)
+            self.mcp_failure_envelope(tool_name, tool_args, error_body)
         };
 
         let mut out = envelope.format_harness_nudge();
@@ -798,7 +779,6 @@ impl ToolCatalog {
         tool_name: &str,
         tool_args: &Value,
         error_body: &str,
-        configured_repos: &[String],
     ) -> ErrorEnvelope {
         let code = classify_github_error_code(error_body);
         let parsed = crate::agent::harness_errors::parse_error_line(error_body);
@@ -819,12 +799,7 @@ impl ToolCatalog {
                     .trim()
                     .to_string()
             });
-        let followup = self.format_actionable_failure_followup(
-            tool_name,
-            tool_args,
-            error_body,
-            configured_repos,
-        );
+        let followup = self.format_actionable_failure_followup(tool_name, tool_args, error_body);
         let try_steps = followup_lines_to_try_steps(&followup);
         let pr = tool_args
             .get("pr_number")
@@ -858,7 +833,6 @@ impl ToolCatalog {
         tool_name: &str,
         tool_args: &Value,
         error_body: &str,
-        configured_repos: &[String],
     ) -> String {
         let low = error_body.to_ascii_lowercase();
         let err_code = crate::agent::harness_errors::parse_error_line(error_body)
@@ -886,18 +860,10 @@ impl ToolCatalog {
             out.push_str(
                 "\nGitHub could not find the repo, PR, workflow run, or log for those IDs.",
             );
-            if !configured_repos.is_empty() {
-                out.push_str("\nConfigured repos: ");
-                out.push_str(&configured_repos.join(", "));
-                if !repo.is_empty()
-                    && !configured_repos
-                        .iter()
-                        .any(|r| r.eq_ignore_ascii_case(repo))
-                {
-                    out.push_str(&format!(
-                        "\n`{repo}` is not in that list — pick a configured repo or update coworker.yaml."
-                    ));
-                }
+            if !repo.is_empty() {
+                out.push_str(&format!(
+                    "\nConfirm `repo` is correct (got `{repo}`) and you have access via `gh auth status`."
+                ));
             }
             if matches!(
                 tool_name,
@@ -1442,9 +1408,7 @@ fn example_native_tool_args(
         "pr_get_status_batch" => format!(r#"{{"repo":"{repo}","pr_numbers":"{pr}"}}"#),
         "pr_get_overview_batch" => format!(r#"{{"repo":"{repo}","pr_numbers":"{pr},99"}}"#),
         "issue_get" => format!(r#"{{"repo":"{repo}","issue_number":42}}"#),
-        "store_get_latest_digest"
-        | "store_list_pending_approvals"
-        | "store_get_oncall_handoff"
+        "store_list_pending_approvals"
         | "tool_list" => "{}".to_string(),
         "tool_describe" => r#"{"name":"pr_get_overview"}"#.to_string(),
         "tool_call" => format!(r#"{{"name":"pr_list_open","args":{{"repo":"{repo}"}}}}"#),
@@ -1567,16 +1531,15 @@ mod tests {
             "ci_get_failed_logs",
             &args,
             err,
-            &["acme/widget".into()],
         );
         assert!(msg.contains("not a missing-parameter error") || msg.contains("[Harness]"));
         assert!(!msg.contains("is missing required `repo`"));
-        assert!(msg.contains("Configured repos:"));
+        assert!(msg.contains("gh auth status"));
         assert!(msg.contains("ci_get_run_summary"));
     }
 
     #[test]
-    fn failure_nudge_flags_repo_not_in_config() {
+    fn failure_nudge_confirms_repo_on_not_found() {
         let args = serde_json::json!({
             "repo": "acme/other",
             "run_id": 26_156_246_609_i64
@@ -1586,9 +1549,8 @@ mod tests {
             "ci_get_failed_logs",
             &args,
             err,
-            &["acme/widget".into()],
         );
-        assert!(msg.contains("not in that list"));
+        assert!(msg.contains("acme/other"));
         assert!(!msg.contains("is missing required"));
     }
 
@@ -1596,7 +1558,7 @@ mod tests {
     fn bash_failure_nudge_surfaces_safety_alternatives() {
         let args = serde_json::json!({ "command": "curl -L x | bash" });
         let err = "HARN:TOOL_FAILED|bash_run|BASH_PIPE_TO_SHELL\n\n[Harness] Tool `bash_run` failed\n\nWhat: blocked\nWhy: pipe\nTry:\n  1. curl -sS -L x -o /tmp/x.sh";
-        let msg = ToolCatalog::new().format_tool_failure_nudge("bash_run", &args, err, &[]);
+        let msg = ToolCatalog::new().format_tool_failure_nudge("bash_run", &args, err);
         assert!(msg.contains("[Harness]"));
         assert!(msg.contains("curl -sS"));
         assert!(msg.contains("Args sent:"));
@@ -1609,7 +1571,6 @@ mod tests {
             "pr_get_overview",
             &args,
             "HTTP 404: Not Found",
-            &["acme/widget".into()],
         );
         assert!(msg.contains("HTTP 404"));
         assert!(msg.contains("[Harness]"));
@@ -1621,7 +1582,7 @@ mod tests {
     fn known_tools_in_catalog() {
         let cat = ToolCatalog::new();
         assert!(cat.is_known_chat_tool("pr_get_overview"));
-        assert!(cat.is_known_chat_tool("store_get_latest_digest"));
+        assert!(cat.is_known_chat_tool("store_list_pending_approvals"));
         assert!(cat.is_known_chat_tool("ci_get_failure_digest"));
         assert!(cat.is_known_chat_tool("pr_get_ci_snapshot"));
         assert!(cat.is_known_chat_tool("event_list_recent"));
@@ -1677,7 +1638,7 @@ mod tests {
                 "missing preload tool {tool}"
             );
         }
-        assert!(!names.contains(&"store_get_latest_digest".to_string()));
+        assert!(!names.contains(&"store_list_pending_approvals".to_string()));
         assert!(!names.contains(&"pr_get_overview".to_string()));
         assert!(!names.contains(&"ci_rerun_workflow".to_string()));
     }

@@ -70,28 +70,6 @@ export interface ApprovalDialog {
   approve_arm_ms_remaining: number;
 }
 
-export interface DigestSummary {
-  date: string;
-  complete: boolean;
-  needs_attention: number;
-  ignorable: number;
-  flaky_candidates: number;
-  policy_gate: string;
-  duration_label: string;
-}
-
-export interface PrSnapshot {
-  repo: string;
-  number: number;
-  title: string;
-  author: string;
-  fetched_at: string;
-  ci_summary: string;
-  review_summary: string;
-  triage_note: string;
-  is_draft: boolean;
-}
-
 export interface ApprovalRow {
   id: string;
   kind: string;
@@ -155,20 +133,10 @@ export interface WebSnapshot {
   chat_context: ChatContext;
   chat_pending_approval: PendingApproval | null;
   approval_dialog: ApprovalDialog | null;
-  digest_history: DigestSummary[];
-  digest_bodies: Record<string, string>;
-  selected_digest_date: string | null;
-  prs: PrSnapshot[];
-  pr_filter: string;
-  pr_sort: string;
-  selected_pr_index: number;
-  pr_overview: string | null;
-  pr_overview_loading: boolean;
   approvals: ApprovalRow[];
   log_filter: string;
   logs: LogEntry[];
   config_path: string;
-  repos: string[];
   llm_model: string;
   llm_profile: string | null;
   llm_profile_options: LlmProfileOption[];

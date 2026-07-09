@@ -43,13 +43,11 @@ pub(crate) async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<
         }
         StoreCommands::Compact {
             audit_days,
-            digest_keep,
             dry_run,
         } => {
             let opts = CompactOptions {
                 audit_days,
-                digest_keep,
-                ..CompactOptions::default()
+                dry_run,
             };
             let path = config.storage_path();
             let stats = compact(
@@ -89,8 +87,6 @@ pub(crate) fn render_migrate_summary(stats: &store::MigrateStats, tty: bool) -> 
     table(
         &["category", "count"],
         &[
-            vec!["digests".into(), stats.digests.to_string()],
-            vec!["pr_snapshots".into(), stats.pr_snapshots.to_string()],
             vec!["approvals".into(), stats.approvals.to_string()],
             vec!["backport_items".into(), stats.backport_items.to_string()],
             vec!["chat_messages".into(), stats.chat_messages.to_string()],
@@ -108,7 +104,7 @@ pub(crate) fn render_compact_summary(
     let rows = [
         ("audit entries", stats.audit_entries_removed),
         ("audit files", stats.audit_files_removed),
-        ("digests", stats.digests_removed),
+        ("legacy artifacts", stats.legacy_artifacts_removed),
         ("legacy workflow runs", stats.legacy_workflow_runs_removed),
     ];
     let max = rows.iter().map(|(_, n)| *n).max().unwrap_or(0).max(1);

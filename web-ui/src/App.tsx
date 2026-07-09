@@ -10,8 +10,6 @@ import { useToast } from "./components/ToastProvider";
 
 const TAB_LABELS: Record<string, string> = {
   chat: "Chat",
-  dashboard: "Dashboard",
-  prs: "PRs",
   approvals: "Approvals",
   logs: "Logs",
   config: "Config",

@@ -20,13 +20,6 @@ use sqlite::SqliteStore;
 
 #[async_trait]
 pub trait Store: Send + Sync {
-    async fn save_digest(&self, digest: &Digest) -> Result<()>;
-    async fn latest_digest(&self) -> Result<Option<Digest>>;
-    async fn list_digests(&self, limit: usize) -> Result<Vec<Digest>>;
-
-    async fn upsert_pr_snapshot(&self, snap: &PrSnapshot) -> Result<()>;
-    async fn list_pr_snapshots(&self, repo: Option<&str>) -> Result<Vec<PrSnapshot>>;
-
     async fn push_approval(&self, item: &Approval) -> Result<()>;
     async fn get_pending_approval(&self, id: &Uuid) -> Result<Approval>;
     async fn decide_approval(&self, id: &Uuid, approve: bool) -> Result<()>;
@@ -78,9 +71,6 @@ pub trait Store: Send + Sync {
         }
         Ok(path)
     }
-
-    async fn save_transcript(&self, t: &Transcript) -> Result<()>;
-    async fn list_transcripts(&self, limit: usize) -> Result<Vec<Transcript>>;
 
     async fn list_chat_sessions(&self, limit: usize) -> Result<Vec<ChatSession>>;
 }

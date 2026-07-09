@@ -14,7 +14,6 @@ use crate::store::{LogLine, Store};
 pub mod approvals;
 pub mod chat;
 pub mod embedded_prompts;
-pub mod playbook;
 pub mod prompt;
 pub mod rules;
 pub mod skill;
@@ -24,7 +23,7 @@ pub use skill_routing::SkillRegistry;
 
 pub use prompt::{
     compose_chat_system_prompt, format_session_context_message,
-    load_chat_prompt_bundle_for_session, load_classify_skills_for_triage, SESSION_CONTEXT_PREFIX,
+    load_chat_prompt_bundle_for_session, SESSION_CONTEXT_PREFIX,
 };
 pub use skill::{load_markdown_spec, load_skill_with_base, SkillSpec};
 
@@ -153,130 +152,6 @@ impl Engine {
         self.refresh_store().await?;
         let _ = self.events.send(AppEvent::StatusMessage(msg.clone()));
         Ok(msg)
-    }
-
-    /// Lazy-load PR overview for the PRs tab Detail pane (MCP Resource, fallback to tool).
-    pub async fn fetch_pr_overview(&self, repo: String, pr_number: u32) {
-        use crate::github::helpers::{gh_tool, pr_overview_resource_uri, read_resource};
-
-        use serde_json::json;
-
-        let key = crate::app::AppState::pr_overview_key(&repo, pr_number);
-        let uri = pr_overview_resource_uri(&repo, pr_number);
-        let body = match read_resource(self.github.as_ref(), &uri).await {
-            Ok(text) => text,
-            Err(resource_err) => {
-                tracing::debug!(
-                    "resources/read failed for {uri} ({resource_err}); falling back to pr_get_overview"
-                );
-                match gh_tool(
-                    self.github.as_ref(),
-                    "pr_get_overview",
-                    json!({ "repo": repo, "pr_number": pr_number }),
-                )
-                .await
-                {
-                    Ok(text) => text,
-                    Err(e) => format!("## Overview unavailable\n\n{e}"),
-                }
-            }
-        };
-        {
-            let mut s = self.state.write().await;
-            s.pr_overview_fetching = None;
-            s.pr_overview_cache.insert(key, body);
-        }
-        let _ = self
-            .events
-            .send(AppEvent::PrOverviewReady { repo, pr_number });
-    }
-
-    /// Background CI triage for one PR (PRs tab `t`).
-    pub fn spawn_triage_pr(self: &Arc<Self>, repo: String, pr_number: u32) {
-        let engine = Arc::clone(self);
-        tokio::spawn(async move {
-            let label = format!("triage:{repo}#{pr_number}");
-            let _ = engine.events.send(AppEvent::BackgroundTaskStarted {
-                label: label.clone(),
-            });
-            let result = engine.triage_pr_for_number(&repo, pr_number).await;
-            let (ok, message) = match result {
-                Ok(outcome) => (true, outcome.full_note()),
-                Err(e) => (false, e.to_string()),
-            };
-            if ok {
-                if let Err(e) = engine.refresh_store().await {
-                    engine.emit_log("warn", format!("post-triage hydrate: {e}"));
-                }
-            }
-            let _ = engine
-                .events
-                .send(AppEvent::BackgroundTaskFinished { label, ok, message });
-        });
-    }
-
-    async fn triage_pr_for_number(
-        &self,
-        repo: &str,
-        pr_number: u32,
-    ) -> Result<crate::agent::triage::TriageOutcome> {
-        use crate::agent::parse::ParsedPrLine;
-        use crate::agent::triage::triage_pr;
-        use crate::github::helpers::gh_tool;
-
-        let classify_skills = load_classify_skills_for_triage(&[])?;
-
-        let pr_line = {
-            let s = self.state.read().await;
-            s.prs
-                .iter()
-                .find(|p| p.repo == repo && p.number == pr_number)
-                .map(|p| ParsedPrLine {
-                    number: p.number,
-                    title: p.title.clone(),
-                    author: p.author.clone(),
-                    ci: p.ci_summary.clone(),
-                    review: p.review_summary.clone(),
-                    is_draft: p.is_draft,
-                })
-        };
-
-        let pr_line = if let Some(p) = pr_line {
-            p
-        } else {
-            use crate::agent::parse::parse_pr_line;
-
-            let list_text = gh_tool(
-                self.github.as_ref(),
-                "pr_list_open",
-                serde_json::json!({ "repo": repo, "limit": 50 }),
-            )
-            .await?;
-            list_text
-                .lines()
-                .find_map(|line| {
-                    let p = parse_pr_line(line)?;
-                    (p.number == pr_number).then_some(p)
-                })
-                .ok_or_else(|| {
-                    crate::error::CoworkerError::Workflow(format!(
-                        "PR #{pr_number} not found in {repo}"
-                    ))
-                })?
-        };
-
-        let config = self.config.read().expect("config lock").clone();
-        triage_pr(
-            &config,
-            self.github.as_ref(),
-            self.llm.as_ref(),
-            self.store.as_ref(),
-            &classify_skills,
-            repo,
-            &pr_line,
-            Some(&self.events),
-        )
-        .await
     }
 
     pub fn spawn_background(self: Arc<Self>) {

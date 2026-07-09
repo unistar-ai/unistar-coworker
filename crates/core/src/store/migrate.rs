@@ -9,8 +9,6 @@ use super::sqlite::SqliteStore;
 
 #[derive(Debug, Default, Clone)]
 pub struct MigrateStats {
-    pub digests: u32,
-    pub pr_snapshots: u32,
     pub approvals: u32,
     pub backport_items: u32,
     pub chat_messages: u32,
@@ -85,25 +83,9 @@ async fn migrate_sqlite_to_json(
 async fn import_json_tree(json_root: &Path, dst: &dyn crate::store::Store) -> Result<MigrateStats> {
     use std::collections::HashMap;
 
-    use crate::store::{Approval, BackportQueueItem, ChatMessage, Digest, PrSnapshot};
+    use crate::store::{Approval, BackportQueueItem, ChatMessage};
 
     let mut stats = MigrateStats::default();
-
-    for digest in read_json_glob::<Digest>(&json_root.join("digests"), "json")? {
-        dst.save_digest(&digest).await?;
-        stats.digests += 1;
-    }
-
-    let pr_dir = json_root.join("pr_snapshots");
-    if pr_dir.is_dir() {
-        for entry in fs::read_dir(&pr_dir)? {
-            let map: HashMap<u32, PrSnapshot> = read_json_file(&entry?.path())?;
-            for snap in map.into_values() {
-                dst.upsert_pr_snapshot(&snap).await?;
-                stats.pr_snapshots += 1;
-            }
-        }
-    }
 
     let pending_path = json_root.join("approvals/pending.json");
     if pending_path.exists() {
@@ -141,16 +123,6 @@ async fn export_store_to_json(
 ) -> Result<MigrateStats> {
     let mut stats = MigrateStats::default();
 
-    for digest in src.list_digests(500).await? {
-        dst.save_digest(&digest).await?;
-        stats.digests += 1;
-    }
-
-    for snap in src.list_pr_snapshots(None).await? {
-        dst.upsert_pr_snapshot(&snap).await?;
-        stats.pr_snapshots += 1;
-    }
-
     for item in src.list_pending_approvals().await? {
         dst.push_approval(&item).await?;
         stats.approvals += 1;
@@ -185,18 +157,4 @@ fn read_jsonl_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).map_err(CoworkerError::from))
         .collect()
-}
-
-fn read_json_glob<T: serde::de::DeserializeOwned>(dir: &Path, ext: &str) -> Result<Vec<T>> {
-    if !dir.is_dir() {
-        return Ok(vec![]);
-    }
-    let mut out = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|e| e == ext) {
-            out.push(read_json_file(&path)?);
-        }
-    }
-    Ok(out)
 }

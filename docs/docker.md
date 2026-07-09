@@ -35,7 +35,7 @@ Open [http://127.0.0.1:8787](http://127.0.0.1:8787).
 | Mount | Purpose |
 |-------|---------|
 | `/config/coworker.yaml` | Config file (pass `--config /config/coworker.yaml`) |
-| `/data` | Store path (`storage.path` in config) — chat sessions, audit, digests |
+| `/data` | Store path (`storage.path` in config) — chat sessions, audit, approvals |
 | `/workspace` | Optional `chat.workspace` bind (read-only or read-write) |
 
 ### Example `coworker.yaml` for Docker
@@ -55,9 +55,6 @@ llm:
 github:
   gh_command: gh
   env: {}
-
-repos:
-  - owner/repo
 
 storage:
   path: /data

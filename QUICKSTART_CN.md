@@ -17,7 +17,7 @@
 3. 赋予执行权限：`chmod +x unistar-coworker`
 4. 启动 Ollama 并拉取 **25B+** 模型，例如 `ollama pull gemma4:26b-a4b` 或 `ollama pull qwen3.6:27b`（profile 示例见 [coworker.example.yaml](./coworker.example.yaml)）。
 5. 创建配置：`./unistar-coworker init --interactive`  
-   （非交互：`./unistar-coworker init --llm-url http://127.0.0.1:11434/v1` — 省略 `--repos` 即为纯 workspace。）
+   （非交互：`./unistar-coworker init --llm-url http://127.0.0.1:11434/v1`。）
 6. 健康检查：`./unistar-coworker doctor`
 7. 启动 Web UI：`./unistar-coworker serve`
 8. 浏览器打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)，在工作区内对话（配置项 `chat.workspace`）。
@@ -25,9 +25,9 @@
 ### 可选 — GitHub
 
 9. 配置 GitHub 认证：`export GH_TOKEN=...` 或在宿主机执行 `gh auth login`。
-10. 在 `coworker.yaml` 中添加 `repos:`（或重新运行带仓库的 `init --interactive`）。
+10. 使用 GitHub/CI：`gh auth login`，在对话里贴 PR 链接或写明 `owner/repo`。
 11. 在 chat 中试用 GitHub：`./unistar-coworker chat --once "汇总 owner/repo 的 open PR"`  
-    或调试单个 PR：`./unistar-coworker triage-pr --repo owner/repo --pr 42`
+    或用 chat：`./unistar-coworker chat --once "triage owner/repo 的 PR #42"`
 12. 阅读 `coworker.example.yaml` 或 [coworker.minimal.yaml](./coworker.minimal.yaml) 了解高级选项。
 
 ---

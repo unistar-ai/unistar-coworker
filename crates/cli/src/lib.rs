@@ -8,7 +8,6 @@ mod rpc;
 mod runtime;
 mod store;
 mod terminal;
-mod triage;
 mod upgrade_check;
 
 pub use args::run;

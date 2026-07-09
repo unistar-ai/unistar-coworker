@@ -3,7 +3,6 @@ import { apiPost } from "../../lib/api";
 
 export default function ConfigTab() {
   const configPath = useStore((s) => s.config_path);
-  const repos = useStore((s) => s.repos);
   const llmModel = useStore((s) => s.llm_model);
   const llmProfile = useStore((s) => s.llm_profile);
   const llmProfiles = useStore((s) => s.llm_profile_options);
@@ -34,21 +33,6 @@ export default function ConfigTab() {
         <code className="config-mono">
           {configPath || "(unknown)"}
         </code>
-      </div>
-
-      <div className="config-section">
-        <div className="config-section-title">Repos</div>
-        <div className="ctx-chip-row">
-          {repos.length ? (
-            repos.map((r) => (
-              <span key={r} className="ctx-tool-chip">
-                {r}
-              </span>
-            ))
-          ) : (
-            <span className="config-muted">none</span>
-          )}
-        </div>
       </div>
 
       <div className="config-section">

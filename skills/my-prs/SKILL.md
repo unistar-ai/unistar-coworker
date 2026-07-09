@@ -26,7 +26,7 @@ Do not invent author filters — pass `author` when the schema supports it.
 
 ## Workflow
 
-1. **List** — `pr_list_open` with author filter; single-repo from config or scan configured repos.
+1. **List** — `pr_list_open` with author filter; pass `repo` explicitly or name the repo in chat.
 2. **Batch status** — `pr_get_status_batch` on PR numbers (≤15).
 3. **Deep dive on failures** — `pr_get_overview_batch` (≤5) or `pr_get_ci_snapshot` / `pr_get_overview` on one hot PR.
 4. **Bucket** — CI failing → attention; review blocked → waiting; green + approved → ready.

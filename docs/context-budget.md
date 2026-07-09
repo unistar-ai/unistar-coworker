@@ -48,7 +48,7 @@ chat:
 | Strategy | Use when | Keeps |
 |----------|----------|--------|
 | **`code`** (default) | Workspace coding, tests, edits | Exit codes, errors, paths, edit targets |
-| **`ops`** | PR/CI triage, digests, MCP ops | `CI_KIND`, verdicts, PR numbers, digest excerpts |
+| **`ops`** | PR/CI triage, MCP ops | `CI_KIND`, verdicts, PR numbers, compact CI excerpts |
 | **`generic`** | Mixed / unknown | Short neutral summaries |
 
 `summary_model` lets compaction use a faster/cheaper profile (e.g. remote API) while the main chat stays on your local 25B+ model.

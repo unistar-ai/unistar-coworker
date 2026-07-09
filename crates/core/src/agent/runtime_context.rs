@@ -294,7 +294,6 @@ fn format_full_runtime_body(
 pub async fn build_message_focus_lines(
     _store: &dyn crate::store::Store,
     user_message: &str,
-    _configured_repos: &[String],
 ) -> Result<Vec<String>> {
     use crate::agent::chat_discovery::{extract_github_pr_link, message_looks_like_pr_task};
 

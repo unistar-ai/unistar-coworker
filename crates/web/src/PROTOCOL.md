@@ -48,19 +48,10 @@ Fields (see [`snapshot.rs`](./snapshot.rs) `WebSnapshot` for the authoritative l
 | `chat_context` | object | context panel payload (stats, tools, skills, messages) |
 | `chat_pending_approval` | object? | pending approval metadata |
 | `approval_dialog` | object? | approval modal payload |
-| `digest_history` | object[] | dashboard digest list |
-| `digest_bodies` | map<string,string> | date → digest markdown |
-| `selected_digest_date` | string? | |
-| `prs` | object[] | PR list |
-| `pr_filter` / `pr_sort` | string | |
-| `selected_pr_index` | usize | |
-| `pr_overview` | string? | selected PR overview markdown |
-| `pr_overview_loading` | bool | |
 | `approvals` | object[] | pending approvals |
 | `log_filter` | string | |
 | `logs` | object[] | recent log entries (≤ 200) |
 | `config_path` | string | |
-| `repos` | string[] | |
 | `llm_model` | string | |
 | `github_ok` / `llm_ok` | bool | connectivity probes |
 | `github_latency_ms` / `llm_latency_ms` | u128? | |
@@ -71,7 +62,7 @@ Fields (see [`snapshot.rs`](./snapshot.rs) `WebSnapshot` for the authoritative l
 ### 2. Live patch (`_type: "live"`)
 
 High-frequency (~100ms throttle) patch for streaming/tool progress. Avoids
-re-sending history/context/digest/PR/log payload.
+re-sending history/context/log payload.
 
 | Field | Type |
 |-------|------|

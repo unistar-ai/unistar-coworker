@@ -69,7 +69,7 @@
 | **安全** | GitHub harness / MCP mutating 须经 TUI/Web 审批（除非 `chat.auto_approve_mutations` 或 per-server `approval.mutating: auto`） |
 | **MCP 联邦** | `mcp.servers[]` 支持 stdio + HTTP、lazy 发现、mutating 审批、per-server skills、取消进行中的调用 |
 | **GithubHarness** | 可选进程内 `gh` 调用 GitHub/CI；payload 有 cap |
-| **TUI** | Dashboard、PR 列表、审批、日志、配置、flaky、release、issues、全屏聊天 |
+| **TUI** | 聊天、审批、日志、配置、全屏聊天 |
 | **Web UI** | `serve` 浏览器聊天、会话、明暗主题、带来源标签的流式工具/reasoning 卡片、审批弹窗、Markdown 导出 |
 | **Store** | JSON（默认）或 SQLite：digest、快照、flaky 账本、聊天会话、审计日志；`store migrate` 与 `store compact` 命令 |
 
@@ -112,7 +112,7 @@ cargo build --release --features embed-web-ui
 # 可选 GitHub：
 export GH_TOKEN=ghp_...   # 或 gh auth login
 ./target/release/unistar-coworker chat --once "汇总 acme/widget 的 open PR" --json
-./target/release/unistar-coworker triage-pr --repo acme/widget --pr 42
+./target/release/unistar-coworker chat --once "triage open PRs in acme/widget"
 ```
 
 ---
@@ -162,14 +162,9 @@ cargo run --release
 | 键 | 页 |
 |----|-----|
 | `0` / `?` | Chat |
-| `1` | Dashboard |
-| `2` | PR 列表 |
-| `3` | 审批（`y` / `n`） |
-| `4` | 日志 |
-| `5` | 配置（github + `mcp[id]` 状态） |
-| `6` | Flaky |
-| `7` | Release |
-| `8` | Issues |
+| `1` | 审批（`y` / `n`） |
+| `2` | 日志 |
+| `3` | 配置（GitHub + `mcp[id]` 状态，`R` 重探测） |
 
 `Tab` / `Shift+Tab` 切换标签 · `r` 刷新 store · `q` 退出 · `Esc` 取消当前 chat 轮次。
 
@@ -256,11 +251,9 @@ GitHub / MCP mutating 工具进 **审批** 队列（除非 `chat.auto_approve_mu
 | 默认 | TUI |
 | `serve [--bind ADDR]` | Web UI + API + WebSocket |
 | `chat [--once MSG] [--session UUID] [--list-sessions]` | 交互或单次聊天 |
-| `triage-pr --repo O/R --pr N` | 单 PR triage 调试 |
-| `report oncall` | 本地 store 生成的 on-call 交接包（无需 MCP） |
-| `report ci [--since-days 7]` | CI 效率报告（需 MCP） |
+| `report ci --repo owner/name [--since-days 7] [--json]` | CI 效率报告（需 GitHub harness + `--repo`） |
 | `store migrate --from json --to sqlite --source DIR --dest FILE` | 迁移 store 后端 |
-| `store compact [--audit-days 90] [--digest-keep 30]` | 清理旧审计与 digest |
+| `store compact [--audit-days 90] [--dry-run]` | 清理旧审计与遗留 store 文件 |
 | `skills list` | 打印 skill 目录 |
 
 ### GitHub 工具
@@ -280,9 +273,6 @@ Meta：`tool_search`、`tool_list`、`tool_describe`、`tool_call`、`resource_r
 从 [coworker.example.yaml](./coworker.example.yaml) 复制。加载路径：当前目录或 `~/.config/unistar-coworker/coworker.yaml`（均已 gitignore）。
 
 ```yaml
-repos:
-  - acme/widget
-
 github:
   gh_command: gh
   timeout_secs: 120
@@ -354,7 +344,7 @@ cargo run --release -- store migrate --from json --to sqlite \
 
 ```bash
 cargo run --release -- store compact            # 默认：审计 90d、保留 30 个 digest
-cargo run --release -- store compact --audit-days 180 --digest-keep 60
+cargo run --release -- store compact --audit-days 180 --dry-run
 ```
 
 ---
@@ -365,7 +355,7 @@ cargo run --release -- store compact --audit-days 180 --digest-keep 60
 
 | 集成 | 配置 | 文档 |
 |------|------|------|
-| **GitHub / CI harness** | `github:`、`repos:`、GitHub ops skills | [skills/github-ops-pack/README.md](skills/github-ops-pack/README.md) |
+| **GitHub / CI harness** | `github:`、GitHub ops skills | [skills/github-ops-pack/README.md](skills/github-ops-pack/README.md) |
 | **第三方 MCP** | `mcp.servers[]`（Slack、HTTP、filesystem 等） | [docs/mcp-recipes.md](docs/mcp-recipes.md) |
 
 编写 skill：[skills/_base/SKILL_TEMPLATE.md](skills/_base/SKILL_TEMPLATE.md)。本地模型：[docs/local-models.md](docs/local-models.md)。上下文预算：[docs/context-budget.md](docs/context-budget.md)。

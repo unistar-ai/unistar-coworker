@@ -3,23 +3,8 @@ use std::path::{Path, PathBuf};
 use crate::config::ChatToolMode;
 use crate::error::Result;
 
-use super::skill::{
-    load_skills, load_skills_from_refs, skill_body_for_prompt, PromptSpec, SkillSpec,
-};
+use super::skill::{skill_body_for_prompt, PromptSpec, SkillSpec};
 use super::skill_routing::SkillRegistry;
-
-/// Classify output contract — harness field limits (not domain technique).
-const CLASSIFY_OUTPUT_CONTRACT: &str = "\
-You triage CI failures for a PR. Classify each failure and explain it clearly.\n\
-\n\
-Always fill ALL fields with specific, actionable content from the logs. Keep responses concise:\n\
-- reason: one line, ≤120 characters\n\
-- diagnosis: max 2 sentences, ≤320 characters — what failed, log evidence, merge impact\n\
-- recommended_action: one sentence, ≤160 characters — concrete next step\n\
-- test_name: failing test if identifiable\n\
-\n\
-You may receive one page of logs at a time; prior pages are summarized, not repeated. \
-If inconclusive on this page, use verdict unknown and fill page_summary for the next page.";
 
 /// Prefix for the per-session runtime block (injected as a user message, not system).
 pub const SESSION_CONTEXT_PREFIX: &str = "[session context]";
@@ -100,19 +85,6 @@ pub fn format_session_context_message(runtime_context: &str) -> String {
     format!("{SESSION_CONTEXT_PREFIX}\n{trimmed}")
 }
 
-pub fn compose_classify_prompt(playbook_prefix: &str, skills: &[SkillSpec]) -> String {
-    let mut parts = Vec::new();
-    if !playbook_prefix.is_empty() {
-        parts.push(playbook_prefix.trim().to_string());
-    }
-    let techniques = join_skills(skills);
-    if !techniques.is_empty() {
-        parts.push(techniques);
-    }
-    parts.push(CLASSIFY_OUTPUT_CONTRACT.to_string());
-    parts.join("\n\n")
-}
-
 pub fn default_chat_prompt_path() -> PathBuf {
     PathBuf::from("prompts/chat.md")
 }
@@ -191,22 +163,6 @@ pub fn load_chat_prompt_bundle_for_session(
         },
         registry,
     ))
-}
-
-pub fn load_classify_skills_for_triage(explicit: &[PathBuf]) -> Result<Vec<SkillSpec>> {
-    if explicit.is_empty() {
-        load_classify_skills_from_refs(&[])
-    } else {
-        load_skills(explicit)
-    }
-}
-
-pub fn load_classify_skills_from_refs(refs: &[String]) -> Result<Vec<SkillSpec>> {
-    if refs.is_empty() {
-        load_skills(&[PathBuf::from("skills/ci-triage/SKILL.md")])
-    } else {
-        load_skills_from_refs(refs)
-    }
 }
 
 #[cfg(test)]
@@ -399,28 +355,6 @@ mod tests {
         let out = join_skills(&skills);
         assert!(!out.contains("Tool chains"));
         assert!(out.contains("be careful"));
-    }
-
-    #[test]
-    fn compose_classify_prompt_uses_skills_not_verdict_duplication() {
-        let skills = vec![SkillSpec {
-            name: "ci-triage".into(),
-            description: String::new(),
-            body: "- flaky: transient\n- real: code bug".into(),
-            argument_hint: String::new(),
-            skill_refs: vec![],
-            tool_refs: vec![],
-            always_load: false,
-            intent_keywords: vec![],
-            intent_phrases: vec![],
-            intent_bonus_keywords: vec![],
-            intent_penalty_keywords: vec![],
-            intent_penalty_phrases: vec![],
-            intent_penalty: 0,
-        }];
-        let out = compose_classify_prompt("", &skills);
-        assert!(out.contains("flaky: transient"));
-        assert!(out.contains("reason: one line"));
     }
 
     #[test]

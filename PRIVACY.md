@@ -50,7 +50,7 @@ For SQLite backend, delete the configured database file (e.g. `./data/coworker.d
 To prune without full deletion:
 
 ```bash
-unistar-coworker store compact --audit-days 90 --digest-keep 30
+unistar-coworker store compact --audit-days 90
 ```
 
 Docker: remove the mounted data volume when destroying the container.

@@ -1047,9 +1047,9 @@ mod tests {
     #[test]
     fn tab_at_column_resolves_header_labels() {
         use coworker_core::app::Tab;
-        let tabs = vec![Tab::Dashboard, Tab::Prs, Tab::Approvals];
-        assert_eq!(tab_at_column(&tabs, 0), Some(Tab::Dashboard));
-        let prs_start = UnicodeWidthStr::width(" 1 Dashboard │");
-        assert_eq!(tab_at_column(&tabs, prs_start), Some(Tab::Prs));
+        let tabs = vec![Tab::Approvals, Tab::Logs, Tab::Config];
+        assert_eq!(tab_at_column(&tabs, 0), Some(Tab::Approvals));
+        let logs_start = UnicodeWidthStr::width(" 1 Approvals │");
+        assert_eq!(tab_at_column(&tabs, logs_start), Some(Tab::Logs));
     }
 }
