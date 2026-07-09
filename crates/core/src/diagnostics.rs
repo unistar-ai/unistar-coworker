@@ -116,9 +116,7 @@ pub async fn run_checks_with_extras(
                 .find(|l| !l.trim().is_empty())
                 .unwrap_or("not authenticated")
                 .to_string();
-            let github_needed = cfg
-                .as_ref()
-                .is_some_and(|c| !c.repos.is_empty());
+            let github_needed = cfg.as_ref().is_some_and(|c| !c.repos.is_empty());
             if github_needed {
                 report.push_check(DoctorCheck {
                     name: "github",
@@ -141,9 +139,7 @@ pub async fn run_checks_with_extras(
             }
         }
         Err(e) => {
-            let github_needed = cfg
-                .as_ref()
-                .is_some_and(|c| !c.repos.is_empty());
+            let github_needed = cfg.as_ref().is_some_and(|c| !c.repos.is_empty());
             if github_needed {
                 report.push_check(DoctorCheck {
                     name: "github",
@@ -158,9 +154,7 @@ pub async fn run_checks_with_extras(
                     status: "warn",
                     detail: format!("gh CLI not found: {e} (optional — no repos configured)"),
                     latency_ms: None,
-                    hint: Some(
-                        "install gh only if you use GitHub harness or workflows".into(),
-                    ),
+                    hint: Some("install gh only if you use GitHub harness or workflows".into()),
                 });
             }
         }
@@ -422,7 +416,11 @@ pub fn estimate_model_billions(model: &str) -> Option<u32> {
             i += 1;
         }
     }
-    if max > 0 { Some(max) } else { None }
+    if max > 0 {
+        Some(max)
+    } else {
+        None
+    }
 }
 
 fn push_llm_model_tier_checks(report: &mut DoctorReport, llm: &LlmConfig) {
@@ -528,7 +526,10 @@ repos: [acme/widget]
         assert_eq!(estimate_model_billions("qwen3.6-27b"), Some(27));
         assert_eq!(estimate_model_billions("gemma4:26b-a4b-it-qat"), Some(26));
         assert_eq!(estimate_model_billions("qwen2.5:32b"), Some(32));
-        assert_eq!(estimate_model_billions("llama3.1:70b-instruct-q4_K_M"), Some(70));
+        assert_eq!(
+            estimate_model_billions("llama3.1:70b-instruct-q4_K_M"),
+            Some(70)
+        );
         assert_eq!(estimate_model_billions("mistral-nemo"), None);
     }
 
@@ -571,7 +572,13 @@ repos: [acme/widget]
                 ..Default::default()
             },
         );
-        assert!(report.checks.iter().any(|c| c.name == "llm-model" && c.status == "warn"));
-        assert!(report.checks.iter().any(|c| c.name == "llm-context" && c.status == "warn"));
+        assert!(report
+            .checks
+            .iter()
+            .any(|c| c.name == "llm-model" && c.status == "warn"));
+        assert!(report
+            .checks
+            .iter()
+            .any(|c| c.name == "llm-context" && c.status == "warn"));
     }
 }

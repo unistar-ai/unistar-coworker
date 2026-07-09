@@ -1598,8 +1598,7 @@ repos: [acme/widget]
             .create_chat_session(Some("seeded-skills"), None)
             .await
             .expect("create session");
-        session.runtime_state.loaded_skills =
-            vec!["general-agent-tone".into(), "ci-triage".into()];
+        session.runtime_state.loaded_skills = vec!["general-agent-tone".into(), "ci-triage".into()];
         store
             .update_chat_session(&session)
             .await

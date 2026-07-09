@@ -2213,7 +2213,10 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
 
         let mut messages = vec![LlmTurnMessage::new("system", "agent")];
         for i in 0..10 {
-            messages.push(LlmTurnMessage::new("user", format!("step {i} {}", "a".repeat(400))));
+            messages.push(LlmTurnMessage::new(
+                "user",
+                format!("step {i} {}", "a".repeat(400)),
+            ));
             messages.push(LlmTurnMessage::assistant_tool_call(
                 "",
                 vec![LlmToolCall {
