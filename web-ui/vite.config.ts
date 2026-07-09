@@ -11,6 +11,13 @@ export default defineConfig({
     sourcemap: false,
     rollupOptions: {
       input: "index.html",
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/react-dom") || id.includes("node_modules/react/")) {
+            return "react";
+          }
+        },
+      },
     },
   },
   server: {

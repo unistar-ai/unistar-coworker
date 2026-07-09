@@ -15,17 +15,19 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
-import ApprovalsTab from "../tabs/approvals/ApprovalsTab";
-import ApprovalModal from "../tabs/approvals/ApprovalModal";
-import CommandPalette from "./CommandPalette";
-import ChatTab from "../tabs/chat/ChatTab";
-import DashboardTab from "../tabs/dashboard/DashboardTab";
-import PrsTab from "../tabs/prs/PrsTab";
-import LogsTab from "../tabs/logs/LogsTab";
-import ConfigTab from "../tabs/config/ConfigTab";
+import { lazy, Suspense, useEffect, useState } from "react";
+import Skeleton from "./Skeleton";
 import Footer from "./Footer";
 import { formatTokens } from "../tabs/chat/parser";
+
+const ApprovalsTab = lazy(() => import("../tabs/approvals/ApprovalsTab"));
+const ApprovalModal = lazy(() => import("../tabs/approvals/ApprovalModal"));
+const CommandPalette = lazy(() => import("./CommandPalette"));
+const ChatTab = lazy(() => import("../tabs/chat/ChatTab"));
+const DashboardTab = lazy(() => import("../tabs/dashboard/DashboardTab"));
+const PrsTab = lazy(() => import("../tabs/prs/PrsTab"));
+const LogsTab = lazy(() => import("../tabs/logs/LogsTab"));
+const ConfigTab = lazy(() => import("../tabs/config/ConfigTab"));
 
 interface LayoutProps {
   tabLabels: Record<string, string>;
@@ -164,8 +166,14 @@ export default function Layout({ tabLabels }: LayoutProps) {
         </div>
       </main>
       <Footer />
-      <ApprovalModal />
-      <CommandPalette open={cmdOpen} onOpenChange={setCmdOpen} />
+      <Suspense fallback={null}>
+        <ApprovalModal />
+      </Suspense>
+      {cmdOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette open={cmdOpen} onOpenChange={setCmdOpen} />
+        </Suspense>
+      )}
     </div>
   );
 }
@@ -214,6 +222,22 @@ function ConnDot() {
 }
 
 function TabContent({ tab }: { tab: string }) {
+  return (
+    <Suspense fallback={<TabLoading />}>
+      <TabPanel tab={tab} />
+    </Suspense>
+  );
+}
+
+function TabLoading() {
+  return (
+    <div className="flex h-full items-start p-4">
+      <Skeleton rows={10} className="w-full max-w-3xl" />
+    </div>
+  );
+}
+
+function TabPanel({ tab }: { tab: string }) {
   switch (tab) {
     case "chat":
       return <ChatTab />;
