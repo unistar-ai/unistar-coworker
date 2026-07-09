@@ -447,33 +447,19 @@ Pending mutating-action queue without loading digest body.
 | `limit` | no | Max rows (default **20**, max **50**) |
 
 ### `store_get_oncall_handoff`
-On-call handoff markdown from local Store (same source as `oncall-handoff` workflow / `report oncall`).
+On-call handoff markdown from local Store (same source as `report oncall`).
 
 | Param | Required | Notes |
 |-------|----------|-------|
 | _(none)_ | — | Output capped at ~6k chars in chat |
 
-### `harness_run_workflow`
-Run any built-in batch workflow by id (same as TUI / scheduler / `run-once --workflow`).
-
-| Param | Required | Examples |
-|-------|----------|----------|
-| `workflow_id` | yes | `daily-work`, `review-radar` |
-
 ### `harness_triage_pr`
-Run the full PR triage workflow (same as TUI **`t`** on PRs tab). Updates `PrSnapshot.triage_note` in Store.
+Run full PR triage (same as TUI **`t`** on PRs tab). Updates `PrSnapshot.triage_note` in Store.
 
 | Param | Required |
 |-------|----------|
 | `repo` | yes |
 | `pr_number` | yes |
-
-### `harness_daily_digest`
-Run **`daily-work`** workflow — publishes digest to Store (Dashboard **`r`** / scheduler).
-
-| Param | Required |
-|-------|----------|
-| _(none)_ | |
 
 ---
 

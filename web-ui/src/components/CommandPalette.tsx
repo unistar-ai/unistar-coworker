@@ -15,7 +15,6 @@ import {
   Download,
   Sun,
   Moon,
-  Zap,
   Search,
   type LucideIcon,
 } from "lucide-react";
@@ -133,28 +132,6 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
       keywords: "theme dark light toggle switch color",
       action: () => {
         setTheme(theme === "dark" ? "light" : "dark");
-        close();
-      },
-    });
-
-    // Workflows
-    cmds.push({
-      id: "run-daily-work",
-      label: "Run daily-work workflow",
-      icon: Zap,
-      keywords: "workflow run daily work digest",
-      action: () => {
-        void apiPost("/api/workflows/daily-work");
-        close();
-      },
-    });
-    cmds.push({
-      id: "run-review-radar",
-      label: "Run review-radar workflow",
-      icon: Zap,
-      keywords: "workflow run review radar pr",
-      action: () => {
-        void apiPost("/api/workflows/review-radar");
         close();
       },
     });

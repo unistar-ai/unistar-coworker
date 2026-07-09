@@ -64,7 +64,7 @@ async fn format_store_latest_digest(store: &dyn Store) -> Result<String> {
             lines.push(body);
         }
     } else {
-        lines.push("No digest stored yet — run daily-work or another workflow first.".into());
+        lines.push("No digest stored yet.".into());
     }
 
     let pending = store.list_pending_approvals().await?;

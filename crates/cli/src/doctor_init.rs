@@ -252,8 +252,6 @@ fn apply_init_repos(lines: &mut Vec<String>, repos_csv: &str) {
             || trimmed.starts_with("#   gh_command:")
             || trimmed.starts_with("#   env:")
             || trimmed.starts_with("#   timeout_secs:")
-            || trimmed.starts_with("# workflows:")
-            || trimmed.starts_with("#   daily-work:")
         {
             if let Some(rest) = trimmed.strip_prefix("# ") {
                 *line = rest.to_string();
@@ -287,8 +285,6 @@ fn apply_init_repos(lines: &mut Vec<String>, repos_csv: &str) {
         for r in &slugs {
             block.push(format!("  - {r}"));
         }
-        block.push("workflows:".into());
-        block.push("  daily-work: {}".into());
         block.push(String::new());
         for (i, line) in block.into_iter().enumerate() {
             lines.insert(chat_idx + i, line);
@@ -496,7 +492,6 @@ mod tests {
         assert!(raw.contains("acme/api"));
         assert!(raw.contains("http://127.0.0.1:11434/v1"));
         assert!(raw.contains("github:"));
-        assert!(raw.contains("workflows:"));
     }
 
     #[tokio::test]

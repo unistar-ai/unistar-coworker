@@ -10,7 +10,7 @@ use super::skill_routing::SkillRegistry;
 
 /// Classify output contract — harness field limits (not domain technique).
 const CLASSIFY_OUTPUT_CONTRACT: &str = "\
-You triage CI failures for a daily digest. Classify each failure and explain it clearly.\n\
+You triage CI failures for a PR. Classify each failure and explain it clearly.\n\
 \n\
 Always fill ALL fields with specific, actionable content from the logs. Keep responses concise:\n\
 - reason: one line, ≤120 characters\n\
@@ -32,13 +32,6 @@ pub struct PromptBundle {
     pub skill_catalog: String,
     pub tools_doc: String,
     pub runtime_context: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct WorkflowSpec {
-    pub id: String,
-    pub description: String,
-    pub skills: Vec<SkillSpec>,
 }
 
 /// Omit tool-chain playbooks from skill bodies — the model discovers tools itself.
@@ -198,25 +191,6 @@ pub fn load_chat_prompt_bundle_for_session(
         },
         registry,
     ))
-}
-
-pub fn load_workflow_spec(workflow_id: &str, skill_paths: &[PathBuf]) -> Result<WorkflowSpec> {
-    let meta = super::workflow_registry::require(workflow_id)?;
-    let skills = if !skill_paths.is_empty() {
-        load_skills(skill_paths)?
-    } else {
-        let paths = super::workflow_registry::default_skill_paths(workflow_id);
-        if paths.is_empty() {
-            Vec::new()
-        } else {
-            load_skills(&paths)?
-        }
-    };
-    Ok(WorkflowSpec {
-        id: workflow_id.to_string(),
-        description: meta.description.to_string(),
-        skills,
-    })
 }
 
 pub fn load_classify_skills_for_triage(explicit: &[PathBuf]) -> Result<Vec<SkillSpec>> {

@@ -19,7 +19,7 @@ Official builds are published on [GitHub Releases](https://github.com/unistar-ai
 
 1. Download the tarball for your platform: `unistar-coworker-<version>-<triple>.tar.gz`.
 2. Verify checksum (`.sha256` file alongside the archive).
-3. Stop any running `serve`, `daemon`, or TUI instance.
+3. Stop any running `serve` or TUI instance.
 4. Extract the archive to your install directory (or replace only the binary).
 5. **Keep** your existing `coworker.yaml` and `data/` — do not overwrite them with the template inside the tarball unless you intend a fresh install.
 6. Run `unistar-coworker doctor` and `unistar-coworker --version`.
@@ -69,7 +69,7 @@ Major versions (e.g. 2.x → 3.x) may remove **Stable** RPC operations or change
 
 1. Read the full CHANGELOG for the major release.
 2. Run integration tests for any `rpc` scripts.
-3. Re-run `doctor` and spot-check Web UI + one workflow (`run-once`).
+3. Re-run `doctor` and spot-check Web UI + one chat turn (`chat --once "hello"`).
 
 ## Rollback
 

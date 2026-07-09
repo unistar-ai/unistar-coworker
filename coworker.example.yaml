@@ -39,9 +39,6 @@ llm:
 #
 # repos:
 #   - owner/repo
-#
-# workflows:
-#   daily-work: {}
 
 chat:
   workspace: .

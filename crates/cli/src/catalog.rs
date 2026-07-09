@@ -3,38 +3,6 @@ use coworker_core::error::Result;
 use super::args::CatalogCmd;
 use super::terminal::{emit_json, table, use_color_stdout};
 
-pub(crate) async fn run_workflows_list(cmd: CatalogCmd) -> Result<()> {
-    use coworker_core::engine::WORKFLOWS;
-
-    let CatalogCmd::List { json } = cmd;
-    if json {
-        let items: Vec<_> = WORKFLOWS
-            .iter()
-            .map(|wf| {
-                serde_json::json!({
-                    "id": wf.id,
-                    "description": wf.description,
-                    "skills": wf.default_skills,
-                })
-            })
-            .collect();
-        emit_json(serde_json::json!(items));
-    } else {
-        let tty = use_color_stdout();
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        for wf in WORKFLOWS {
-            let skills = if wf.default_skills.is_empty() {
-                "—".into()
-            } else {
-                wf.default_skills.join(", ")
-            };
-            rows.push(vec![wf.id.to_string(), wf.description.to_string(), skills]);
-        }
-        println!("{}", table(&["id", "description", "skills"], &rows, tty));
-    }
-    Ok(())
-}
-
 pub(crate) async fn run_catalog_list(root: &str, leaf: &str, cmd: CatalogCmd) -> Result<()> {
     use coworker_core::engine::{load_markdown_spec, load_skill_with_base};
     use std::path::Path;

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-07-09
+
+### Removed (breaking)
+
+- Batch workflows: `daily-work`, `review-radar`, YAML `workflows:` / `schedule:` config, cron scheduler, digest producer (`IncrementalDigest`).
+- CLI: `run-once`, `daemon`, `workflows list`, TUI `--attach`.
+- Docs: `docs/workflows.md`; skill `digest-style`.
+- Harness tools: `harness_run_workflow`, `harness_daily_digest`.
+
+### Changed
+
+- Product center is **chat-first general agent** — TUI / Web / CLI chat + workspace tools + optional MCP and GitHub skill pack.
+- TUI `r` refreshes store (was run daily-work); PR triage via `t` / `triage-pr` / `harness_triage_pr`.
+- README / QUICKSTART / skills / example configs updated; GitHub harness and `ci_rerun_workflow` unchanged.
+
+[3.0.0]: https://github.com/unistar-ai/unistar-coworker/compare/v2.4.1...v3.0.0
+
 ## [2.4.1] - 2026-07-09
 
 ### Fixed

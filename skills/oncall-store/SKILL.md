@@ -26,7 +26,7 @@ Use for:
 1. **Morning context** — `store_get_latest_digest`.
 2. **Approval queue** — `store_list_pending_approvals` (kind, repo, description).
 3. **Shift handoff** — `store_get_oncall_handoff`.
-4. If no digest exists, suggest running the `daily-work` workflow.
+4. If no digest exists, suggest chat (e.g. “triage open PRs in owner/repo”) or `triage-pr`.
 
 ## Output template
 

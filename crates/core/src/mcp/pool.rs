@@ -6,7 +6,6 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::config::{McpConfig, McpMutatingPolicy, McpServerConfig, McpStartup};
-use crate::engine::workflows::check_workflow_mcp_allowed;
 use crate::error::{CoworkerError, Result};
 use crate::mcp::cancel::{is_cancelled_error, McpCancel};
 use crate::mcp::cap::truncate_tool_output;
@@ -220,7 +219,6 @@ impl McpPool {
                 "{global_name} is a mutating MCP tool — approval required"
             )));
         }
-        check_workflow_mcp_allowed(global_name, entry.mutating)?;
         self.ensure_connected(&entry.server_id).await?;
         let timeout_secs = self.server_timeout_for_id(&entry.server_id).await;
         let started = Instant::now();
@@ -279,7 +277,6 @@ impl McpPool {
 
     /// Read `mcp+{server_id}://...` resources via MCP `resources/read`.
     pub async fn read_federated_resource(&self, uri: &str, cancel: McpCancel) -> Result<String> {
-        check_workflow_mcp_allowed("resource_read", false)?;
         let rest = uri
             .strip_prefix("mcp+")
             .ok_or_else(|| CoworkerError::Workflow(format!("unsupported resource URI {uri:?}")))?;

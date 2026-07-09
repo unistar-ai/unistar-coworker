@@ -114,7 +114,6 @@ pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>)
         .route("/api/chat/export", get(api_chat_export))
         .route("/api/approvals/{id}", post(api_approval))
         .route("/api/approvals/history", get(api_approval_history))
-        .route("/api/workflows/{id}", post(api_run_workflow))
         .route("/api/store/refresh", post(api_refresh_store))
         .route("/api/prs/filter", post(api_prs_filter))
         .route("/api/prs/sort", post(api_prs_sort))
@@ -766,17 +765,6 @@ async fn api_approval(
 ) -> StatusCode {
     spawn_approval_decision(&rt.state, &rt.engine, id, body.approve).await;
     publish_snapshot(&rt.state, &rt.snap_tx).await;
-    StatusCode::ACCEPTED
-}
-
-async fn api_run_workflow(State(rt): State<Arc<WebRuntime>>, Path(id): Path<String>) -> StatusCode {
-    let engine = Arc::clone(&rt.engine);
-    let state = rt.state.clone();
-    let snap_tx = rt.snap_tx.clone();
-    tokio::spawn(async move {
-        let _ = engine.run_workflow(&id).await;
-        publish_snapshot(&state, &snap_tx).await;
-    });
     StatusCode::ACCEPTED
 }
 

@@ -364,7 +364,7 @@ pub struct AppState {
     pub pr_overview_cache: HashMap<String, String>,
     /// In-flight overview fetch (`repo#number`).
     pub pr_overview_fetching: Option<String>,
-    /// TUI started with `--attach` (poll shared store from daemon).
+    /// Legacy: reserved for shared-store polling (unused; always false).
     pub attach_mode: bool,
     /// PR cursor within the selected Dashboard digest (`n` / `N`).
     pub dashboard_digest_pr_index: usize,

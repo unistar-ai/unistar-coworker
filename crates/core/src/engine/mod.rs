@@ -3,7 +3,6 @@ use std::sync::{Arc, RwLock};
 
 use tokio::sync::broadcast;
 
-use crate::agent::AgentLoop;
 use crate::app::{hydrate_from_store, AppEvent, SharedState};
 use crate::config::Config;
 use crate::error::Result;
@@ -18,20 +17,14 @@ pub mod embedded_prompts;
 pub mod playbook;
 pub mod prompt;
 pub mod rules;
-pub mod scheduler;
 pub mod skill;
 pub mod skill_routing;
-pub mod workflow_registry;
 
 pub use skill_routing::SkillRegistry;
-pub mod workflows;
-
-pub use workflow_registry::{require as require_workflow, WORKFLOWS};
 
 pub use prompt::{
     compose_chat_system_prompt, format_session_context_message,
-    load_chat_prompt_bundle_for_session, load_classify_skills_for_triage, load_workflow_spec,
-    WorkflowSpec, SESSION_CONTEXT_PREFIX,
+    load_chat_prompt_bundle_for_session, load_classify_skills_for_triage, SESSION_CONTEXT_PREFIX,
 };
 pub use skill::{load_markdown_spec, load_skill_with_base, SkillSpec};
 
@@ -129,20 +122,6 @@ impl Engine {
         hydrate_from_store(&self.state, self.store.as_ref()).await?;
         let _ = self.events.send(AppEvent::StoreUpdated);
         Ok(())
-    }
-
-    pub async fn run_workflow(&self, workflow_id: &str) -> Result<String> {
-        let agent = AgentLoop::new(
-            self.config.read().expect("config lock").clone(),
-            Arc::clone(&self.store),
-            Arc::clone(&self.github),
-            Arc::clone(&self.llm),
-            self.events.clone(),
-            Arc::clone(&self.state),
-        );
-        let result = agent.run_workflow(workflow_id).await;
-        self.refresh_store().await?;
-        result
     }
 
     pub async fn is_busy(&self) -> bool {
@@ -310,12 +289,6 @@ impl Engine {
         });
     }
 
-    pub fn spawn_scheduler(self: Arc<Self>) {
-        let scheduler =
-            scheduler::Scheduler::from_config(&self.config.read().expect("config lock"));
-        scheduler.spawn(self);
-    }
-
     /// Re-measure GitHub harness / LLM latency and reload MCP servers from disk config.
     pub async fn refresh_connectivity_probes(&self) {
         let config_path = {
@@ -355,7 +328,7 @@ impl Engine {
             }
             if s.engine_busy {
                 return Err(crate::error::CoworkerError::Config(
-                    "cannot switch LLM profile while a workflow is running".into(),
+                    "cannot switch LLM profile while a background task is running".into(),
                 ));
             }
         }

@@ -2,7 +2,7 @@
 
 Third-party MCP servers extend chat with external systems. **GitHub always uses the in-process `GithubHarness`** — do not run a separate GitHub MCP for coworker.
 
-See also: [`coworker.example.yaml`](../coworker.example.yaml), README § [MCP federation](../README.md#mcp-federation), [`docs/workflows.md`](./workflows.md) (batch vs chat MCP policy).
+See also: [`coworker.example.yaml`](../coworker.example.yaml), README § [MCP federation](../README.md#mcp-federation).
 
 ---
 
@@ -21,13 +21,9 @@ mcp:
       # ...
 ```
 
-| Concern | Chat | Batch workflows |
-|---------|------|-----------------|
-| Third-party MCP | Allowed (readonly + approval for mutating) | **Blocked** unless `workflows.mcp_readonly: true` |
-| Mutating MCP | Approval queue (or `approval.mutating: auto`) | **Never** — use chat |
-| Reload | `SIGHUP` or `POST /api/reload` | Same |
-
 Tool names are prefixed: `slack_post_message`, `filesystem_read_file`, etc.
+
+Third-party MCP is available in **chat** (readonly tools directly; mutating tools via the approval queue unless `approval.mutating: auto`). Reload config with `SIGHUP` or `POST /api/reload`.
 
 ---
 
@@ -56,8 +52,6 @@ mcp:
 ```
 
 **Chat example:** “List channels, then draft a one-paragraph CI summary for #eng-oncall” — agent uses `slack_list_channels` (readonly), then `slack_post_message` → **approval**.
-
-**Digest webhook (no MCP):** `output.slack_webhook` in config still posts workflow digests directly; MCP is for agent-driven messages.
 
 ---
 
@@ -147,6 +141,5 @@ For VRAM-tight setups, use `chat.tool_mode: lazy` explicitly.
 |---------|--------|
 | Server `connected: false` | `command`/`args`, env vars, `npx` network; `doctor --json` |
 | Tool not found | `expose.prefix` + server tool name; reload after config change |
-| Workflow blocked MCP | Expected — set `workflows.mcp_readonly: true` or run step in chat |
 | Mutating tool silent fail | Approvals queue — Web/TUI or `chat --yes` for headless |
 | Stale tools after edit | `SIGHUP` / `POST /api/reload` |

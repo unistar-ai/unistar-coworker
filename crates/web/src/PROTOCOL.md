@@ -65,7 +65,7 @@ Fields (see [`snapshot.rs`](./snapshot.rs) `WebSnapshot` for the authoritative l
 | `github_ok` / `llm_ok` | bool | connectivity probes |
 | `github_latency_ms` / `llm_latency_ms` | u128? | |
 | `mcp_servers` | object[] | per-server status |
-| `attach_mode` | bool | TUI attached to daemon store |
+| `attach_mode` | bool | Legacy shared-store flag (always false) |
 | `auto_approve_mutations` | bool | `chat.auto_approve_mutations` |
 | `ui_theme` | string | `dark` / `light` |
 
@@ -136,8 +136,7 @@ context + live zone).
 | anything else | `Full` | publish full snapshot immediately |
 
 A 100ms tick coalesces dirty flags: `chat_dirty` wins over `live_dirty` (a
-chat patch supersedes a live patch). In `--attach` mode a 2s poll re-hydrates
-from the store and publishes a full snapshot.
+chat patch supersedes a live patch).
 
 ## Client apply order (`src/web/static/app.js`)
 

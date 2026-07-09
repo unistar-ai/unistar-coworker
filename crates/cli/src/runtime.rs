@@ -28,7 +28,6 @@ pub(crate) async fn run_web(
     config: Config,
     config_path: String,
     store: Arc<dyn store::Store>,
-    attach: bool,
     bind_override: Option<String>,
 ) -> Result<()> {
     let bind_str = bind_override.unwrap_or_else(|| config.web.bind.clone());
@@ -65,25 +64,14 @@ pub(crate) async fn run_web(
         Arc::new(Engine::new(config, Arc::clone(&store), tx.clone(), Arc::clone(&state)).await);
     spawn_sighup_reload(Arc::clone(&engine));
     engine.clone().spawn_background();
-    if attach {
-        let mut s = state.write().await;
-        s.attach_mode = true;
-        s.push_log(
-            "info",
-            "attach mode — scheduler disabled (shared store with daemon)",
-        );
-    } else {
-        engine.clone().spawn_scheduler();
-    }
 
-    coworker_web::run(bind, state, engine, store, rx, attach, auth_token).await
+    coworker_web::run(bind, state, engine, store, rx, false, auth_token).await
 }
 
 pub(crate) async fn run_tui(
     config: Config,
     config_path: String,
     store: Arc<dyn store::Store>,
-    attach: bool,
 ) -> Result<()> {
     let (tx, rx) = event_channel();
     let state: SharedState = Arc::new(tokio::sync::RwLock::new(AppState::new(
@@ -104,18 +92,6 @@ pub(crate) async fn run_tui(
         Arc::new(Engine::new(config, Arc::clone(&store), tx.clone(), Arc::clone(&state)).await);
     spawn_sighup_reload(Arc::clone(&engine));
     engine.clone().spawn_background();
-    if attach {
-        {
-            let mut s = state.write().await;
-            s.attach_mode = true;
-            s.push_log(
-                "info",
-                "attach mode — scheduler disabled (shared store with daemon)",
-            );
-        }
-    } else {
-        engine.clone().spawn_scheduler();
-    }
 
     let mut terminal = ratatui::init();
     let result = coworker_tui::run(&mut terminal, state, engine, store, rx).await;

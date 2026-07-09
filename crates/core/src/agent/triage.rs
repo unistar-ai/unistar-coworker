@@ -395,7 +395,7 @@ pub async fn triage_pr(
         let transcript = crate::engine::playbook::transcript_from_triage(
             repo,
             pr_number,
-            "daily-work",
+            "triage",
             &verdict,
             &outcome.full_note(),
         );

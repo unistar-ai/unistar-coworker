@@ -45,14 +45,14 @@ export default function PrsTab() {
           <EmptyState
             icon={GitPullRequest}
             title="No PRs in store"
-            description="Pull requests will appear here once the review-radar workflow populates the store."
+            description="Configure repos: in coworker.yaml, refresh the store, or triage PRs from chat."
             action={
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={() => void apiPost("/api/workflows/review-radar")}
+                onClick={() => void apiPost("/api/store/refresh")}
               >
-                Run review-radar
+                Refresh store
               </button>
             }
           />

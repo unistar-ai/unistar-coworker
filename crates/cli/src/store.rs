@@ -44,14 +44,12 @@ pub(crate) async fn run_store_cmd(config: Config, cmd: StoreCommands) -> Result<
         StoreCommands::Compact {
             audit_days,
             digest_keep,
-            workflow_runs_days,
             dry_run,
         } => {
             let opts = CompactOptions {
                 audit_days,
                 digest_keep,
-                workflow_runs_days,
-                dry_run,
+                ..CompactOptions::default()
             };
             let path = config.storage_path();
             let stats = compact(

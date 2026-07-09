@@ -36,7 +36,7 @@ pub struct DigestSummary {
     /// Wall-clock seconds for the workflow run that produced this digest.
     #[serde(default)]
     pub duration_secs: f64,
-    /// False while daily-work is still publishing partial digests.
+    /// False while a background job is still publishing partial digests (legacy store field).
     #[serde(default = "default_digest_complete")]
     pub complete: bool,
 }

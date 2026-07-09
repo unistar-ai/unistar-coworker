@@ -30,8 +30,6 @@ description: "One line: when to load this skill. Use when <user intent>."
 | `intent_keywords` | Extra match weight in skill router |
 | `tools` | Pre-warm tool schemas in chat (`tool_mode: auto` / `lazy`) |
 
-Workflow-only skills can be referenced from `workflows.<id>.skills` in `coworker.yaml` without appearing in chat routing.
-
 ---
 
 ## Body structure (recommended)
@@ -75,7 +73,7 @@ Not for:
 - [ ] `description` is a complete “Use when …” line (not a title alone)
 - [ ] Tool names exist in `TOOLS.md` / `tool_catalog.rs`
 - [ ] **Scope** lists at least one “Not for” redirect
-- [ ] No cron, daemon, or Rust harness logic in the skill body
+- [ ] No Rust harness logic in the skill body
 - [ ] `cargo run --release -- skills list` shows the skill
 - [ ] If GitHub-specific, add a row to [`github-ops-pack/README.md`](../github-ops-pack/README.md)
 

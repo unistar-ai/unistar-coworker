@@ -24,10 +24,10 @@
 
 `unistar-coworker` is a **general agent runtime** optimized for **local models**, not a hosted agent platform or a CI runner. It:
 
-- Runs **chat** (TUI, CLI, Web) and scheduled **workflows** with skills + prompts — coding, Q&A, and ops in `chat.workspace`.
+- Runs **chat** (TUI, CLI, Web) with skills + prompts — coding, Q&A, and ops in `chat.workspace`.
 - Uses a **local LLM** (Ollama / OpenAI-compatible) for planning, tool calls, and summarization; supports named profiles and runtime switching.
 - Exposes **workspace tools** (`read_file`, `grep`, `bash_run`, …) for repo-local work; optional **MCP** servers via `mcp.servers[]`.
-- Integrates **GithubHarness** in-process (`gh` CLI) when GitHub/CI is in scope — daily triage, review radar, and related workflows are skill packs, not the product ceiling.
+- Integrates **GithubHarness** in-process (`gh` CLI) when GitHub/CI is in scope — PR/CI triage and related ops are optional skill packs, not the product ceiling.
 - **Defaults to safety** — GitHub/MCP mutating tools go through TUI/Web approval unless `chat.auto_approve_mutations` is explicitly enabled.
 
 ---
@@ -44,7 +44,6 @@
     - [TUI](#tui)
     - [Web UI](#web-ui)
     - [Chat](#chat)
-    - [Workflows](#workflows)
     - [CLI reference](#cli-reference)
     - [GitHub harness tools](#github-harness-tools)
   - [Configuration](#configuration)
@@ -76,7 +75,6 @@
 | **Safety** | External mutating tools (GitHub harness, MCP) require TUI/Web approval unless `chat.auto_approve_mutations` or per-server `approval.mutating: auto` |
 | **MCP federation** | `mcp.servers[]` with stdio + HTTP, lazy discovery, mutating approval, per-server skills, cancel in flight |
 | **GithubHarness** | Optional in-process GitHub/CI via `gh`; capped payloads; no MCP subprocess for GitHub |
-| **Workflows** | Optional `daily-work` (PR/CI triage → digest + flaky ledger), `review-radar`; cron, daemon, or one-shot |
 | **TUI** | Dashboard, PR list, approvals, logs, config, flaky report, release queue, issues, full-screen chat |
 | **Web UI** | Browser chat (`serve`), sessions, light/dark theme, streaming tool/reasoning cards, LLM profile switcher, branch regenerate, approval modal, Markdown/JSONL export |
 | **Scripting** | `doctor`, `init`, `rpc` (JSONL stdin/stdout), `export session`, shell completions, stable exit codes (`0/2/3/4`) |
@@ -118,12 +116,12 @@ unistar-coworker doctor          # config / LLM / store health (GitHub optional)
 cargo build --release --features embed-web-ui
 
 ./target/release/unistar-coworker serve                             # Web → http://127.0.0.1:8787
-./target/release/unistar-coworker                                   # TUI + cron scheduler
+./target/release/unistar-coworker                                   # TUI
 
 # Optional GitHub:
 export GH_TOKEN=ghp_...   # or: gh auth login
-./target/release/unistar-coworker run-once                          # headless daily-work
 ./target/release/unistar-coworker chat --once "Summarize open PRs in acme/widget" --json
+./target/release/unistar-coworker triage-pr --repo acme/widget --pr 42
 ```
 
 ---
@@ -164,7 +162,7 @@ cargo build
 
 ### TUI
 
-The default command launches the terminal UI with the cron scheduler attached.
+The default command launches the terminal UI.
 
 ```bash
 cargo run --release
@@ -182,7 +180,7 @@ cargo run --release
 | `7` | Release |
 | `8` | Issues |
 
-`Tab` / `Shift+Tab` cycle tabs · `r` run daily-work · `q` quit · `Esc` cancel the current chat turn.
+`Tab` / `Shift+Tab` cycle tabs · `r` refresh store · `q` quit · `Esc` cancel the current chat turn.
 
 ### Web UI
 
@@ -202,7 +200,7 @@ The Web UI is a **React 18 SPA** (Vite + Tailwind + Radix UI + zustand). It prov
 
 `build.rs` does **not** run `npm` — the frontend build is owned by the developer, CI, or [`scripts/package.sh`](./scripts/package.sh) (`npm run build:fast`). With `embed-web-ui`, the generated manifest is content-gated so the crate only recompiles when bundled assets actually change. Without `embed-web-ui`, run `npm run build:fast` once so `serve` can find `web-ui/dist/`; if `dist/` is missing the React routes return 503 (legacy UI may still be available).
 
-**Hot reload** (no process restart): send `SIGHUP` to a running `serve` / `tui` / `daemon`, or `POST /api/reload` — reloads `coworker.yaml`, skills, prompts, and MCP connections.
+**Hot reload** (no process restart): send `SIGHUP` to a running `serve` / `tui`, or `POST /api/reload` — reloads `coworker.yaml`, skills, prompts, and MCP connections.
 
 **Health API:** `GET /api/doctor` returns the same JSON report as `unistar-coworker doctor --json` (config, `gh`, LLM, MCP, store).
 
@@ -219,7 +217,7 @@ cd web-ui && npm install && npm run dev
 
 **Security model (localhost personal secretary).** unistar-coworker is **not** a multi-user or internet-facing product. The Web UI is for **trusted local use** on your machine only:
 
-- Keep `web.bind` at the default **`127.0.0.1:8787`** — chat, approvals, and workflows stay on loopback.
+- Keep `web.bind` at the default **`127.0.0.1:8787`** — chat and approvals stay on loopback.
 - **Docker:** map to localhost only, e.g. `-p 127.0.0.1:8787:8787` (never expose the container port on `0.0.0.0` without `web.auth_token`).
 - **Do not** put the Web UI behind a public reverse proxy without strong authentication.
 
@@ -285,35 +283,14 @@ Mutating GitHub and MCP tools enqueue **Approvals** unless `chat.auto_approve_mu
 - `chat.llm_step_timeout_secs` — wall clock per LLM step (0 = unlimited).
 - `chat.reasoning_only_warn_secs` — stop the stream when only reasoning grows and no visible content arrives (0 = off). Avoids 90s waits on reasoning-only models.
 
-### Workflows
-
-| Workflow | Summary | Default skills |
-|----------|---------|----------------|
-| `daily-work` | Morning PR/CI triage → digest + flaky ledger | `ci-triage`, `digest-style` |
-| `review-radar` | PRs waiting for review (CI green) | `pr-merge`, `digest-style` |
-
-```bash
-cargo run --release -- run-once
-cargo run --release -- run-once --workflow review-radar --json   # structured JSON on stdout
-cargo run --release -- daemon                  # cron only, no TUI (Ctrl-C / SIGTERM to stop)
-cargo run --release -- daemon --pid-file ./coworker.pid
-cargo run --release -- --attach                # TUI attached to a running daemon's store
-```
-
-Batch workflows **block third-party MCP by default**; set `workflows.mcp_readonly: true` (global) or `workflows.<id>.mcp_readonly: true` (per-workflow) to allow readonly MCP only. Mutating MCP stays chat-only.
-
-Details: [docs/workflows.md](docs/workflows.md).
-
 ### CLI reference
 
-**Global flags** (before the subcommand): `--config <PATH>` override config file (skip discover); `-v` / `--verbose` (`-v` debug, `-vv` trace); `-q` / `--quiet` (warn); `--plain` disable ANSI color; `--attach` attach to a daemon store only (TUI / `serve` / `daemon`).
+**Global flags** (before the subcommand): `--config <PATH>` override config file (skip discover); `-v` / `--verbose` (`-v` debug, `-vv` trace); `-q` / `--quiet` (warn); `--plain` disable ANSI color.
 
 | Command | Description |
 |---------|-------------|
-| *(default)* / `tui` | TUI + cron scheduler |
+| *(default)* / `tui` | Terminal UI |
 | `serve [--bind ADDR]` | Web UI + API + WebSocket |
-| `run-once [--workflow ID] [--json] [--timeout SECS]` | Headless workflow (default: `daily-work`) |
-| `daemon [--pid-file FILE]` | Cron only, no TUI; graceful SIGINT/SIGTERM, writes+removes pid file |
 | `chat [--once MSG] [--session UUID] [--list-sessions] [--title NAME] [--json] [--yes] [--timeout SECS]` | Interactive or one-shot chat |
 | `rpc [--session UUID] [--yes] [--timeout SECS]` | JSONL machine protocol on stdin/stdout — see [docs/RPC.md](./docs/RPC.md) |
 | `doctor [--json]` | Health check: config, `gh`, LLM, MCP servers, store |
@@ -324,8 +301,8 @@ Details: [docs/workflows.md](docs/workflows.md).
 | `report oncall [--json]` | On-call handoff pack from local store (no MCP) |
 | `report ci [--since-days 7] [--json]` | CI efficiency report (requires MCP) |
 | `store migrate --from json --to sqlite --source DIR --dest FILE` | Migrate store backend |
-| `store compact [--audit-days 90] [--digest-keep 30] [--workflow-runs-days 30] [--dry-run]` | Prune old audit entries, digests, workflow runs |
-| `skills list [--json]` / `workflows list [--json]` | Print catalog |
+| `store compact [--audit-days 90] [--digest-keep 30] [--dry-run]` | Prune old audit entries and digests |
+| `skills list [--json]` | Print skill catalog |
 
 `--json` is available on script-oriented commands for machine-readable stdout; human progress stays on stderr. `store compact --dry-run` reports what *would* be pruned without deleting.
 
@@ -382,11 +359,6 @@ github:
   # tool_timeouts:
   #   ci_get_failed_logs: 180
 
-workflows:
-  # mcp_readonly: false   # global default — batch workflows do not call third-party MCP
-  daily-work: {}
-  review-radar: {}
-
 chat:
   workspace: .
   tool_mode: auto        # auto | lazy | native
@@ -424,16 +396,13 @@ policy:
 | `chat.auto_approve_mutations` | Skip the approval queue for mutating tools (default `false`) |
 | `web.bind` | `serve` listen address (default `127.0.0.1:8787`) |
 | `web.auth_token` | Bearer token for static assets, `/api/*`, and `/ws` when binding beyond localhost |
-| `workflows.<id>.skills` | Override default skills per workflow |
-| `workflows.mcp_readonly` | Global default: allow readonly third-party MCP in batch workflows (default `false`) |
-| `workflows.<id>.mcp_readonly` | Per-workflow override; mutating MCP stays chat-only |
 | `policy.auto_rerun_flaky` | Auto-rerun flaky CI (default `false`; requires approval gate otherwise) |
 
 ---
 
 ## Storage
 
-The default backend is JSON under `./data` (gitignored). For long-running `serve` / `daemon` deployments or many chat sessions, prefer **SQLite** — single-file, better concurrent reads, and large histories:
+The default backend is JSON under `./data` (gitignored). For long-running `serve` deployments or many chat sessions, prefer **SQLite** — single-file, better concurrent reads, and large histories:
 
 ```yaml
 storage:
@@ -451,7 +420,7 @@ cargo run --release -- store migrate --from json --to sqlite \
 Prune old data to keep the store compact:
 
 ```bash
-cargo run --release -- store compact            # defaults: audit 90d, keep 30 digests, workflow runs 30d
+cargo run --release -- store compact            # defaults: audit 90d, keep 30 digests
 cargo run --release -- store compact --audit-days 180 --digest-keep 60
 cargo run --release -- store compact --dry-run  # preview what would be pruned, delete nothing
 ```
@@ -464,8 +433,7 @@ The core product is a **local-first general agent** (workspace + LLM). These are
 
 | Integration | Config | Docs |
 |-------------|--------|------|
-| **GitHub / CI harness** | `github:`, `repos:`, workflow skills | [skills/github-ops-pack/README.md](skills/github-ops-pack/README.md) |
-| **Batch workflows** | `workflows:` + cron / `run-once` | [docs/workflows.md](docs/workflows.md) |
+| **GitHub / CI harness** | `github:`, `repos:`, GitHub ops skills | [skills/github-ops-pack/README.md](skills/github-ops-pack/README.md) |
 | **Third-party MCP** | `mcp.servers[]` (Slack, HTTP, filesystem, …) | [docs/mcp-recipes.md](docs/mcp-recipes.md) |
 
 Authoring skills: [skills/_base/SKILL_TEMPLATE.md](skills/_base/SKILL_TEMPLATE.md). Local models: [docs/local-models.md](docs/local-models.md). Context budget: [docs/context-budget.md](docs/context-budget.md).
@@ -489,7 +457,6 @@ GitHub **always** uses the in-process `GithubHarness`. External tools (Slack, fi
 | Reload | `SIGHUP` or `POST /api/reload` reloads config, skills, prompts, MCP; Web/TUI **Re-probe** also reconnects MCP |
 | Per-server skills | `skills: [name]` on a server auto-loads those technique skills when its tools are warmed in chat |
 | Cancel | Chat cancel aborts HTTP requests and kills stdio MCP children |
-| Workflows | Batch workflows block third-party MCP by default; opt in via `workflows.mcp_readonly: true` or per-workflow `mcp_readonly: true` (readonly only) |
 
 ```yaml
 mcp:
@@ -527,7 +494,7 @@ Implementation: [`crates/core/src/mcp/`](./crates/core/src/mcp/).
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  unistar-coworker (Rust)                                         │
-│  TUI / Web → Engine / Scheduler → Prompts + Skills → Store        │
+│  TUI / Web → Engine → Prompts + Skills → Store                    │
 │                    ↓ LLM              ↓ Approvals                 │
 │  GithubHarness (in-process gh) + McpPool (optional MCP)          │
 └──────────────────────────────────────────────────────────────────┘
@@ -535,19 +502,18 @@ Implementation: [`crates/core/src/mcp/`](./crates/core/src/mcp/).
 
 | Entry | Trigger | Orchestration |
 |-------|---------|----------------|
-| **Workflow** | cron, `run-once`, TUI `r` | Fixed harness loop + skills → digest/store |
 | **Chat** | TUI `[0]`, `chat`, Web | `prompts/chat.md` + skills + LLM tool loop |
 
 ### Product boundaries
 
 | It is | It is not |
 |-------|-----------|
-| A **local-first general agent** for local LLMs (chat + workflows + tools) | A cloud-hosted agent platform or multi-tenant SaaS |
+| A **local-first general agent** for local LLMs (chat + tools) | A cloud-hosted agent platform or multi-tenant SaaS |
 | Workspace coding/Q&A, skills, MCP, optional GitHub harness | Unapproved auto-merge or silent full-repo autonomous edits |
 | TUI + Web UI + RPC for scripting; terminal-friendly | A replacement for GitHub Actions or CI runners |
 | Approval-gated external mutating tools by default | A second `gh` wrapper with no broader agent surface |
 
-**Non-goals:** no hosted telemetry; no unapproved auto-merge; workflows do not call third-party MCP by default (chat may when configured). GitHub ops (`daily-work`, `review-radar`, …) is a **shipped domain pack**, not the only supported use case.
+**Non-goals:** no hosted telemetry; no unapproved auto-merge. GitHub ops (PR/CI triage, …) is an **optional skill pack**, not the only supported use case.
 
 ### Skill / Prompt / Harness
 
@@ -555,9 +521,9 @@ Three layers; do not blur responsibilities:
 
 | Layer | Location | Role |
 |-------|----------|------|
-| **Skill** | `skills/*/SKILL.md` | Reusable technique — triage rules, tone, digest format. No cron, no harness logic. |
+| **Skill** | `skills/*/SKILL.md` | Reusable technique — triage rules, tone, digest format. No harness logic. |
 | **Prompt** | `prompts/chat.md` | Chat system prompt body; `skills:` frontmatter selects default techniques. Embedded at build time. |
-| **Harness** | `crates/core/src/agent/`, `crates/core/src/engine/` | Deterministic Rust — scheduler, MCP pool, approvals, token budget, chat/workflow loops |
+| **Harness** | `crates/core/src/agent/`, `crates/core/src/engine/` | Deterministic Rust — MCP pool, approvals, token budget, chat loop |
 
 Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`crates/core/src/agent/tool_catalog.rs`](./crates/core/src/agent/tool_catalog.rs).
 
@@ -693,7 +659,7 @@ unistar-coworker/
 └── Cargo.lock
 ```
 
-Crate version: **2.4.1** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)). Local LLM setup: [docs/local-models.md](./docs/local-models.md).
+Crate version: **3.0.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)). Local LLM setup: [docs/local-models.md](./docs/local-models.md).
 
 ---
 

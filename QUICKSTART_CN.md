@@ -22,11 +22,12 @@
 7. 启动 Web UI：`./unistar-coworker serve`
 8. 浏览器打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)，在工作区内对话（配置项 `chat.workspace`）。
 
-### 可选 — GitHub 工作流
+### 可选 — GitHub
 
 9. 配置 GitHub 认证：`export GH_TOKEN=...` 或在宿主机执行 `gh auth login`。
 10. 在 `coworker.yaml` 中添加 `repos:`（或重新运行带仓库的 `init --interactive`）。
-11. 运行一次工作流：`./unistar-coworker run-once --workflow daily-work`
+11. 在 chat 中试用 GitHub：`./unistar-coworker chat --once "汇总 owner/repo 的 open PR"`  
+    或调试单个 PR：`./unistar-coworker triage-pr --repo owner/repo --pr 42`
 12. 阅读 `coworker.example.yaml` 或 [coworker.minimal.yaml](./coworker.minimal.yaml) 了解高级选项。
 
 ---

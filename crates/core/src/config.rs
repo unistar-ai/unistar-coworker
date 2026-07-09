@@ -23,10 +23,6 @@ pub struct Config {
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
-    pub schedule: ScheduleConfig,
-    #[serde(default)]
-    pub workflows: WorkflowsSettings,
-    #[serde(default)]
     pub repos: Vec<String>,
     #[serde(default)]
     pub policy: PolicyConfig,
@@ -416,77 +412,6 @@ fn default_storage_path() -> String {
     "./data".into()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ScheduleConfig {
-    #[serde(default = "default_daily_digest_cron")]
-    pub daily_digest: Option<String>,
-    #[serde(default = "default_ci_rescan_cron")]
-    pub ci_rescan: Option<String>,
-    pub main_guard: Option<String>,
-}
-
-impl Default for ScheduleConfig {
-    fn default() -> Self {
-        Self {
-            daily_digest: default_daily_digest_cron(),
-            ci_rescan: default_ci_rescan_cron(),
-            main_guard: None,
-        }
-    }
-}
-
-fn default_daily_digest_cron() -> Option<String> {
-    Some("0 6 * * *".into())
-}
-
-fn default_ci_rescan_cron() -> Option<String> {
-    Some("0 */4 * * *".into())
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct WorkflowsSettings {
-    /// When true, batch workflows may call readonly third-party MCP tools (default: false).
-    #[serde(default)]
-    pub mcp_readonly: bool,
-    #[serde(flatten)]
-    entries: HashMap<String, WorkflowConfig>,
-}
-
-impl WorkflowsSettings {
-    pub fn get(&self, id: &str) -> Option<&WorkflowConfig> {
-        self.entries.get(id)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &WorkflowConfig)> {
-        self.entries.iter()
-    }
-
-    /// Effective readonly-MCP flag for a workflow (per-workflow override, else global).
-    pub fn mcp_readonly_for(&self, workflow_id: &str) -> bool {
-        self.entries
-            .get(workflow_id)
-            .and_then(|w| w.mcp_readonly)
-            .unwrap_or(self.mcp_readonly)
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct WorkflowConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Technique skills; default from built-in workflow registry.
-    #[serde(default)]
-    pub skills: Vec<String>,
-    pub schedule: Option<String>,
-    /// Override `workflows.mcp_readonly` for this workflow.
-    #[serde(default)]
-    pub mcp_readonly: Option<bool>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PolicyConfig {
     #[serde(default)]
@@ -504,6 +429,10 @@ fn default_max_prs() -> u32 {
 }
 fn default_max_tool_calls() -> u32 {
     5
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -524,7 +453,7 @@ pub struct OutputConfig {
     pub export_digest_md: bool,
     #[serde(default = "default_digest_path")]
     pub digest_export_path: String,
-    /// Optional Slack incoming webhook URL for digest summaries (headless / daemon).
+    /// Optional Slack incoming webhook URL for digest summaries.
     #[serde(default)]
     pub slack_webhook: Option<String>,
 }
@@ -1378,15 +1307,12 @@ llm:
   context_limit: 64000
 repos:
   - acme/widget
-workflows:
-  daily-work: {}
 "#;
         let cfg = Config::load_from_str(yaml).unwrap();
         assert_eq!(cfg.github.gh_command, "gh");
-        assert!(cfg.workflows.get("daily-work").unwrap().enabled);
+        assert_eq!(cfg.repos, vec!["acme/widget".to_string()]);
         assert_eq!(cfg.storage.backend, StorageBackend::Json);
         assert_eq!(cfg.storage.path, "./data");
-        assert!(cfg.schedule.daily_digest.is_some());
     }
 
     #[test]

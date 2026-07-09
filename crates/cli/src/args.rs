@@ -6,12 +6,9 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "unistar-coworker",
     about = "Local-first general agent for local LLMs",
-    after_help = "EXAMPLES:\n    unistar-coworker tui                                  Terminal UI (default)\n    unistar-coworker serve                            Web UI server\n    unistar-coworker chat                             interactive chat REPL\n    unistar-coworker chat --once \"summarize PR 123\" --json\n    unistar-coworker run-once --workflow daily-work\n    unistar-coworker triage-pr --repo acme/widget --pr 42 --json\n    unistar-coworker report oncall\n    unistar-coworker store compact --dry-run --audit-days 30\n\nGlobal flags (--config / -v / -q / --attach) go before the subcommand."
+    after_help = "EXAMPLES:\n    unistar-coworker tui                                  Terminal UI (default)\n    unistar-coworker serve                            Web UI server\n    unistar-coworker chat                             interactive chat REPL\n    unistar-coworker chat --once \"summarize PR 123\" --json\n    unistar-coworker triage-pr --repo acme/widget --pr 42 --json\n    unistar-coworker report oncall\n    unistar-coworker store compact --dry-run --audit-days 30\n\nGlobal flags (--config / -v / -q) go before the subcommand."
 )]
 pub(crate) struct Cli {
-    /// Attach to daemon store only — do not start a local cron scheduler
-    #[arg(long)]
-    pub(crate) attach: bool,
     /// Override config file path (skips discover in cwd / .coworker/)
     #[arg(long, global = true)]
     pub(crate) config: Option<PathBuf>,
@@ -30,20 +27,6 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
-    /// Run a workflow once without TUI (default: daily-work)
-    #[command(
-        after_help = "EXAMPLES:\n    unistar-coworker run-once\n    unistar-coworker run-once --workflow review-radar --json"
-    )]
-    RunOnce {
-        #[arg(long, default_value = "daily-work")]
-        workflow: String,
-        /// Emit machine-readable JSON on stdout
-        #[arg(long)]
-        json: bool,
-        /// Wall-clock timeout in seconds
-        #[arg(long)]
-        timeout: Option<u64>,
-    },
     /// Export store reports without running a full workflow
     Report {
         #[command(subcommand)]
@@ -65,13 +48,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         timeout: Option<u64>,
     },
-    /// Headless daemon: cron scheduler without TUI
-    Daemon {
-        /// Write the daemon PID to this file on start (removed on clean exit)
-        #[arg(long)]
-        pid_file: Option<PathBuf>,
-    },
-    /// Terminal UI with cron scheduler
+    /// Terminal UI
     Tui,
     /// Web UI server (browser)
     Serve {
@@ -113,11 +90,6 @@ pub(crate) enum Commands {
     Store {
         #[command(subcommand)]
         cmd: StoreCommands,
-    },
-    /// List built-in batch workflows (Rust registry)
-    Workflows {
-        #[command(subcommand)]
-        cmd: CatalogCmd,
     },
     /// List technique skills (skills/*/SKILL.md)
     Skills {
@@ -225,7 +197,7 @@ pub(crate) enum StoreCommands {
         #[arg(long)]
         dest: String,
     },
-    /// Prune old audit entries, digests, and workflow runs
+    /// Prune old audit entries and digests
     Compact {
         /// Prune audit entries older than N days
         #[arg(long, default_value_t = 90)]
@@ -233,9 +205,6 @@ pub(crate) enum StoreCommands {
         /// Keep only the N most recent digests
         #[arg(long, default_value_t = 30)]
         digest_keep: u32,
-        /// Prune completed workflow runs finished more than N days ago
-        #[arg(long, default_value_t = 30)]
-        workflow_runs_days: u32,
         /// Preview what would be pruned without deleting anything
         #[arg(long)]
         dry_run: bool,
@@ -266,14 +235,12 @@ use clap::CommandFactory;
 
 use coworker_core::config::Config;
 use coworker_core::error::Result;
-use coworker_core::exit_codes;
 use coworker_core::logging;
 use coworker_core::store::open_store;
 
-use super::terminal::{emit_json, err_prefix, hint_prefix, set_plain, timeout_prefix, warn_prefix};
+use super::terminal::set_plain;
 use super::{
-    catalog, chat, daemon, doctor_init, export, headless, report, rpc, runtime, store, triage,
-    upgrade_check,
+    catalog, chat, doctor_init, export, report, rpc, runtime, store, triage, upgrade_check,
 };
 
 pub async fn run() -> Result<()> {
@@ -289,20 +256,6 @@ pub async fn run() -> Result<()> {
         })
     );
     logging::init_tracing(tui_mode, cli.verbose, cli.quiet, chat_repl);
-
-    if cli.attach
-        && !matches!(
-            cli.command,
-            None | Some(Commands::Tui)
-                | Some(Commands::Serve { .. })
-                | Some(Commands::Daemon { .. })
-        )
-    {
-        eprintln!(
-            "{} --attach has no effect for this subcommand (only TUI / serve / daemon consume it)",
-            warn_prefix()
-        );
-    }
 
     if let Some(Commands::Completions { shell }) = &cli.command {
         let mut cmd = Cli::command();
@@ -339,59 +292,9 @@ pub async fn run() -> Result<()> {
         None => Config::discover()?,
     };
     let config_path = config_path.display().to_string();
-    let store = Arc::from(open_store(&config)?);
+    let store: Arc<dyn coworker_core::store::Store> = Arc::from(open_store(&config)?);
 
     match cli.command {
-        Some(Commands::RunOnce {
-            workflow,
-            json,
-            timeout,
-        }) => {
-            let run = headless::run_headless(config, store, &workflow, json || cli.quiet);
-            let outcome = match timeout {
-                Some(secs) => {
-                    match tokio::time::timeout(std::time::Duration::from_secs(secs), run).await {
-                        Ok(r) => r,
-                        Err(_) => {
-                            if json {
-                                emit_json(
-                                    serde_json::json!({ "ok": false, "workflow": workflow, "error": "timeout" }),
-                                );
-                            } else {
-                                eprintln!("{} after {secs}s", timeout_prefix());
-                                eprintln!(
-                                    "  {} increase --timeout or check LLM latency",
-                                    hint_prefix()
-                                );
-                            }
-                            std::process::exit(exit_codes::EXIT_TIMEOUT);
-                        }
-                    }
-                }
-                None => run.await,
-            };
-            match outcome {
-                Ok(msg) => {
-                    if json {
-                        emit_json(
-                            serde_json::json!({ "ok": true, "workflow": workflow, "message": msg }),
-                        );
-                    } else {
-                        println!("{msg}");
-                    }
-                }
-                Err(e) => {
-                    if json {
-                        emit_json(
-                            serde_json::json!({ "ok": false, "workflow": workflow, "error": e.to_string() }),
-                        );
-                    } else {
-                        eprintln!("{} {e}", err_prefix());
-                    }
-                    std::process::exit(exit_codes::EXIT_GENERAL);
-                }
-            }
-        }
         Some(Commands::Report { kind }) => {
             report::run_report(&config, store.as_ref(), kind).await?;
         }
@@ -403,14 +306,11 @@ pub async fn run() -> Result<()> {
         }) => {
             triage::run_triage_pr(config, store, &repo, pr, json, timeout).await?;
         }
-        Some(Commands::Daemon { pid_file }) => {
-            daemon::run_daemon(config, store, pid_file).await?;
-        }
         Some(Commands::Tui) | None => {
-            runtime::run_tui(config, config_path, store, cli.attach).await?;
+            runtime::run_tui(config, config_path, store).await?;
         }
         Some(Commands::Serve { bind }) => {
-            runtime::run_web(config, config_path, store, cli.attach, bind).await?;
+            runtime::run_web(config, config_path, store, bind).await?;
         }
         Some(Commands::Chat {
             once,
@@ -440,9 +340,6 @@ pub async fn run() -> Result<()> {
             timeout,
         }) => {
             rpc::run_rpc(config, store, session, yes, timeout).await?;
-        }
-        Some(Commands::Workflows { cmd }) => {
-            catalog::run_workflows_list(cmd).await?;
         }
         Some(Commands::Skills { cmd }) => {
             catalog::run_catalog_list("skills", "SKILL.md", cmd).await?;

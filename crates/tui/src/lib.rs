@@ -235,7 +235,7 @@ async fn handle_key(
         KeyCode::Char('r') => {
             let engine = Arc::clone(engine);
             tokio::spawn(async move {
-                let _ = engine.run_workflow("daily-work").await;
+                let _ = engine.refresh_store().await;
             });
         }
         KeyCode::Char('R') => {
@@ -248,18 +248,7 @@ async fn handle_key(
                     let mut s = state.write().await;
                     s.status = "connectivity probes refreshed".into();
                 });
-            } else {
-                let engine = Arc::clone(engine);
-                tokio::spawn(async move {
-                    let _ = engine.run_workflow("review-radar").await;
-                });
             }
-        }
-        KeyCode::Char('v') => {
-            let engine = Arc::clone(engine);
-            tokio::spawn(async move {
-                let _ = engine.run_workflow("review-radar").await;
-            });
         }
         KeyCode::Char('z') => {
             let mut s = state.write().await;
@@ -1199,7 +1188,7 @@ async fn jump_to_pr_from_context(state: &SharedState, list_state: &mut ListState
             (
                 ok,
                 format!("PRs {repo}#{number}"),
-                format!("PR {repo}#{number} not in store — run daily-work"),
+                format!("PR {repo}#{number} not in store — refresh store or triage in chat"),
             )
         }
     };
@@ -1550,7 +1539,7 @@ fn draw_list(
             let filtered = state.sorted_filtered_prs();
             if filtered.is_empty() {
                 vec![ListItem::new(format!(
-                    "No PRs ({}) — run daily-work",
+                    "No PRs ({}) — configure repos: and refresh",
                     state.pr_filter.label()
                 ))]
             } else {
@@ -1716,20 +1705,15 @@ fn config_connectivity_detail(state: &AppState) -> String {
         **GitHub** — {github_status}{github_bar}\n\n\
         **LLM** — {llm_status}{llm_bar}\n\n\
         _Bar scale: 0–2000ms_\n\n\
-        Press **R** to re-probe GitHub and LLM latency.\n\n\
-        ## Enabled workflows\n\n{}",
+        Press **R** to re-probe GitHub and LLM latency.",
         state.config.github.gh_command,
         if state.github_ok { "ok" } else { "offline" },
         state.config.llm.base_url,
         if state.llm_ok { "ok" } else { "offline" },
-        state
-            .config
-            .workflows
-            .iter()
-            .filter(|(_, w)| w.enabled)
-            .map(|(k, _)| format!("- `{k}`"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        github_status = github_status,
+        github_bar = github_bar,
+        llm_status = llm_status,
+        llm_bar = llm_bar,
     )
 }
 
@@ -1742,7 +1726,7 @@ fn detail_body(state: &AppState) -> (String, bool) {
         Tab::Dashboard => match dashboard_row_kind_at(state, state.selected_index) {
             Some(DashboardRowKind::Digest(idx)) => {
                 let raw = dashboard_digest_body(state, idx)
-                    .unwrap_or_else(|| "Press r to run daily-work.".into());
+                    .unwrap_or_else(|| "No digest in store yet.".into());
                 let has_md = idx == 0
                     || state
                         .digest_history
@@ -1766,7 +1750,7 @@ fn detail_body(state: &AppState) -> (String, bool) {
                 markdown: true,
             },
             _ => DetailBody {
-                text: "Press **r** to run daily-work.".into(),
+                text: "Press **r** to refresh store.".into(),
                 markdown: true,
             },
         },

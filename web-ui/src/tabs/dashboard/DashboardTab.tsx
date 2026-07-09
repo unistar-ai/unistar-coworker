@@ -19,32 +19,16 @@ export default function DashboardTab() {
           <button
             type="button"
             className="btn btn-ghost"
-            onClick={() => void apiPost("/api/workflows/daily-work")}
+            onClick={() => void apiPost("/api/store/refresh")}
           >
-            Run daily-work
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => void apiPost("/api/workflows/review-radar")}
-          >
-            Run review-radar
+            Refresh store
           </button>
         </div>
         {history.length === 0 ? (
           <EmptyState
             icon={ClipboardList}
             title="No digests yet"
-            description="Run a daily-work or review-radar workflow to generate the first digest."
-            action={
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => void apiPost("/api/workflows/daily-work")}
-              >
-                Run daily-work
-              </button>
-            }
+            description="Historical digests from older versions may still appear here. New digests are not generated automatically — use chat or triage-pr for GitHub ops."
           />
         ) : (
           <ul className="list">
@@ -70,7 +54,7 @@ export default function DashboardTab() {
             description={
               history.length
                 ? "Pick a date on the left to read its digest."
-                : "Run a workflow to generate digests."
+                : "No digest content in the local store."
             }
           />
         )}
@@ -90,7 +74,6 @@ function DigestRow({
   preview: string;
   onSelect: () => void;
 }) {
-  // Extract a one-line summary from the digest body (first non-heading line).
   const summary = preview
     ? preview
         .split("\n")

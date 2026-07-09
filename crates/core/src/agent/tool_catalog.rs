@@ -351,21 +351,9 @@ const TOOLS: &[ToolSpec] = &[
         optional: &[],
     },
     ToolSpec {
-        name: "harness_run_workflow",
-        blurb: "Run a built-in batch workflow by id (e.g. daily-work, review-radar)",
-        required: &["workflow_id"],
-        optional: &[],
-    },
-    ToolSpec {
         name: "harness_triage_pr",
         blurb: "Full PR triage workflow (same as TUI `t`) — updates Store triage_note",
         required: &["repo", "pr_number"],
-        optional: &[],
-    },
-    ToolSpec {
-        name: "harness_daily_digest",
-        blurb: "Run daily-work workflow — publishes digest to Store",
-        required: &[],
         optional: &[],
     },
     ToolSpec {

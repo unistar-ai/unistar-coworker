@@ -24,7 +24,7 @@ pub async fn build_handoff_markdown(store: &dyn Store) -> crate::error::Result<S
                 d.summary.ignorable,
             ));
         }
-        None => body.push_str("_No digest yet — run daily-work._\n"),
+        None => body.push_str("_No digest in store yet._\n"),
     }
 
     body.push_str("\n## Pending approvals\n\n");

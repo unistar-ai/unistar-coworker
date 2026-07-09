@@ -1,10 +1,8 @@
 mod args;
 mod catalog;
 mod chat;
-mod daemon;
 mod doctor_init;
 mod export;
-mod headless;
 mod report;
 mod rpc;
 mod runtime;

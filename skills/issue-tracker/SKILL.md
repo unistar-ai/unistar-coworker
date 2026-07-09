@@ -9,7 +9,6 @@ tools:
   - issue_get
   - issue_search
   - repo_get_info
-  - harness_run_workflow
 ---
 
 # Issue Tracker

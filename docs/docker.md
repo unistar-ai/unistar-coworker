@@ -64,9 +64,6 @@ storage:
 
 web:
   bind: 0.0.0.0:8787   # listen inside the container; map -p 127.0.0.1:8787:8787 on the host
-
-workflows:
-  daily-work: {}
 ```
 
 Create config and data dirs:

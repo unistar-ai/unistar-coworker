@@ -6,7 +6,7 @@ Guidance for AI agents working in the **unistar-coworker** repository.
 
 unistar-coworker is a **local-first general agent** built for **local LLMs** (Ollama / OpenAI-compatible APIs). Rust runtime, ratatui TUI, optional Web UI.
 
-**Core loop:** chat and scheduled **workflows** drive an LLM with native tool calling — workspace tools (`read_file`, `grep`, `bash_run`, …), optional **MCP** federation, and an in-process **GithubHarness** (`gh`) when GitHub/CI is in scope.
+**Core loop:** **chat** drives an LLM with native tool calling — workspace tools (`read_file`, `grep`, `bash_run`, …), optional **MCP** federation, and an in-process **GithubHarness** (`gh`) when GitHub/CI is in scope.
 
 **Design center:**
 
@@ -45,9 +45,9 @@ Three layers; do not blur responsibilities:
 
 | Layer | Location | Role |
 |-------|----------|------|
-| **Skill** | `skills/*/SKILL.md` | Reusable technique: triage rules, tone, digest style. No cron, no harness logic. Template: [`skills/_base/SKILL_TEMPLATE.md`](./skills/_base/SKILL_TEMPLATE.md). |
+| **Skill** | `skills/*/SKILL.md` | Reusable technique: triage rules, tone, digest style. No harness logic. Template: [`skills/_base/SKILL_TEMPLATE.md`](./skills/_base/SKILL_TEMPLATE.md). |
 | **Prompt** | `prompts/*.md` | Chat system prompt body; frontmatter `skills:` lists default techniques. |
-| **Harness** | `crates/core/src/agent/*.rs`, `crates/core/src/engine/*.rs` | Deterministic Rust: MCP, store, approvals, token budget, chat/workflow loops. |
+| **Harness** | `crates/core/src/agent/*.rs`, `crates/core/src/engine/*.rs` | Deterministic Rust: MCP, store, approvals, token budget, chat loop. |
 
 Tool names SSOT: [`skills/_base/TOOLS.md`](./skills/_base/TOOLS.md) + [`crates/core/src/agent/tool_catalog.rs`](./crates/core/src/agent/tool_catalog.rs).
 
@@ -90,12 +90,11 @@ For new **GitHub** tools, extend **GithubHarness** / unistar-mcp catalog — do 
 
 ---
 
-## Store, scheduler, TUI
+## Store, TUI
 
 | Area | Path |
 |------|------|
 | JSON / SQLite store | `crates/core/src/store/` |
-| Cron + workflow dispatch | `crates/core/src/engine/scheduler.rs`, `crates/core/src/engine/workflows.rs` |
 | TUI (tabs, chat, context panel, approvals) | `crates/tui/src/` |
 | CLI entry | `crates/unistar-coworker/src/main.rs`, `crates/cli/src/` |
 
@@ -129,9 +128,8 @@ cargo fmt --check              # CI enforces formatting
 cargo clippy --workspace --features embed-web-ui -- -D warnings
 cargo test --workspace
 cd web-ui && npm run build:fast && npx tsc --noEmit && npx vitest run
-cargo run -p unistar-coworker --release --features embed-web-ui            # TUI + scheduler
+cargo run -p unistar-coworker --release --features embed-web-ui            # TUI
 cargo run -p unistar-coworker --release --features embed-web-ui -- chat --once "Summarize open PRs in acme/widget"
-cargo run -p unistar-coworker --release --features embed-web-ui -- run-once --workflow daily-work
 ```
 
 ### Fast compile (dev)
@@ -142,7 +140,7 @@ Default `cargo build` / `cargo check` **omit** `embed-web-ui`. The React UI is r
 
 Release builds, [`scripts/package.sh`](./scripts/package.sh), and CI use `--features embed-web-ui` for a single-binary deploy. Optional speedups: `.cargo/config.toml` sets `debug=1` + incremental; uncomment `sccache` / `mold` there if installed.
 
-List skills/workflows: `cargo run --release --features embed-web-ui -- skills list` / `workflows list`.
+List skills: `cargo run --release --features embed-web-ui -- skills list`.
 
 ---
 
@@ -207,7 +205,7 @@ When adding a chat tool, update: `TOOLS.md` (if documented), `tool_catalog.rs` `
 | **`CLAUDE.md`** | Claude Code | Entry point; points here, avoids duplicating content |
 | **`.cursor/rules/`** | Cursor IDE | e.g. `conventional-commits.mdc` |
 | **`.claude/rules/`** | Claude Code | e.g. `conventional-commits.md` (same policies) |
-| **`skills/`** | unistar-coworker runtime | Workflow/chat skills — not IDE configuration |
+| **`skills/`** | unistar-coworker runtime | Chat skills — not IDE configuration |
 
 Personal overrides: `.cursor/settings.json` and `.claude/settings.local.json` are gitignored.
 
@@ -216,4 +214,4 @@ Personal overrides: `.cursor/settings.json` and `.claude/settings.local.json` ar
 ## Related repos
 
 - [unistar-mcp](../unistar-mcp) — Go MCP server (`gh`/`git`); see its `AGENTS.md` for tool design principles.
-- MCP PR/CI triage skill: `unistar-mcp/.cursor/skills/pr-ci-triage/SKILL.md` (coworker loads `skills/ci-triage/SKILL.md` for workflows/chat).
+- MCP PR/CI triage skill: `unistar-mcp/.cursor/skills/pr-ci-triage/SKILL.md` (coworker loads `skills/ci-triage/SKILL.md` for chat).

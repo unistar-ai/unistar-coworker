@@ -2454,9 +2454,7 @@ function updateStatus() {
     delete ctxEl.dataset.fp;
   }
 
-  const footerText = state.attach_mode
-    ? "attach mode · shared store with daemon"
-    : `model: ${state.llm_model} · repos: ${(state.repos || []).join(", ") || "—"}`;
+  const footerText = `model: ${state.llm_model} · repos: ${(state.repos || []).join(", ") || "—"}`;
   if (footer.textContent !== footerText) footer.textContent = footerText;
 }
 
@@ -2623,10 +2621,8 @@ function renderDashboard(main) {
   const split = el("div", "split-panel");
   const listPane = el("div", "split-list");
   const toolbar = el("div", "toolbar");
-  toolbar.appendChild(el("button", "btn btn-ghost", "Run daily-work"));
-  toolbar.lastChild.onclick = () => apiFetch("/api/workflows/daily-work", { method: "POST" });
-  toolbar.appendChild(el("button", "btn btn-ghost", "Run review-radar"));
-  toolbar.lastChild.onclick = () => apiFetch("/api/workflows/review-radar", { method: "POST" });
+  toolbar.appendChild(el("button", "btn btn-ghost", "Refresh store"));
+  toolbar.lastChild.onclick = () => apiFetch("/api/store/refresh", { method: "POST" });
   listPane.appendChild(toolbar);
 
   const list = el("ul", "list");

@@ -128,6 +128,6 @@ printf '%s\n' \
 ## Related
 
 - **One-shot CLI**: `unistar-coworker chat --once "…" --json` (single message, then exit)
-- **Hot reload**: `POST /api/reload` or `SIGHUP` on TUI/serve/daemon
+- **Hot reload**: `POST /api/reload` or `SIGHUP` on TUI/serve
 - **Session export**: `unistar-coworker export session <id> --format jsonl`
 - **Health check**: `unistar-coworker doctor --json` or `GET /api/doctor`

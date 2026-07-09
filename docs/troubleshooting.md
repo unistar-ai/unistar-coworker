@@ -62,11 +62,6 @@ unistar-coworker store compact
 
 SQLite backend: ensure `storage.path` parent directory exists and is writable.
 
-## Workflows and cron
-
-- `run-once` blocks third-party MCP by default — set `workflows.mcp_readonly: true` if you need readonly MCP in batch jobs.
-- Daemon + TUI: use `--attach` to connect TUI to an existing daemon store.
-
 ## Logs
 
 | Source | How |

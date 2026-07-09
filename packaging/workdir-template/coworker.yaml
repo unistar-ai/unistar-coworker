@@ -20,17 +20,13 @@ llm:
     context_limit: 128000
     api_key: ${DEEPSEEK_API_KEY}
 
-# --- Optional GitHub (uncomment when using workflows / harness tools) ---
+# --- Optional GitHub (uncomment when using harness tools) ---
 # github:
 #   gh_command: gh
 #   env: {}
 #
 # repos:
 #   - owner/repo
-#
-# workflows:
-#   daily-work: {}
-#   review-radar: {}
 
 chat:
   workspace: .

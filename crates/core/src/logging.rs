@@ -1,6 +1,6 @@
 use tracing_subscriber::EnvFilter;
 
-/// Headless / daemon: logs go to stderr. TUI: suppress stderr (ratatui owns the
+/// Non-TUI modes: logs go to stderr. TUI: suppress stderr (ratatui owns the
 /// terminal). `suppress_stderr` (interactive chat REPL) also sinks logs so they
 /// don't interleave with the in-place reasoning preview / streamed reply.
 pub fn init_tracing(tui_mode: bool, verbose: u8, quiet: bool, suppress_stderr: bool) {

@@ -22,11 +22,12 @@ Full docs: [README.md](README.md) · Docker details: [docs/docker.md](docs/docke
 7. Start Web UI: `./unistar-coworker serve`
 8. Open [http://127.0.0.1:8787](http://127.0.0.1:8787) and chat in the workspace (`chat.workspace` in config).
 
-### Optional — GitHub workflows
+### Optional — GitHub
 
 9. Set GitHub auth: `export GH_TOKEN=...` or run `gh auth login` on the host.
 10. Add `repos:` to `coworker.yaml` (or re-run `init --interactive` with repos).
-11. Run a workflow once: `./unistar-coworker run-once --workflow daily-work`
+11. Try GitHub in chat: `./unistar-coworker chat --once "Summarize open PRs in owner/repo"`  
+    Or debug one PR: `./unistar-coworker triage-pr --repo owner/repo --pr 42`
 12. Read `coworker.example.yaml` or [coworker.minimal.yaml](./coworker.minimal.yaml) for advanced settings.
 
 ---
