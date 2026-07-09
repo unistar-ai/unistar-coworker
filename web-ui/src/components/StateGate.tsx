@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useStore } from "../store/wsStore";
-import { AlertTriangle, RefreshCw, ExternalLink, Loader2 } from "lucide-react";
+import { AlertTriangle, RefreshCw, Loader2 } from "lucide-react";
 
 interface StateGateProps {
   retry: () => void;
@@ -48,10 +48,6 @@ export default function StateGate({ retry, children }: StateGateProps) {
           <RefreshCw size={14} aria-hidden="true" />
           Retry
         </button>
-        <a className="btn btn-ghost" href="/legacy">
-          <ExternalLink size={14} aria-hidden="true" />
-          Open legacy UI
-        </a>
       </div>
     </div>
   );

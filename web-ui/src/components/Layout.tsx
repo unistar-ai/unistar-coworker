@@ -237,14 +237,7 @@ function Placeholder({ tab }: { tab: string }) {
     <div className="flex h-full items-center justify-center text-text-muted">
       <div className="text-center">
         <div className="mb-2 text-lg capitalize">{tab}</div>
-        <p className="text-sm">This tab is rendered in the React UI.</p>
-        <p className="mt-1 text-xs">
-          For the full-featured legacy interface, visit{" "}
-          <a href="/legacy" className="text-accent underline">
-            /legacy
-          </a>
-          .
-        </p>
+        <p className="text-sm">This tab is not implemented yet.</p>
       </div>
     </div>
   );

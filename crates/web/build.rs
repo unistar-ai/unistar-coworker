@@ -8,7 +8,7 @@
 // by package.sh / CI, so `cargo build` never depends on Node and never
 // rebuilds dist/ spuriously (which would force this crate to recompile). When
 // dist/ is absent the manifest emits a stub so `cargo build` never fails solely
-// due to a missing frontend build (binary falls back to legacy UI).
+// due to a missing frontend build (React UI returns 503 until dist/ exists).
 
 use std::fs;
 use std::path::PathBuf;
@@ -38,8 +38,7 @@ fn main() {
     // depends on a Node toolchain and never rebuilds dist/ spuriously (a
     // spurious rebuild would bump dist mtimes and force this crate to
     // recompile). build.rs only embeds whatever web-ui/dist/ already exists
-    // when `embed-web-ui` is enabled; otherwise the binary serves dist/ from
-    // disk at runtime (dev) or falls back to legacy UI.
+    // when `embed-web-ui` is enabled; otherwise the binary serves dist/ from disk at runtime.
 
     // Generate the manifest (content-stable: only rewritten when it would
     // change), so `ui.rs` can `include!` it without needless recompiles.
@@ -105,10 +104,9 @@ fn main() {
         out.push_str("];\n");
         out.push_str("pub static HAS_DIST: bool = true;\n");
     } else if embed {
-        // No dist/ — emit a stub so the binary compiles. The React UI will
-        // return 404 and users fall back to /legacy.
+        // No dist/ — emit a stub so the binary compiles. React routes return 503.
         println!(
-            "cargo:warning=web-ui/dist missing; run `npm run build:fast` in web-ui/ to embed the React UI, else it falls back to legacy"
+            "cargo:warning=web-ui/dist missing; run `npm run build:fast` in web-ui/ to embed the React UI"
         );
         out.push_str("pub static INDEX_HTML: &str = \"\";\n");
         out.push_str("pub static ASSETS: &[(&str, AssetContent)] = &[];\n");

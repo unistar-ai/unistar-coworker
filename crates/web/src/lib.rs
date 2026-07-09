@@ -17,7 +17,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header::AUTHORIZATION, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
@@ -79,18 +79,9 @@ pub async fn run(
 }
 
 pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>) -> Router {
-    // React UI takes `/` and `/assets/*` (embedded from web-ui/dist/ by
-    // build.rs). The legacy vanilla UI lives at `/legacy` as a fully-featured
-    // fallback while the React UI is being completed. The sensitive surface —
-    // /api/* (except /api/health) and /ws — is gated by `auth_token` below.
+    // React UI at `/` and `/assets/*` (embedded from web-ui/dist/ by build.rs, or
+    // served from disk in dev). /api/* and /ws are gated by `auth_token` below.
     let react = ui::react_router().with_state(());
-
-    let legacy_assets = Router::new()
-        .route("/legacy", get(legacy_index))
-        .route("/legacy/markdown.js", get(legacy_markdown_js))
-        .route("/legacy/approvals.js", get(legacy_approvals_js))
-        .route("/legacy/app.js", get(legacy_app_js))
-        .route("/legacy/style.css", get(legacy_css));
 
     let protected = Router::new()
         .route("/api/state", get(api_state))
@@ -134,7 +125,6 @@ pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>)
     Router::new()
         .route("/api/health", get(api_health))
         .merge(react)
-        .merge(legacy_assets)
         .merge(protected)
         .layer(middleware::from_fn(csp_middleware))
         .layer(TraceLayer::new_for_http())
@@ -323,40 +313,6 @@ async fn publish_snapshot(state: &SharedState, snap_tx: &broadcast::Sender<Strin
     if let Ok(json) = serde_json::to_string(&snap) {
         let _ = snap_tx.send(json);
     }
-}
-
-// --- Legacy vanilla UI handlers (served at /legacy/*) ---
-
-async fn legacy_index() -> Html<&'static str> {
-    Html(include_str!("static/index.html"))
-}
-
-async fn legacy_markdown_js() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-        include_str!("static/markdown.js"),
-    )
-}
-
-async fn legacy_approvals_js() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-        include_str!("static/approvals.js"),
-    )
-}
-
-async fn legacy_app_js() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-        include_str!("static/app.js"),
-    )
-}
-
-async fn legacy_css() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/css")],
-        include_str!("static/style.css"),
-    )
 }
 
 async fn api_state(State(rt): State<Arc<WebRuntime>>) -> Json<snapshot::WebSnapshot> {

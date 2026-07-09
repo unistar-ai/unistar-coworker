@@ -137,17 +137,17 @@ context + live zone).
 A 100ms tick coalesces dirty flags: `chat_dirty` wins over `live_dirty` (a
 chat patch supersedes a live patch).
 
-## Client apply order (`src/web/static/app.js`)
+## Client apply order (`web-ui/src/store/wsStore.ts`)
 
 ```
 ws.onmessage:
-  if data._type === "live":  applyLivePatch(data)  → scheduleLiveRender()  (rAF)
-  if data._type === "chat":  applyChatPatch(data)  → scheduleChatRender()   (rAF, 120ms debounce when chat_busy)
-  else:                      state = data           → scheduleRender()      (rAF, full)
+  if data._type === "live":  apply live patch fields → React re-render
+  if data._type === "chat":  apply chat patch fields → React re-render
+  else:                      merge full snapshot     → React re-render
 ```
 
-`applyLivePatch` merges the 10 live fields into `state`. `applyChatPatch`
-merges the 19 chat fields. Both initialize `state = {}` if absent.
+Live and chat patches merge partial fields into the Zustand store. The full
+snapshot replaces client state on connect and after non-streaming events.
 
 ## Reconnection
 
@@ -162,8 +162,7 @@ to recover any patches missed during the disconnect.
    `build_*_from` builder.
 2. **Rust tests**: update `EXPECTED_LIVE_PATCH_KEYS` / `EXPECTED_CHAT_PATCH_KEYS`
    in `snapshot::tests` (the contract test will fail until you do).
-3. **JS**: update `applyLivePatch` / `applyChatPatch` in
-   [`static/app.js`](./static/app.js) to read the new field.
+3. **React**: update `protocol.ts` types and `wsStore.ts` patch applicators.
 4. **Docs**: update the table above.
 
 The contract test (`live_patch_serializes_expected_keys` /

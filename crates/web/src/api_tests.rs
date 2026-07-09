@@ -171,26 +171,6 @@ async fn react_index_served_at_root() {
 }
 
 #[tokio::test]
-async fn legacy_ui_served_at_legacy() {
-    // The vanilla UI is restored at /legacy as a fully-featured fallback.
-    let runtime = test_runtime().await;
-    let app = test_app(runtime, None);
-    let (status, body) = get_text(app, "/legacy", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("unistar-coworker"));
-    assert!(body.contains("/legacy/app.js"));
-}
-
-#[tokio::test]
-async fn legacy_assets_served() {
-    let runtime = test_runtime().await;
-    let app = test_app(Arc::clone(&runtime), None);
-    let (status, body) = get_text(app, "/legacy/app.js", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("function") || body.contains("const "));
-}
-
-#[tokio::test]
 async fn react_index_public_when_token_configured() {
     // Static assets (React HTML/JS/CSS) remain public even when auth_token is
     // set, so browsers can load them as subresources. The sensitive surface

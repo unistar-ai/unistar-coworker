@@ -198,7 +198,7 @@ The Web UI is a **React 18 SPA** (Vite + Tailwind + Radix UI + zustand). It prov
 | **Dev** (default) | `cargo build` / `cargo run -- serve` | Reads `web-ui/dist/` from disk at runtime — Rust-only edits do not re-embed JS bundles |
 | **Release / CI** | `cargo build --release --features embed-web-ui` | `build.rs` embeds `web-ui/dist/` via `include_str!` / `include_bytes!` for a single-binary deploy |
 
-`build.rs` does **not** run `npm` — the frontend build is owned by the developer, CI, or [`scripts/package.sh`](./scripts/package.sh) (`npm run build:fast`). With `embed-web-ui`, the generated manifest is content-gated so the crate only recompiles when bundled assets actually change. Without `embed-web-ui`, run `npm run build:fast` once so `serve` can find `web-ui/dist/`; if `dist/` is missing the React routes return 503 (legacy UI may still be available).
+`build.rs` does **not** run `npm` — the frontend build is owned by the developer, CI, or [`scripts/package.sh`](./scripts/package.sh) (`npm run build:fast`). With `embed-web-ui`, the generated manifest is content-gated so the crate only recompiles when bundled assets actually change. Without `embed-web-ui`, run `npm run build:fast` once so `serve` can find `web-ui/dist/`; if `dist/` is missing the React routes return 503.
 
 **Hot reload** (no process restart): send `SIGHUP` to a running `serve` / `tui`, or `POST /api/reload` — reloads `coworker.yaml`, skills, prompts, and MCP connections.
 
@@ -659,7 +659,7 @@ unistar-coworker/
 └── Cargo.lock
 ```
 
-Crate version: **3.0.1** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)). Local LLM setup: [docs/local-models.md](./docs/local-models.md).
+Crate version: **3.1.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)). Local LLM setup: [docs/local-models.md](./docs/local-models.md).
 
 ---
 

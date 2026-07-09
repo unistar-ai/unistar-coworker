@@ -633,8 +633,8 @@ repos: [acme/widget]
     }
 
     /// Keys that MUST appear in every `WebLivePatch` JSON. Adding or removing
-    /// a field requires updating both the Rust struct and the JS applicator in
-    /// `app.js::applyLivePatch` — this test forces that conscious update.
+    /// a field requires updating both the Rust struct and the React applicator in
+    /// `web-ui/src/store/wsStore.ts` — this test forces that conscious update.
     const EXPECTED_LIVE_PATCH_KEYS: &[&str] = &[
         "_type",
         "status",

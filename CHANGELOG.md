@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-07-09
+
+### Removed
+
+- Legacy vanilla Web UI at `/legacy` (`app.js`, `style.css`, `markdown.js`, `approvals.js`).
+- React error/placeholder links to `/legacy`.
+
+### Changed
+
+- Web protocol docs and snapshot contract comments now reference `web-ui/src/store/wsStore.ts`.
+- Without `web-ui/dist/`, `serve` returns 503 only (no fallback UI).
+
+[3.1.0]: https://github.com/unistar-ai/unistar-coworker/compare/v3.0.1...v3.1.0
+
 ## [3.0.1] - 2026-07-09
 
 ### Removed
