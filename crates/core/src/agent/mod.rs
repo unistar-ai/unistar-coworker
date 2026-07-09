@@ -1,3 +1,4 @@
+pub mod ask_user_tool;
 pub mod bash_tool;
 pub mod budget;
 pub mod chat_completion_judge;

@@ -128,7 +128,7 @@ export default function ChatHistory({
       <EmptyState
         icon={MessageSquare}
         title="No messages yet"
-        description="Ask about your workspace — code, tests, or docs. For GitHub, name owner/repo or paste a PR URL (no default repo)."
+        description="Ask about your workspace — code, tests, or docs. For GitHub, the agent will ask which repo if you have not named one yet."
       />
     );
   }

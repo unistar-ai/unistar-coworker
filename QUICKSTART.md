@@ -25,7 +25,7 @@ Full docs: [README.md](README.md) · Docker details: [docs/docker.md](docs/docke
 ### Optional — GitHub
 
 9. Set GitHub auth: `export GH_TOKEN=...` or run `gh auth login` on the host.
-10. In chat, name `owner/repo` or paste a PR URL — the agent does **not** guess a default repo.
+10. Prefer naming `owner/repo` or pasting a PR URL; if you omit it, the agent will **ask** which repository to use (it will not guess).
 11. Try: `./unistar-coworker chat --once "Summarize open PRs in owner/repo"`  
     Or: `./unistar-coworker chat --once "triage https://github.com/owner/repo/pull/42"`  
     CLI report: `./unistar-coworker report ci --repo owner/repo`

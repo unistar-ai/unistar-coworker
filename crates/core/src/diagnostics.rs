@@ -101,7 +101,7 @@ pub async fn run_checks_with_extras(
                             detail: "legacy `repos:` key is ignored (removed in v4.2)".into(),
                             latency_ms: None,
                             hint: Some(
-                                "name owner/repo or paste a PR URL in chat; use `report ci --repo owner/name`"
+                                "in chat the agent asks for owner/repo or a PR URL when needed; CLI: `report ci --repo owner/name`"
                                     .into(),
                             ),
                         });

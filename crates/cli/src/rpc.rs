@@ -118,7 +118,7 @@ async fn run_rpc_turn(
     timeout: Option<u64>,
 ) -> Result<()> {
     let run_once = async {
-        let (mut result, _streamed, mut pending) = run_turn_with_progress(
+        let (mut result, _streamed, mut pending, _pending_q) = run_turn_with_progress(
             engine,
             rx,
             true,
@@ -158,7 +158,7 @@ async fn run_rpc_turn(
                 tool_name: pa.tool_name.clone(),
                 tool_args,
             };
-            let (r, _s, p) = run_turn_with_progress(
+            let (r, _s, p, _) = run_turn_with_progress(
                 engine,
                 rx,
                 true,
@@ -195,6 +195,7 @@ async fn run_rpc_turn(
             .map(|tc| serde_json::json!({ "tool": tc.tool_name, "output": tc.output }))
             .collect::<Vec<_>>(),
         "awaiting_approval": result.awaiting_approval,
+        "awaiting_user_input": result.awaiting_user_input,
     }));
     Ok(())
 }
@@ -246,6 +247,18 @@ fn rpc_progress_json(p: &coworker_core::agent::chat_loop::ChatProgress) -> Optio
             ..
         } => {
             serde_json::json!({"stage": "approval_resolved", "tool": tool_name, "approved": approved})
+        }
+        ChatProgress::UserQuestionQueued {
+            question,
+            options,
+            ..
+        } => {
+            serde_json::json!({"stage": "ask_user", "question": question, "options": options})
+        }
+        ChatProgress::UserAnswerResolved {
+            answer_preview, ..
+        } => {
+            serde_json::json!({"stage": "ask_user_answered", "answer": answer_preview})
         }
         ChatProgress::ReasoningSummary { preview, .. } => {
             serde_json::json!({"stage": "reasoning_summary", "preview": preview})

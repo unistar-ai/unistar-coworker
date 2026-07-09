@@ -25,7 +25,7 @@
 ### 可选 — GitHub
 
 9. 配置 GitHub 认证：`export GH_TOKEN=...` 或在宿主机执行 `gh auth login`。
-10. 在对话里写明 `owner/repo` 或粘贴 PR URL — agent **不会**猜测默认仓库。
+10. 对话里可写明 `owner/repo` 或粘贴 PR URL；若未提供，agent 会**主动询问**要用哪个仓库（不会猜测）。
 11. 试用：`./unistar-coworker chat --once "汇总 owner/repo 的 open PR"`  
     或：`./unistar-coworker chat --once "triage https://github.com/owner/repo/pull/42"`  
     CLI 报告：`./unistar-coworker report ci --repo owner/repo`

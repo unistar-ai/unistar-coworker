@@ -37,6 +37,7 @@ const PRELOAD_NATIVE_TOOLS: &[&str] = &[
     "skill_load",
     "tool_search",
     "tool_call",
+    "ask_user",
     "read_file",
     "grep",
     "glob",
@@ -339,6 +340,12 @@ const TOOLS: &[ToolSpec] = &[
         optional: &["limit"],
     },
     ToolSpec {
+        name: "ask_user",
+        blurb: "Pause and ask the user; pass options[] for choices plus free-text custom answer",
+        required: &["question"],
+        optional: &["options", "context"],
+    },
+    ToolSpec {
         name: "bash_run",
         blurb: "Run a shell command or short script after LLM safety review (no-approval path; prefer single-line for simple ops)",
         required: &["command"],
@@ -605,6 +612,17 @@ impl ToolCatalog {
             "Tool `{tool_name}` is missing required `{missing_field}` in tool_args \
 (use tool_args, not params/args at the top level)."
         );
+        if missing_field == "repo" {
+            out.push_str(
+                "\n**Ask the user** which GitHub repository to use (`owner/name` or a PR URL). \
+Do not invent a repo, and do not retry this tool until they answer.",
+            );
+        } else if missing_field == "pr_number" {
+            out.push_str(
+                "\n**Ask the user** for the PR number (or a PR URL) if it is not already in the conversation. \
+Do not invent a PR number.",
+            );
+        }
         out.push_str(&self.format_required_optional(tool_name));
         let pr = if missing_field == "pr_number" {
             example_value.and_then(|v| v.parse::<u32>().ok())
@@ -751,6 +769,21 @@ impl ToolCatalog {
         repo: Option<&str>,
     ) -> ErrorEnvelope {
         let fields = missing.join(", ");
+        let try_steps = if missing.iter().any(|f| f == "repo") {
+            vec![
+                "Stop calling tools.".into(),
+                "Ask the user which GitHub repository (`owner/name`) or PR URL to use.".into(),
+                "After they answer, call the tool again with `repo` filled in.".into(),
+            ]
+        } else if missing.iter().any(|f| f == "pr_number") {
+            vec![
+                "Ask the user for the PR number or a PR URL if missing from the conversation."
+                    .into(),
+                format!("Then retry `{tool_name}` with the missing field(s): {fields}"),
+            ]
+        } else {
+            vec![format!("Add required field(s): {fields}")]
+        };
         let example =
             serde_json::from_str::<Value>(&example_native_tool_args(tool_name, pr, run_id, repo))
                 .ok()
@@ -764,7 +797,7 @@ impl ToolCatalog {
             tool_name,
             &format!("Tool `{tool_name}` is missing required arguments"),
             &format!("Missing: {fields}"),
-            vec![format!("Add required field(s): {fields}")],
+            try_steps,
             example,
             &format!(
                 "Args sent: {}",
@@ -1133,7 +1166,9 @@ fn json_type_for_arg(key: &str) -> &'static str {
     match key {
         "repo" | "author" | "branch" | "body" | "target_branch" | "since" | "name" | "query"
         | "category" | "uri" | "command" | "cwd" | "path" | "pattern" | "old_string"
-        | "new_string" | "content" | "url" | "mode" | "code" | "answer" => "string",
+        | "new_string" | "content" | "url" | "mode" | "code" | "answer" | "question"
+        | "context" => "string",
+        "options" => "array",
         "replace_all" | "create_only" | "browser" => "boolean",
         "args" => "object",
         _ => "integer",
@@ -1144,18 +1179,12 @@ fn tool_parameters(spec: &ToolSpec) -> Value {
     let mut props = serde_json::Map::new();
     let mut required = Vec::new();
     for key in spec.required {
-        props.insert(
-            (*key).to_string(),
-            serde_json::json!({ "type": json_type_for_arg(key) }),
-        );
+        props.insert((*key).to_string(), prop_schema_for_arg(key));
         required.push(*key);
     }
     for key in spec.optional {
         if !props.contains_key(*key) {
-            props.insert(
-                (*key).to_string(),
-                serde_json::json!({ "type": json_type_for_arg(key) }),
-            );
+            props.insert((*key).to_string(), prop_schema_for_arg(key));
         }
     }
     if spec.name == "tool_call" {
@@ -1171,6 +1200,17 @@ fn tool_parameters(spec: &ToolSpec) -> Value {
         "required": required,
         "additionalProperties": false,
     })
+}
+
+fn prop_schema_for_arg(key: &str) -> Value {
+    match key {
+        "options" => serde_json::json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Suggested answers shown as choices; user may still type a custom reply"
+        }),
+        _ => serde_json::json!({ "type": json_type_for_arg(key) }),
+    }
 }
 
 fn native_tool_from_spec(spec: &ToolSpec) -> Value {
@@ -1510,6 +1550,14 @@ mod tests {
     }
 
     #[test]
+    fn args_nudge_missing_repo_asks_user() {
+        let msg = ToolCatalog::new().format_tool_args_nudge("pr_list_open", "repo", None, None);
+        assert!(msg.contains("Ask the user"));
+        assert!(msg.contains("owner/name") || msg.contains("PR URL"));
+        assert!(msg.contains("Do not invent"));
+    }
+
+    #[test]
     fn args_nudge_includes_schema() {
         let msg =
             ToolCatalog::new().format_tool_args_nudge("pr_get_overview", "pr_number", None, None);
@@ -1647,6 +1695,7 @@ mod tests {
     fn is_lazy_native_tool_classification() {
         assert!(is_lazy_native_tool("tool_search"));
         assert!(is_lazy_native_tool("skill_load"));
+        assert!(is_lazy_native_tool("ask_user"));
         assert!(is_lazy_native_tool("read_file"));
         assert!(is_lazy_native_tool("grep"));
         assert!(is_lazy_native_tool("glob"));

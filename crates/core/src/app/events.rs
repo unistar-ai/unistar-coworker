@@ -1,6 +1,6 @@
 //! Engine → UI state updates (shared by TUI and WebUI).
 
-use super::{AppEvent, ChatPendingApproval, SharedState};
+use super::{AppEvent, ChatPendingApproval, ChatPendingUserQuestion, SharedState};
 use crate::agent::chat_loop::{ChatActivityFlow, ChatProgress};
 
 pub async fn apply_event(state: &SharedState, ev: AppEvent) {
@@ -147,6 +147,45 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                     s.push_chat_line(p.display_line());
                     s.close_approval_dialog();
                     s.resolve_chat_approval(*approval_id, *approved, detail);
+                }
+                ChatProgress::UserQuestionQueued {
+                    question_id,
+                    session_id,
+                    question,
+                    options,
+                    context,
+                    tool_call_id,
+                    tool_args_json,
+                } => {
+                    s.set_chat_streaming(None);
+                    s.set_chat_tool_pending(None);
+                    s.set_chat_reasoning(None);
+                    s.set_chat_reasoning_compressing(false);
+                    s.set_chat_tool_running(None);
+                    let idx = s.chat_lines.len();
+                    s.push_chat_line(p.display_line());
+                    s.set_chat_pending_user_question(Some(ChatPendingUserQuestion {
+                        id: *question_id,
+                        session_id: *session_id,
+                        question: question.clone(),
+                        options: options.clone(),
+                        context: context.clone(),
+                        tool_call_id: tool_call_id.clone(),
+                        tool_args_json: tool_args_json.clone(),
+                        line_index: idx,
+                    }));
+                }
+                ChatProgress::UserAnswerResolved {
+                    question_id,
+                    answer_preview,
+                } => {
+                    s.set_chat_streaming(None);
+                    s.set_chat_tool_pending(None);
+                    s.set_chat_reasoning(None);
+                    s.set_chat_reasoning_compressing(false);
+                    s.set_chat_tool_running(None);
+                    s.push_chat_line(p.display_line());
+                    s.resolve_chat_user_question(*question_id, answer_preview);
                 }
                 ChatProgress::ReasoningSummary { body, original, .. } => {
                     s.set_chat_streaming(None);

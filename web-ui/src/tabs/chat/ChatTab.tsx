@@ -38,6 +38,7 @@ export default function ChatTab() {
   const reasoningOriginals = useStore((s) => s.chat_reasoning_originals);
   const autoApprove = useStore((s) => s.auto_approve_mutations);
   const chatTurnPhase = useStore((s) => s.chat_turn_phase);
+  const awaitingUserAnswer = useStore((s) => !!s.chat_pending_user_question);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [stickBottom, setStickBottom] = useState(true);
@@ -323,7 +324,90 @@ export default function ChatTab() {
           <ContextPanel mobileOpen={mobileDrawerOpen} onMobileClose={closeMobileCtx} />
         )}
       </div>
-      <ChatInput busy={chatBusy} />
+      <AskUserBanner />
+      {/* While ask_user is pending, answers go through the banner (options + custom). */}
+      {awaitingUserAnswer && !chatBusy ? null : <ChatInput busy={chatBusy} />}
+    </div>
+  );
+}
+
+function AskUserBanner() {
+  const pending = useStore((s) => s.chat_pending_user_question);
+  const chatBusy = useStore((s) => s.chat_busy);
+  const [custom, setCustom] = useState("");
+  const customRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setCustom("");
+    if (pending) {
+      // Focus custom field so users can type immediately.
+      requestAnimationFrame(() => customRef.current?.focus());
+    }
+  }, [pending?.id]);
+
+  if (!pending || chatBusy) return null;
+
+  const submit = (answer: string) => {
+    const msg = answer.trim();
+    if (!msg) return;
+    void apiPost("/api/chat", { message: msg });
+    setCustom("");
+  };
+
+  return (
+    <div className="ask-user-banner" role="status">
+      <div className="ask-user-banner-label">Agent is asking</div>
+      <div className="ask-user-banner-question">{pending.question}</div>
+      {pending.context ? (
+        <div className="ask-user-banner-context">{pending.context}</div>
+      ) : null}
+      {pending.options.length > 0 ? (
+        <div className="ask-user-banner-options" role="group" aria-label="Suggested answers">
+          {pending.options.map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              className="ask-user-option"
+              onClick={() => submit(opt)}
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <form
+        className="ask-user-custom"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit(custom);
+        }}
+      >
+        <input
+          ref={customRef}
+          type="text"
+          className="ask-user-custom-input"
+          value={custom}
+          onChange={(e) => setCustom(e.target.value)}
+          placeholder={
+            pending.options.length > 0
+              ? "Or type a custom answer…"
+              : "Type your answer…"
+          }
+          aria-label="Custom answer"
+        />
+        <button
+          type="submit"
+          className="btn btn-primary ask-user-custom-send"
+          disabled={!custom.trim()}
+        >
+          Send
+        </button>
+      </form>
+      {pending.options.length > 0 ? (
+        <div className="ask-user-banner-hint">
+          Pick an option above, or enter a custom answer.
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -426,7 +510,7 @@ function ChatInput({ busy }: { busy: boolean }) {
         placeholder={
           busy
             ? "Waiting for model…"
-            : "Message… (Enter newline · Shift+Enter send · /help). GitHub: owner/repo or PR URL"
+            : "Message… (Enter newline · Shift+Enter send · /help)"
         }
         rows={1}
       />

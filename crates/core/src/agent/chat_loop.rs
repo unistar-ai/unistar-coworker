@@ -8,6 +8,9 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::agent::ask_user_tool::{
+    self, format_pending_question_body, format_user_answer_body, is_ask_user_tool, AskUserPause,
+};
 use crate::agent::bash_tool;
 use crate::agent::budget::TokenBudget;
 use crate::agent::chat_completion_judge::{
@@ -23,9 +26,10 @@ use crate::agent::chat_stream::persist_interim_assistant_message;
 
 use crate::agent::context::{
     estimate_message_tokens, estimate_tools_tokens, format_tool_approval_pending_message,
-    format_tool_context_message, format_tools_for_context_panel, history_token_budget,
-    message_budget_for_tools, pack_session_history_with_llm, skill_body_for_context_panel,
-    tool_names_from_definitions, trim_llm_messages_with_llm, trim_system_content, truncate_chars,
+    format_tool_context_message, format_tool_user_question_pending_message,
+    format_tools_for_context_panel, history_token_budget, message_budget_for_tools,
+    pack_session_history_with_llm, skill_body_for_context_panel, tool_names_from_definitions,
+    trim_llm_messages_with_llm, trim_system_content, truncate_chars,
 };
 use crate::agent::file_tools;
 use crate::agent::hooks::{HookRunner, TurnContext};
@@ -172,6 +176,21 @@ pub enum ChatProgress {
         tool_name: String,
         approved: bool,
         detail: String,
+    },
+    /// `ask_user` paused — waiting for the next user message as the answer.
+    UserQuestionQueued {
+        question_id: Uuid,
+        session_id: Uuid,
+        question: String,
+        options: Vec<String>,
+        context: Option<String>,
+        tool_call_id: String,
+        tool_args_json: String,
+    },
+    /// User answered an `ask_user` pause; turn continues.
+    UserAnswerResolved {
+        question_id: Uuid,
+        answer_preview: String,
     },
     /// Summarizing streamed thinking via think=false LLM before the next step.
     ReasoningCompressing,
@@ -377,6 +396,15 @@ impl ChatProgress {
                 let mark = if *approved { "✓" } else { "✗" };
                 format!("  {mark} approval resolved: {tool_name}")
             }
+            Self::UserQuestionQueued { question, .. } => {
+                let preview = truncate_chars(question, 80);
+                format!("  ❓ ask_user: {preview}")
+            }
+            Self::UserAnswerResolved {
+                answer_preview, ..
+            } => {
+                format!("  ✓ user answered: {answer_preview}")
+            }
             Self::ReasoningCompressing => "  … summarizing reasoning".into(),
             Self::DuplicateToolBlocked {
                 tool_name,
@@ -429,6 +457,11 @@ impl ChatProgress {
                     format!("chat: approval failed ({tool_name})")
                 }
             }
+            Self::UserQuestionQueued { question, .. } => {
+                let preview = truncate_chars(question, 60);
+                format!("chat: waiting for your answer — {preview}")
+            }
+            Self::UserAnswerResolved { .. } => "chat: answer received…".into(),
             Self::DuplicateToolBlocked {
                 tool_name, attempt, ..
             } => {
@@ -693,6 +726,8 @@ pub struct ChatTurnInput {
     pub cancel: Option<Arc<AtomicBool>>,
     /// Continue a paused turn after the user approves or denies a mutating tool.
     pub resume: Option<ResumeChatAfterApproval>,
+    /// Continue a paused turn after the user answers an `ask_user` question.
+    pub resume_user_answer: Option<ResumeChatAfterUserAnswer>,
     /// Regenerate mode (Pi-style branching): instead of appending a new user
     /// message, fork a sibling assistant reply from `regenerate_from` (the
     /// assistant message being replaced). The new reply shares that message's
@@ -706,6 +741,14 @@ pub struct ResumeChatAfterApproval {
     pub approved: bool,
     pub detail: String,
     pub tool_name: String,
+    pub tool_args: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResumeChatAfterUserAnswer {
+    pub question_id: Uuid,
+    pub answer: String,
+    pub tool_call_id: String,
     pub tool_args: Value,
 }
 
@@ -760,6 +803,8 @@ pub struct ChatTurnResult {
     pub tool_calls: Vec<ToolCallSummary>,
     /// Turn paused waiting for human approval on a mutating tool.
     pub awaiting_approval: bool,
+    /// Turn paused waiting for the user to answer an `ask_user` question.
+    pub awaiting_user_input: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -786,6 +831,37 @@ pub async fn resume_chat_after_approval(
             progress,
             cancel,
             resume: Some(resume),
+            resume_user_answer: None,
+            regenerate_from: None,
+        },
+    )
+    .await
+}
+
+pub async fn resume_chat_after_user_answer(
+    config: &Config,
+    store: Arc<dyn Store>,
+    github: Arc<GithubHarness>,
+    mcp: Arc<McpPool>,
+    llm: Arc<LlmClient>,
+    session_id: Uuid,
+    resume: ResumeChatAfterUserAnswer,
+    progress: Option<broadcast::Sender<AppEvent>>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<ChatTurnResult> {
+    run_chat_turn(
+        config,
+        store,
+        github,
+        mcp,
+        llm,
+        ChatTurnInput {
+            session_id: Some(session_id),
+            user_message: String::new(),
+            progress,
+            cancel,
+            resume: None,
+            resume_user_answer: Some(resume),
             regenerate_from: None,
         },
     )
@@ -806,9 +882,10 @@ pub async fn run_chat_turn(
         progress,
         cancel,
         resume,
+        resume_user_answer,
         regenerate_from,
     } = input;
-    let is_resume = resume.is_some();
+    let is_resume = resume.is_some() || resume_user_answer.is_some();
     let is_regenerate = regenerate_from.is_some();
     let user_message = user_message.as_str();
     if !config.chat.enabled {
@@ -874,7 +951,21 @@ pub async fn run_chat_turn(
     } else {
         let prior = store.list_chat_messages(&session.id, usize::MAX).await?;
         let branch_leaf = prior.last().map(|m| m.id);
-        let user_msg_id = if !is_resume {
+        let user_msg_id = if let Some(ref answer_resume) = resume_user_answer {
+            // Persist the human answer as a normal user message, then continue the turn.
+            append_message_parented(
+                store.as_ref(),
+                &session.id,
+                ChatRole::User,
+                &answer_resume.answer,
+                None,
+                None,
+                None,
+                branch_leaf,
+                Some(0),
+            )
+            .await?
+        } else if !is_resume {
             append_message_parented(
                 store.as_ref(),
                 &session.id,
@@ -905,7 +996,17 @@ pub async fn run_chat_turn(
         };
         (history, fork_parent)
     };
-    let user_task = if is_resume {
+    let user_task = if resume_user_answer.is_some() {
+        // Prefer the original task (user message before the answer we just appended).
+        history
+            .iter()
+            .rev()
+            .filter(|m| m.role == ChatRole::User)
+            .nth(1)
+            .or_else(|| history.iter().rev().find(|m| m.role == ChatRole::User))
+            .map(|m| m.content.clone())
+            .unwrap_or_default()
+    } else if resume.is_some() {
         history
             .iter()
             .rev()
@@ -1044,6 +1145,16 @@ pub async fn run_chat_turn(
             store.as_ref(),
             &session_id,
             &mut session,
+            &mut llm_messages,
+            &resume,
+            &progress,
+        )
+        .await?;
+    }
+    if let Some(resume) = resume_user_answer {
+        apply_user_answer_resolution(
+            store.as_ref(),
+            &session_id,
             &mut llm_messages,
             &resume,
             &progress,
@@ -1431,6 +1542,7 @@ complete answer when the task is truly done."
                         assistant_message: message,
                         tool_calls,
                         awaiting_approval: false,
+                        awaiting_user_input: false,
                     });
                 }
             }
@@ -1550,13 +1662,95 @@ from tool results already in context.";
 
                 push_native_assistant_tool_calls(&mut llm_messages, &step);
 
-                let (mut readonly, mut mutating): (Vec<_>, Vec<_>) = (Vec::new(), Vec::new());
+                let (mut readonly, mut mutating, mut ask_user_calls): (
+                    Vec<_>,
+                    Vec<_>,
+                    Vec<_>,
+                ) = (Vec::new(), Vec::new(), Vec::new());
                 for call in prepared {
-                    if is_mutating_tool(&call.name) || mcp.is_mcp_mutating(&call.name).await {
+                    if is_ask_user_tool(&call.name) {
+                        ask_user_calls.push(call);
+                    } else if is_mutating_tool(&call.name) || mcp.is_mcp_mutating(&call.name).await {
                         mutating.push(call);
                     } else {
                         readonly.push(call);
                     }
+                }
+
+                if let Some(ask_call) = ask_user_calls.first().cloned() {
+                    if ask_user_calls.len() > 1
+                        || !readonly.is_empty()
+                        || !mutating.is_empty()
+                    {
+                        tracing::warn!(
+                            "ask_user must run alone; ignoring {} other tool_call(s) in the same round",
+                            ask_user_calls.len().saturating_sub(1)
+                                + readonly.len()
+                                + mutating.len()
+                        );
+                    }
+                    tools_used += 1;
+                    let pause = match ask_user_tool::parse_ask_user_args(&ask_call.args) {
+                        Ok(request) => AskUserPause {
+                            question_id: Uuid::new_v4(),
+                            request,
+                            tool_call_id: ask_call.id.clone(),
+                            tool_args: ask_call.args.clone(),
+                        },
+                        Err(e) => {
+                            let mut round = ToolRoundState {
+                                harness_corrections: &mut harness_corrections,
+                                progress: &progress,
+                                store: store.as_ref(),
+                                session_id: &session.id,
+                                llm_messages: &mut llm_messages,
+                                duplicate_tool_nudges: &mut duplicate_tool_nudges,
+                                duplicate_ui_shown: &mut duplicate_ui_shown,
+                                duplicate_forced_reply_nudged: &mut duplicate_forced_reply_nudged,
+                                tool_calls: &mut tool_calls,
+                                tool_exec_records: &mut tool_exec_records,
+                                tool_catalog: &tool_catalog,
+                                user_task,
+                                discovery: discovery.clone(),
+                            };
+                            record_tool_outcome(
+                                &mut round,
+                                ReadonlyToolOutcome {
+                                    call: ask_call,
+                                    output: format!("tool error: {e}"),
+                                    ok: false,
+                                    llm_review_rejected: None,
+                                    awaiting_user: None,
+                                },
+                                Some(&mcp),
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
+                    queue_ask_user_pause(
+                        store.as_ref(),
+                        &session_id,
+                        &step,
+                        &progress,
+                        &mut llm_messages,
+                        &mut tool_calls,
+                        &pause,
+                        llm_rounds,
+                        &token_budget,
+                        discovery.clone(),
+                        tool_mode,
+                        runtime_panel.clone(),
+                        &reasoning_originals,
+                    )
+                    .await?;
+                    return Ok(ChatTurnResult {
+                        session_id: session.id,
+                        assistant_message: String::new(),
+                        tool_calls,
+                        awaiting_approval: false,
+                        awaiting_user_input: true,
+                    });
                 }
 
                 if !readonly.is_empty() {
@@ -1584,7 +1778,28 @@ from tool results already in context.";
                     )
                     .await?;
                     let mut turn_awaiting_approval = false;
+                    let mut turn_awaiting_user = false;
                     for outcome in outcomes {
+                        if let Some(pause) = outcome.awaiting_user.clone() {
+                            queue_ask_user_pause(
+                                store.as_ref(),
+                                &session_id,
+                                &step,
+                                &progress,
+                                &mut llm_messages,
+                                &mut tool_calls,
+                                &pause,
+                                llm_rounds,
+                                &token_budget,
+                                discovery.clone(),
+                                tool_mode,
+                                runtime_panel.clone(),
+                                &reasoning_originals,
+                            )
+                            .await?;
+                            turn_awaiting_user = true;
+                            continue;
+                        }
                         if let Some(review) = outcome.llm_review_rejected.clone() {
                             let PreparedToolCall { id, name, args, .. } = &outcome.call;
                             match handle_llm_review_rejection(
@@ -1634,6 +1849,7 @@ from tool results already in context.";
                                             output: detail,
                                             ok: true,
                                             llm_review_rejected: None,
+                                            awaiting_user: None,
                                         },
                                         Some(&mcp),
                                     )
@@ -1678,12 +1894,22 @@ from tool results already in context.";
                         };
                         record_tool_outcome(&mut round, outcome, Some(&mcp)).await?;
                     }
+                    if turn_awaiting_user {
+                        return Ok(ChatTurnResult {
+                            session_id: session.id,
+                            assistant_message: String::new(),
+                            tool_calls,
+                            awaiting_approval: false,
+                            awaiting_user_input: true,
+                        });
+                    }
                     if turn_awaiting_approval {
                         return Ok(ChatTurnResult {
                             session_id: session.id,
                             assistant_message: String::new(),
                             tool_calls,
                             awaiting_approval: true,
+                            awaiting_user_input: false,
                         });
                     }
                     if !turn_ctx.pending_warm_tools.is_empty() {
@@ -1746,6 +1972,7 @@ from tool results already in context.";
                                 assistant_message: String::new(),
                                 tool_calls,
                                 awaiting_approval: true,
+                                awaiting_user_input: false,
                             });
                         }
                     }
@@ -1795,6 +2022,7 @@ from tool results already in context.";
         assistant_message: fallback,
         tool_calls,
         awaiting_approval: false,
+        awaiting_user_input: false,
     })
 }
 
@@ -1984,6 +2212,132 @@ async fn apply_approval_resolution(
             ),
         );
     }
+    Ok(())
+}
+
+async fn apply_user_answer_resolution(
+    store: &dyn Store,
+    session_id: &Uuid,
+    llm_messages: &mut Vec<LlmTurnMessage>,
+    resume: &ResumeChatAfterUserAnswer,
+    progress: &Option<broadcast::Sender<AppEvent>>,
+) -> Result<()> {
+    let ResumeChatAfterUserAnswer {
+        question_id,
+        answer,
+        tool_call_id,
+        tool_args,
+    } = resume;
+
+    let body = format_user_answer_body(answer);
+    let ctx = format_tool_context_message("ask_user", tool_args, true, &body);
+    let marker = format!("question_id={question_id}");
+    let history = store.list_chat_messages(session_id, 10_000).await?;
+    if let Some(msg) = history
+        .iter()
+        .rev()
+        .find(|m| m.role == ChatRole::Tool && m.content.contains(&marker))
+    {
+        let mut updated = msg.clone();
+        updated.content = ctx.clone();
+        updated.ts = Utc::now();
+        store.update_chat_message(&updated).await?;
+    }
+
+    if let Some(msg) = llm_messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.role == "tool" && m.content.contains(&marker))
+    {
+        msg.content = ctx.clone();
+    } else {
+        llm_messages.push(LlmTurnMessage::tool_result_with_id(
+            Some(tool_call_id.clone()),
+            "ask_user",
+            ctx,
+        ));
+    }
+
+    emit_progress(
+        progress,
+        ChatProgress::UserAnswerResolved {
+            question_id: *question_id,
+            answer_preview: truncate_chars(answer.trim(), 80),
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn queue_ask_user_pause(
+    store: &dyn Store,
+    session_id: &Uuid,
+    step: &ChatAgentStep,
+    progress: &Option<broadcast::Sender<AppEvent>>,
+    llm_messages: &mut Vec<LlmTurnMessage>,
+    tool_calls: &mut Vec<ToolCallSummary>,
+    pause: &AskUserPause,
+    llm_rounds: u32,
+    token_budget: &TokenBudget,
+    discovery: Arc<Mutex<ChatDiscoveryState>>,
+    tool_mode: ChatToolMode,
+    runtime_panel: (String, u64),
+    reasoning_originals: &HashMap<String, String>,
+) -> Result<()> {
+    let parent = fork_parent_for_session(store, session_id).await;
+    persist_native_assistant_tool_call_parented(store, session_id, step, parent, None).await?;
+
+    let pending_body = format_pending_question_body(&pause.request);
+    let body = format_tool_user_question_pending_message(
+        "ask_user",
+        &pause.tool_args,
+        pause.question_id,
+        &pending_body,
+    );
+
+    emit_progress(
+        progress,
+        ChatProgress::UserQuestionQueued {
+            question_id: pause.question_id,
+            session_id: *session_id,
+            question: pause.request.question.clone(),
+            options: pause.request.options.clone(),
+            context: pause.request.context.clone(),
+            tool_call_id: pause.tool_call_id.clone(),
+            tool_args_json: pause.tool_args.to_string(),
+        },
+    );
+    tool_calls.push(ToolCallSummary {
+        tool_name: "ask_user".into(),
+        output: pending_body.clone(),
+    });
+    append_message(
+        store,
+        session_id,
+        ChatRole::Tool,
+        &body,
+        Some("ask_user"),
+        Some(pause.tool_args.to_string()),
+        None,
+    )
+    .await?;
+    llm_messages.push(LlmTurnMessage::tool_result_with_id(
+        Some(pause.tool_call_id.clone()),
+        "ask_user",
+        body,
+    ));
+    emit_context_snapshot(
+        progress,
+        llm_messages,
+        llm_rounds,
+        token_budget,
+        &discovery,
+        tool_mode,
+        Some((runtime_panel.0.as_str(), runtime_panel.1)),
+        Some((store, *session_id)),
+        reasoning_originals,
+    )
+    .await;
     Ok(())
 }
 

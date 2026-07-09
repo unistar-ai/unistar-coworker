@@ -75,9 +75,12 @@ Stages mirror `ChatProgress` (tool start/done, reasoning, assistant partial, etc
   "session_id": "9950379a-3db7-46ec-98ed-11310014b456",
   "assistant": "…",
   "tool_calls": [{"tool":"pr_get_overview","output":"…"}],
-  "awaiting_approval": false
+  "awaiting_approval": false,
+  "awaiting_user_input": false
 }
 ```
+
+When the agent calls `ask_user`, the turn pauses with `awaiting_user_input: true`; the next chat message is treated as the answer and resumes the turn.
 
 When a mutating tool needs approval and `--yes` was not passed:
 

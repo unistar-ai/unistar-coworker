@@ -132,6 +132,18 @@ pub struct ChatPendingApproval {
     pub line_index: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChatPendingUserQuestion {
+    pub id: uuid::Uuid,
+    pub session_id: uuid::Uuid,
+    pub question: String,
+    pub options: Vec<String>,
+    pub context: Option<String>,
+    pub tool_call_id: String,
+    pub tool_args_json: String,
+    pub line_index: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalDialogChoice {
     Approve,
@@ -224,6 +236,8 @@ pub struct AppState {
     pub chat_session_id: Option<uuid::Uuid>,
     /// Inline approval from the current chat turn — resolved with y/n on Chat tab.
     pub chat_pending_approval: Option<ChatPendingApproval>,
+    /// Inline `ask_user` question — next chat message is the answer.
+    pub chat_pending_user_question: Option<ChatPendingUserQuestion>,
     /// Centered approval popup (blocks other keys until decided).
     pub approval_dialog: Option<ApprovalDialog>,
     /// Prevents duplicate approve/deny from rapid clicks or Enter repeats.
@@ -293,6 +307,7 @@ impl AppState {
             chat_scroll_from_bottom: 0,
             chat_session_id: None,
             chat_pending_approval: None,
+            chat_pending_user_question: None,
             approval_dialog: None,
             approval_decision_in_flight: None,
             last_pending_approval_count: 0,
@@ -403,6 +418,13 @@ impl AppState {
                 self.chat_pending_approval = None;
             }
         }
+        if let Some(pending) = self.chat_pending_user_question.as_mut() {
+            if pending.line_index >= drained {
+                pending.line_index -= drained;
+            } else {
+                self.chat_pending_user_question = None;
+            }
+        }
     }
 
     /// Update chat transcript after an approval is approved or denied.
@@ -429,6 +451,24 @@ impl AppState {
     pub fn set_chat_pending_approval(&mut self, pending: Option<ChatPendingApproval>) {
         self.chat_pending_approval = pending;
         self.bump_chat_render();
+    }
+
+    pub fn set_chat_pending_user_question(&mut self, pending: Option<ChatPendingUserQuestion>) {
+        self.chat_pending_user_question = pending;
+        self.bump_chat_render();
+    }
+
+    pub fn resolve_chat_user_question(&mut self, id: uuid::Uuid, answer_preview: &str) {
+        if let Some(pending) = &self.chat_pending_user_question {
+            if pending.id == id {
+                if pending.line_index < self.chat_lines.len() {
+                    self.chat_lines[pending.line_index] =
+                        format!("  ✓ user answered: {answer_preview}");
+                }
+                self.chat_pending_user_question = None;
+                self.bump_chat_render();
+            }
+        }
     }
 
     pub fn chat_approval_target_id(&self) -> Option<uuid::Uuid> {
@@ -555,6 +595,52 @@ impl AppState {
                 });
                 return;
             }
+        }
+    }
+
+    /// Re-link a pending `ask_user` row after reload from transcript markers.
+    pub fn rehydrate_chat_pending_user_question(&mut self) {
+        self.chat_pending_user_question = None;
+        for (i, _line) in self.chat_lines.iter().enumerate().rev().take(48) {
+            let Some(body) = self.chat_tool_outputs.get(&i) else {
+                continue;
+            };
+            if !crate::agent::context::is_tool_user_question_pending_transcript(body) {
+                continue;
+            }
+            let Some(id) =
+                crate::agent::ask_user_tool::question_id_from_pending_transcript(body)
+            else {
+                continue;
+            };
+            let question = body
+                .lines()
+                .find_map(|l| l.strip_prefix("Question: ").map(str::to_string))
+                .unwrap_or_else(|| "Waiting for your answer".into());
+            let options = body
+                .lines()
+                .skip_while(|l| *l != "Options:")
+                .skip(1)
+                .take_while(|l| l.starts_with("  "))
+                .filter_map(|l| {
+                    let t = l.trim();
+                    t.split_once(". ").map(|(_, opt)| opt.to_string())
+                })
+                .collect();
+            let context = body
+                .lines()
+                .find_map(|l| l.strip_prefix("Context: ").map(str::to_string));
+            self.chat_pending_user_question = Some(ChatPendingUserQuestion {
+                id,
+                session_id: self.chat_session_id.unwrap_or_else(uuid::Uuid::nil),
+                question,
+                options,
+                context,
+                tool_call_id: String::new(),
+                tool_args_json: String::new(),
+                line_index: i,
+            });
+            return;
         }
     }
 
@@ -786,6 +872,7 @@ impl AppState {
         self.chat_assistant_ids.clear();
         self.chat_expanded_tool_lines.clear();
         self.chat_pending_approval = None;
+        self.chat_pending_user_question = None;
         self.set_chat_streaming(None);
         self.set_chat_tool_pending(None);
         self.set_chat_tool_running(None);
@@ -931,6 +1018,7 @@ pub async fn load_chat_session_ui(
                 continue;
             }
             if !crate::agent::context::is_tool_approval_pending_transcript(&msg.content)
+                && !crate::agent::context::is_tool_user_question_pending_transcript(&msg.content)
                 && !msg.content.contains("awaiting approval")
             {
                 state.push_chat_line(chat_tool_start_display_line(msg));
@@ -948,6 +1036,7 @@ pub async fn load_chat_session_ui(
     }
     state.chat_scroll_from_bottom = 0;
     state.rehydrate_chat_pending_approval();
+    state.rehydrate_chat_pending_user_question();
 
     // Rebuild the context panel's message-derived fields (turn, tokens,
     // message_count, messages) from the freshly loaded messages. Tools &

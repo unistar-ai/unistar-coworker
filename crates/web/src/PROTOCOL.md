@@ -47,6 +47,7 @@ Fields (see [`snapshot.rs`](./snapshot.rs) `WebSnapshot` for the authoritative l
 | `chat_context_visible` | bool | context pane open |
 | `chat_context` | object | context panel payload (stats, tools, skills, messages) |
 | `chat_pending_approval` | object? | pending approval metadata |
+| `chat_pending_user_question` | object? | pending `ask_user` question (next message is the answer) |
 | `approval_dialog` | object? | approval modal payload |
 | `approvals` | object[] | pending approvals |
 | `log_filter` | string | |
@@ -108,6 +109,7 @@ is not truncated).
 | `chat_context_visible` | bool |
 | `chat_context` | object |
 | `chat_pending_approval` | object? |
+| `chat_pending_user_question` | object? |
 | `approval_dialog` | object? |
 
 Client applies these and triggers a **structural chat render** (history +

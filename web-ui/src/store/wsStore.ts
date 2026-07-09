@@ -80,6 +80,7 @@ const DEFAULT_SNAPSHOT: WebSnapshot = {
     context_summary_note: null,
   },
   chat_pending_approval: null,
+  chat_pending_user_question: null,
   approval_dialog: null,
   approvals: [],
   log_filter: "all",
@@ -157,6 +158,7 @@ export const useStore = create<Store>((set) => ({
       chat_context_visible: p.chat_context_visible,
       chat_context: p.chat_context,
       chat_pending_approval: p.chat_pending_approval,
+      chat_pending_user_question: p.chat_pending_user_question,
       approval_dialog: p.approval_dialog,
     })),
 
@@ -198,6 +200,7 @@ export const useStore = create<Store>((set) => ({
         chat_context_visible: m.chat_context_visible,
         chat_context: m.chat_context,
         chat_pending_approval: m.chat_pending_approval,
+        chat_pending_user_question: m.chat_pending_user_question,
         approval_dialog: m.approval_dialog,
       }));
     }

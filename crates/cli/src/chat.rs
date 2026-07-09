@@ -52,7 +52,7 @@ pub(crate) async fn run_chat_cli(
     // --once: single turn, script-friendly, with an optional approval loop.
     if let Some(msg) = once {
         let run_once = async {
-            let (mut result, mut streamed, mut pending) = run_turn_with_progress(
+            let (mut result, mut streamed, mut pending, _pending_q) = run_turn_with_progress(
                 &engine,
                 &mut rx,
                 json,
@@ -112,7 +112,7 @@ pub(crate) async fn run_chat_cli(
                     tool_name: pa.tool_name.clone(),
                     tool_args,
                 };
-                let (r, s, p) = run_turn_with_progress(
+                let (r, s, p, _) = run_turn_with_progress(
                     &engine,
                     &mut rx,
                     json,
@@ -164,6 +164,7 @@ pub(crate) async fn run_chat_cli(
                         "assistant": result.assistant_message,
                         "tool_calls": tools,
                         "awaiting_approval": result.awaiting_approval,
+                        "awaiting_user_input": result.awaiting_user_input,
                     }));
                 } else {
                     if !streamed {
@@ -360,6 +361,13 @@ pub(crate) struct PendingApproval {
     pub(crate) description: String,
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingUserQuestion {
+    pub(crate) question: String,
+    pub(crate) options: Vec<String>,
+    pub(crate) context: Option<String>,
+}
+
 /// Run a chat turn (initial `run_chat` or `resume_chat_after_approval`) with a
 /// live progress listener + Ctrl-C cancel. Returns the turn result, whether the
 /// assistant reply was streamed raw to stdout, and the latest pending approval
@@ -371,12 +379,14 @@ pub(crate) async fn run_turn_with_progress<F>(
     prefix: Option<String>,
     stream_raw: bool,
     turn: F,
-) -> Result<(ChatTurnResult, bool, Option<PendingApproval>)>
+) -> Result<(ChatTurnResult, bool, Option<PendingApproval>, Option<PendingUserQuestion>)>
 where
     F: Future<Output = Result<ChatTurnResult>>,
 {
     let streamed = Arc::new(AtomicBool::new(false));
     let pending: Arc<std::sync::Mutex<Option<PendingApproval>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let pending_question: Arc<std::sync::Mutex<Option<PendingUserQuestion>>> =
         Arc::new(std::sync::Mutex::new(None));
     // Reasoning is only shown in the interactive REPL (which passes a prompt
     // prefix). `--once` is headless and passes `prefix: None` → no reasoning
@@ -387,6 +397,7 @@ where
         let mut rx = rx.resubscribe();
         let streamed = Arc::clone(&streamed);
         let pending = Arc::clone(&pending);
+        let pending_question = Arc::clone(&pending_question);
         let prefix = prefix.clone();
         tokio::spawn(async move {
             let stderr_tty = std::io::stderr().is_terminal();
@@ -518,6 +529,19 @@ where
                                 description,
                             });
                         }
+                        ChatProgress::UserQuestionQueued {
+                            question,
+                            options,
+                            context,
+                            ..
+                        } => {
+                            *pending_question.lock().expect("pending question mutex") =
+                                Some(PendingUserQuestion {
+                                    question,
+                                    options,
+                                    context,
+                                });
+                        }
                         // Summarizing streamed reasoning via a think=false LLM call.
                         ChatProgress::ReasoningCompressing if show_reasoning => {
                             clear_inplace!();
@@ -598,7 +622,11 @@ where
 
     let streamed = streamed.load(Ordering::Relaxed);
     let pending = pending.lock().expect("pending mutex").take();
-    result.map(|r| (r, streamed, pending))
+    let pending_q = pending_question
+        .lock()
+        .expect("pending question mutex")
+        .take();
+    result.map(|r| (r, streamed, pending, pending_q))
 }
 
 fn print_assistant_reply(result: &ChatTurnResult, streamed: bool) {
@@ -637,7 +665,7 @@ async fn run_repl_turn(
         }
         None => Box::pin(engine.run_chat(session_id, message)),
     };
-    let (mut result, streamed, mut pending) = run_turn_with_progress(
+    let (mut result, streamed, mut pending, mut pending_q) = run_turn_with_progress(
         engine,
         rx,
         false,
@@ -649,6 +677,56 @@ async fn run_repl_turn(
     print_assistant_reply(&result, streamed);
     let mut sid = result.session_id;
     let mut last_msg = result.assistant_message.clone();
+
+    while result.awaiting_user_input {
+        sid = result.session_id;
+        let q = pending_q.take();
+        if let Some(ref q) = q {
+            if std::io::stderr().is_terminal() {
+                eprintln!("\n\x1b[36m❓ {}\x1b[0m", q.question);
+            } else {
+                eprintln!("\n? {}", q.question);
+            }
+            if let Some(ctx) = &q.context {
+                eprintln!("  ({ctx})");
+            }
+            if !q.options.is_empty() {
+                for (i, opt) in q.options.iter().enumerate() {
+                    eprintln!("  {}. {opt}", i + 1);
+                }
+                eprintln!("  Enter a number, or type a custom answer.");
+            }
+        }
+        let prompt = if q.as_ref().is_some_and(|q| !q.options.is_empty()) {
+            "answer [n/text]> "
+        } else {
+            "answer> "
+        };
+        let Some(raw) = read_repl_line(rl, prompt).await else {
+            eprintln!("(no answer — leaving turn paused)");
+            break;
+        };
+        let raw = raw.trim().to_string();
+        if raw.is_empty() {
+            eprintln!("(empty answer — leaving turn paused)");
+            break;
+        }
+        let answer = resolve_ask_user_answer(q.as_ref(), &raw);
+        let (r, s, p, pq) = run_turn_with_progress(
+            engine,
+            rx,
+            false,
+            Some("assistant> ".to_string()),
+            false,
+            engine.run_chat(Some(sid), &answer),
+        )
+        .await?;
+        result = r;
+        print_assistant_reply(&result, s);
+        last_msg = result.assistant_message.clone();
+        pending = p;
+        pending_q = pq;
+    }
 
     while result.awaiting_approval {
         let pa = match pending {
@@ -688,7 +766,7 @@ async fn run_repl_turn(
             tool_name: pa.tool_name.clone(),
             tool_args,
         };
-        let (r, s, p) = run_turn_with_progress(
+        let (r, s, p, pq) = run_turn_with_progress(
             engine,
             rx,
             false,
@@ -701,8 +779,25 @@ async fn run_repl_turn(
         print_assistant_reply(&result, s);
         last_msg = result.assistant_message.clone();
         pending = p;
+        let _ = pq;
     }
     Ok((sid, last_msg))
+}
+
+/// Map a numbered reply to the option text when `ask_user` provided choices.
+fn resolve_ask_user_answer(q: Option<&PendingUserQuestion>, raw: &str) -> String {
+    let Some(q) = q else {
+        return raw.to_string();
+    };
+    if q.options.is_empty() {
+        return raw.to_string();
+    }
+    if let Ok(n) = raw.parse::<usize>() {
+        if (1..=q.options.len()).contains(&n) {
+            return q.options[n - 1].clone();
+        }
+    }
+    raw.to_string()
 }
 
 /// Read one line via rustyline (sub-prompt, e.g. picker / y-n). None on EOF /

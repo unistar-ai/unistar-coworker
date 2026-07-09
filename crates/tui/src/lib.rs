@@ -629,7 +629,7 @@ async fn handle_chat_slash_command(
                 "system> **Chat**: Enter send; Shift+Enter newline; ↑/↓ input history; j/k scroll msgs; o expand tool (input empty); Esc cancel; End latest; \\ toggle ctx panel",
             );
             s.push_chat_line(
-                "system> **GitHub**: include `owner/repo` or a PR URL in your message — there is no default repo list.",
+                "system> **GitHub**: if a tool needs a repo and you have not named one, the agent asks — reply with `owner/repo` or a PR URL.",
             );
             s.push_chat_line(
                 "system> **Tabs**: Tab/BackTab cycle; 0–3 jump; q quit; Ctrl+c quit; ? open Chat; r refresh store; Approvals y/n; Logs / filter; Config R probe",
@@ -1239,7 +1239,7 @@ fn config_connectivity_detail(state: &AppState) -> String {
         **LLM** — {llm_status}{llm_bar}\n\n\
         _Bar scale: 0–2000ms_\n\n\
         GitHub is optional (workspace-only agents need no `gh`). Press **R** to re-probe.\n\n\
-        For PR/CI chat, name `owner/repo` or paste a PR URL — there is no default repo list.",
+        For PR/CI chat, the agent asks for `owner/repo` or a PR URL when needed — there is no default repo list.",
         state.config.github.gh_command,
         if state.github_ok {
             "ok"

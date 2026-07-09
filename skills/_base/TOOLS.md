@@ -3,7 +3,23 @@
 Shared MCP + harness tool vocabulary for chat and workflows.  
 Mutating tools require **approval** in chat — use `action:approval`, never `action:tool`.
 
-All GitHub tools take `repo` as `owner/repo` (e.g. `acme/widget`).
+All GitHub tools take `repo` as `owner/repo` (e.g. `acme/widget`).  
+If the user has not provided a repo yet, call **`ask_user`** — do not invent one.
+
+---
+
+## Clarification (`ask_user`)
+
+Pause the turn and ask the human a clarifying question. The next user message becomes the tool result; then the agent continues.
+
+| Param | Required | Notes |
+|-------|----------|-------|
+| `question` | yes | What to ask |
+| `options` | no | Suggested choices (2–5 strings). UI always also shows a free-text field |
+| `context` | no | Short why this is needed |
+
+**UI:** user can click an option **or** type a custom answer.  
+**Rules:** run **alone** in a round (no parallel tools). Prefer this over inventing missing `repo` / `pr_number`.
 
 ---
 

@@ -724,6 +724,17 @@ pub fn format_tool_approval_pending_message(
     format_tool_transcript_with_header(&header, tool_args, body)
 }
 
+/// `ask_user` paused waiting for a human reply — not an execution error.
+pub fn format_tool_user_question_pending_message(
+    tool_name: &str,
+    tool_args: &Value,
+    question_id: uuid::Uuid,
+    body: &str,
+) -> String {
+    let header = format!("tool_user_question_pending({tool_name}, question_id={question_id})");
+    format_tool_transcript_with_header(&header, tool_args, body)
+}
+
 fn format_tool_transcript_with_header(header: &str, tool_args: &Value, body: &str) -> String {
     let args_json =
         serde_json::to_string_pretty(tool_args).unwrap_or_else(|_| tool_args.to_string());
@@ -735,12 +746,19 @@ pub fn tool_context_message_has_args(content: &str) -> bool {
     let trimmed = content.trim_start();
     (trimmed.starts_with("tool_result(")
         || trimmed.starts_with("tool_error(")
-        || trimmed.starts_with("tool_approval_pending("))
+        || trimmed.starts_with("tool_approval_pending(")
+        || trimmed.starts_with("tool_user_question_pending("))
         && content.contains("\nargs: ")
 }
 
 pub fn is_tool_approval_pending_transcript(content: &str) -> bool {
     content.trim_start().starts_with("tool_approval_pending(")
+}
+
+pub fn is_tool_user_question_pending_transcript(content: &str) -> bool {
+    content
+        .trim_start()
+        .starts_with("tool_user_question_pending(")
 }
 
 /// Raw MCP `pr_get_diff` payload (or the body after a `tool_result` envelope).
@@ -806,6 +824,7 @@ pub fn tool_transcript_indicates_failure(content: &str) -> bool {
     }
     if trimmed.starts_with("tool_result(")
         || is_tool_approval_pending_transcript(trimmed)
+        || is_tool_user_question_pending_transcript(trimmed)
         || trimmed.starts_with("[tool_result ")
     {
         return false;
@@ -1440,6 +1459,7 @@ pub fn is_tool_result_transcript(content: &str) -> bool {
         || t.starts_with("[tool_result")
         || t.starts_with("tool_error(")
         || is_tool_approval_pending_transcript(content)
+        || is_tool_user_question_pending_transcript(content)
         || t.starts_with("[summarized tool_result")
 }
 
@@ -1476,6 +1496,13 @@ pub fn split_tool_transcript(content: &str) -> Option<(String, String)> {
         return Some((name, body));
     }
     if let Some(rest) = t.strip_prefix("tool_approval_pending(") {
+        let end = rest.find("):")?;
+        let name = rest[..end].split(',').next()?.trim().to_string();
+        let body =
+            strip_transcript_args_block(rest[end + 2..].trim_start_matches(':').trim_start());
+        return Some((name, body));
+    }
+    if let Some(rest) = t.strip_prefix("tool_user_question_pending(") {
         let end = rest.find("):")?;
         let name = rest[..end].split(',').next()?.trim().to_string();
         let body =
@@ -1707,6 +1734,26 @@ mod tests {
         assert!(!text.starts_with("tool_error("));
         assert!(is_tool_result_transcript(&text));
         assert!(is_tool_approval_pending_transcript(&text));
+    }
+
+    #[test]
+    fn format_tool_user_question_pending_is_not_tool_error() {
+        let args = serde_json::json!({
+            "question": "Which repo?",
+            "options": ["acme/widget", "acme/api"]
+        });
+        let text = format_tool_user_question_pending_message(
+            "ask_user",
+            &args,
+            uuid::Uuid::nil(),
+            "Awaiting user answer.\n\nQuestion: Which repo?",
+        );
+        assert!(text.starts_with("tool_user_question_pending(ask_user"));
+        assert!(!text.starts_with("tool_error("));
+        assert!(is_tool_result_transcript(&text));
+        assert!(is_tool_user_question_pending_transcript(&text));
+        let (name, _) = split_tool_transcript(&text).expect("parsed");
+        assert_eq!(name, "ask_user");
     }
 
     #[test]

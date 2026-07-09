@@ -8,6 +8,7 @@ use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tokio::time::{self, MissedTickBehavior};
 
+use crate::agent::ask_user_tool::{self, AskUserPause};
 use crate::agent::bash_tool;
 use crate::agent::chat_discovery::ChatDiscoveryState;
 use crate::agent::context::format_tool_context_message;
@@ -27,6 +28,7 @@ use crate::llm::LlmClient;
 use crate::llm::LlmTurnMessage;
 use crate::mcp::McpPool;
 use crate::store::{ChatRole, Store};
+use uuid::Uuid;
 
 use crate::agent::chat_duplicate::{
     maybe_push_tool_failure_harness_nudge, prune_stale_missing_arg_nudges,
@@ -46,6 +48,7 @@ pub(crate) struct ReadonlyToolOutcome {
     pub(crate) output: String,
     pub(crate) ok: bool,
     pub(crate) llm_review_rejected: Option<crate::agent::bash_tool::BashCommandReview>,
+    pub(crate) awaiting_user: Option<AskUserPause>,
 }
 
 pub(crate) struct ReadonlyToolHarness {
@@ -136,19 +139,32 @@ pub(crate) async fn execute_readonly_tools_parallel(
                 Ok(r) => r,
                 Err(e) => return Err(e),
             };
-            let (output, ok, llm_review_rejected) = match result {
+            let (output, ok, llm_review_rejected, awaiting_user) = match result {
                 Ok(ReadonlyToolExecuteResult::Output(o))
                     if tool_output_indicates_failure(&call.name, &o) =>
                 {
-                    (o, false, None)
+                    (o, false, None, None)
                 }
-                Ok(ReadonlyToolExecuteResult::Output(o)) => (o, true, None),
+                Ok(ReadonlyToolExecuteResult::Output(o)) => (o, true, None, None),
                 Ok(ReadonlyToolExecuteResult::LlmReviewRejected(review)) => {
-                    (String::new(), false, Some(review))
+                    (String::new(), false, Some(review), None)
                 }
-                Err(e) => (format!("tool error: {e}"), false, None),
+                Ok(ReadonlyToolExecuteResult::AwaitingUser(mut pause)) => {
+                    pause.tool_call_id = call.id.clone();
+                    (String::new(), true, None, Some(pause))
+                }
+                Err(e) => (format!("tool error: {e}"), false, None, None),
             };
             let elapsed_ms = tool_start.elapsed().as_millis();
+            if awaiting_user.is_some() {
+                return Ok(ReadonlyToolOutcome {
+                    call,
+                    output,
+                    ok,
+                    llm_review_rejected,
+                    awaiting_user,
+                });
+            }
             let ctx = format_tool_context_message(&call.name, &call.args, ok, &output);
             if flow_tool {
                 emit_activity_flow(
@@ -174,6 +190,7 @@ pub(crate) async fn execute_readonly_tools_parallel(
                 output,
                 ok,
                 llm_review_rejected,
+                awaiting_user: None,
             })
         }
     });
@@ -274,6 +291,7 @@ pub(crate) async fn record_tool_outcome(
 enum ReadonlyToolExecuteResult {
     Output(String),
     LlmReviewRejected(crate::agent::bash_tool::BashCommandReview),
+    AwaitingUser(AskUserPause),
 }
 
 fn wrap_review_gate(outcome: ReviewGateOutcome) -> ReadonlyToolExecuteResult {
@@ -381,6 +399,15 @@ async fn execute_readonly_tool(
     mut tool_args: Value,
 ) -> Result<ReadonlyToolExecuteResult> {
     finalize_tool_args(tool_name, &mut tool_args, ctx.user_task);
+    if ask_user_tool::is_ask_user_tool(tool_name) {
+        let request = ask_user_tool::parse_ask_user_args(&tool_args)?;
+        return Ok(ReadonlyToolExecuteResult::AwaitingUser(AskUserPause {
+            question_id: Uuid::new_v4(),
+            request,
+            tool_call_id: String::new(),
+            tool_args,
+        }));
+    }
     if harness_tools::is_harness_tool(tool_name) {
         return Ok(ReadonlyToolExecuteResult::Output(
             harness_tools::execute_harness_tool(store.as_ref(), tool_name, tool_args).await?,

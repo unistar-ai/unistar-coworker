@@ -77,7 +77,7 @@ fn welcome_lines(th: ThemePalette) -> Vec<Line<'static>> {
             Style::default().fg(th.muted),
         )),
         Line::from(Span::styled(
-            "  GitHub: name owner/repo or paste a PR URL (no default repo).",
+            "  GitHub: the agent will ask which repo if needed.",
             Style::default().fg(th.muted),
         )),
     ]

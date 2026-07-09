@@ -50,6 +50,7 @@ function snap(overrides: Partial<WebSnapshot> = {}): WebSnapshot {
       context_summary_note: null,
     },
     chat_pending_approval: null,
+    chat_pending_user_question: null,
     approval_dialog: null,
     approvals: [],
     log_filter: "all",
@@ -124,6 +125,7 @@ function chatPatch(overrides: Partial<WebChatPatch> = {}): WebChatPatch {
       context_summary_note: null,
     },
     chat_pending_approval: null,
+    chat_pending_user_question: null,
     approval_dialog: null,
     ...overrides,
   };

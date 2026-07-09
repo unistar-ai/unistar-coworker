@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Missing GitHub `repo` / `pr_number`: harness nudges and `prompts/chat.md` tell the model to **ask the user** instead of inventing values or retrying empty calls.
+- Empty states / QUICKSTART: prefer “agent will ask” over requiring the user to pre-supply `owner/repo`.
+
 ## [4.2.1] - 2026-07-09
 
 ### Changed

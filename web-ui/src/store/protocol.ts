@@ -59,6 +59,16 @@ export interface PendingApproval {
   tool_args_json: string;
 }
 
+export interface PendingUserQuestion {
+  id: string;
+  session_id: string;
+  question: string;
+  options: string[];
+  context: string | null;
+  tool_call_id: string;
+  tool_args_json: string;
+}
+
 export interface ApprovalDialog {
   id: string;
   tool_name: string;
@@ -132,6 +142,7 @@ export interface WebSnapshot {
   chat_context_visible: boolean;
   chat_context: ChatContext;
   chat_pending_approval: PendingApproval | null;
+  chat_pending_user_question: PendingUserQuestion | null;
   approval_dialog: ApprovalDialog | null;
   approvals: ApprovalRow[];
   log_filter: string;
@@ -189,6 +200,7 @@ export interface WebChatPatch {
   chat_context_visible: boolean;
   chat_context: ChatContext;
   chat_pending_approval: PendingApproval | null;
+  chat_pending_user_question: PendingUserQuestion | null;
   approval_dialog: ApprovalDialog | null;
 }
 

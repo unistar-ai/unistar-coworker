@@ -47,6 +47,7 @@ pub struct WebSnapshot {
     pub chat_context_visible: bool,
     pub chat_context: Option<Value>,
     pub chat_pending_approval: Option<Value>,
+    pub chat_pending_user_question: Option<Value>,
     pub approval_dialog: Option<Value>,
     pub approvals: Vec<Value>,
     pub log_filter: String,
@@ -114,6 +115,7 @@ pub struct WebChatPatch {
     pub chat_context_visible: bool,
     pub chat_context: Option<Value>,
     pub chat_pending_approval: Option<Value>,
+    pub chat_pending_user_question: Option<Value>,
     pub approval_dialog: Option<Value>,
 }
 
@@ -174,6 +176,7 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
 
     let chat_context = Some(build_chat_context_json(s));
     let chat_pending_approval = build_chat_pending_approval_json(s);
+    let chat_pending_user_question = build_chat_pending_user_question_json(s);
     let approval_dialog = build_approval_dialog_json(s);
     let live = web_live_transport_fields(s);
 
@@ -215,6 +218,7 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
         chat_context_visible: s.chat_context_visible,
         chat_context,
         chat_pending_approval,
+        chat_pending_user_question,
         approval_dialog,
         approvals,
         log_filter: s.log_filter.label().to_string(),
@@ -330,6 +334,20 @@ fn build_chat_pending_approval_json(s: &AppState) -> Option<Value> {
             "id": p.id,
             "session_id": p.session_id,
             "tool_name": p.tool_name,
+            "tool_args_json": coworker_core::agent::redact::redact_json_str(&p.tool_args_json),
+        })
+    })
+}
+
+fn build_chat_pending_user_question_json(s: &AppState) -> Option<Value> {
+    s.chat_pending_user_question.as_ref().map(|p| {
+        json!({
+            "id": p.id,
+            "session_id": p.session_id,
+            "question": p.question,
+            "options": p.options,
+            "context": p.context,
+            "tool_call_id": p.tool_call_id,
             "tool_args_json": coworker_core::agent::redact::redact_json_str(&p.tool_args_json),
         })
     })
@@ -479,6 +497,7 @@ pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
         chat_context_visible: s.chat_context_visible,
         chat_context: Some(build_chat_context_json(s)),
         chat_pending_approval: build_chat_pending_approval_json(s),
+        chat_pending_user_question: build_chat_pending_user_question_json(s),
         approval_dialog: build_approval_dialog_json(s),
     }
 }
@@ -596,6 +615,7 @@ storage: {{ backend: json, path: ./data }}
         "chat_context_visible",
         "chat_context",
         "chat_pending_approval",
+        "chat_pending_user_question",
         "approval_dialog",
     ];
 
