@@ -15,6 +15,7 @@ import {
   Download,
   Sun,
   Moon,
+  RefreshCw,
   Search,
   type LucideIcon,
 } from "lucide-react";
@@ -78,6 +79,18 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
         },
       });
     }
+
+    cmds.push({
+      id: "refresh-store",
+      label: "Refresh store",
+      hint: "Reload digests, PRs, approvals from disk",
+      icon: RefreshCw,
+      keywords: "refresh store hydrate reload dashboard prs",
+      action: () => {
+        void apiPost("/api/store/refresh");
+        close();
+      },
+    });
 
     // Chat actions
     cmds.push({

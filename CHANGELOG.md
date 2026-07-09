@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-07-09
+
+### Fixed
+
+- TUI Dashboard hint bar still listed removed shortcuts (`daily`, `radar`); now matches `r` = refresh store.
+- Web Config copy (`chat/workflow`, wrong ⌘K description); command palette adds **Refresh store**.
+- `doctor` GitHub hints no longer mention batch workflows.
+
+[3.1.1]: https://github.com/unistar-ai/unistar-coworker/compare/v3.1.0...v3.1.1
+
 ## [3.1.0] - 2026-07-09
 
 ### Removed

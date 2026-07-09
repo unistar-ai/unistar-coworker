@@ -132,7 +132,7 @@ pub async fn run_checks_with_extras(
                     detail: format!("{first} (optional — no repos configured)"),
                     latency_ms: None,
                     hint: Some(
-                        "workspace-only agent needs no GitHub; add repos: and auth for workflows"
+                        "workspace-only agent needs no GitHub; add repos: and auth for PR/CI harness"
                             .into(),
                     ),
                 });
@@ -154,7 +154,7 @@ pub async fn run_checks_with_extras(
                     status: "warn",
                     detail: format!("gh CLI not found: {e} (optional — no repos configured)"),
                     latency_ms: None,
-                    hint: Some("install gh only if you use GitHub harness or workflows".into()),
+                    hint: Some("install gh only if you use GitHub harness or PR/CI tools".into()),
                 });
             }
         }

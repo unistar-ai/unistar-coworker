@@ -591,7 +591,7 @@ unistar-coworker/
 └── Cargo.lock
 ```
 
-版本：**3.1.0**（workspace `[workspace.package]`，见 [Cargo.toml](./Cargo.toml)）。本地模型：[docs/local-models.md](./docs/local-models.md) · 上下文：[docs/context-budget.md](./docs/context-budget.md)。
+版本：**3.1.1**（workspace `[workspace.package]`，见 [Cargo.toml](./Cargo.toml)）。本地模型：[docs/local-models.md](./docs/local-models.md) · 上下文：[docs/context-budget.md](./docs/context-budget.md)。
 
 ---
 

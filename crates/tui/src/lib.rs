@@ -1463,7 +1463,7 @@ fn draw_hints(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: Them
             }
         }
         Tab::Dashboard => {
-            "r: daily  R: radar  v: radar  m: PRs  c: chat  o: refresh overview  Enter/p: open PR  n/N: cycle PR  z: fold list  Z: fold digest  {/}: detail scroll".into()
+            "r: refresh store  m: PRs  c: chat  Enter/p: open PR  n/N: cycle PR  z: fold list  Z: fold digest  {/}: detail scroll".into()
         }
         Tab::Prs => return frame.render_widget(
             Paragraph::new(theme::hint_bar(

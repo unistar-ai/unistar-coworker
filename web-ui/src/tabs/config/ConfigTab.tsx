@@ -64,7 +64,7 @@ export default function ConfigTab() {
                 onChange={(e) => onProfileChange(e.target.value)}
                 title={
                   profileBusy
-                    ? "Wait for chat/workflow to finish before switching"
+                    ? "Wait for chat or a background task to finish before switching"
                     : "Switch LLM preset"
                 }
               >
@@ -167,7 +167,7 @@ export default function ConfigTab() {
         <div className="config-section-title">Keyboard shortcuts</div>
         <div className="config-shortcuts">
           <ShortcutRow keys={["Ctrl/⌘", "1–6"]} desc="Switch to tab 1–6" />
-          <ShortcutRow keys={["Ctrl/⌘", "K"]} desc="Focus chat input" />
+          <ShortcutRow keys={["Ctrl/⌘", "K"]} desc="Open command palette" />
           <ShortcutRow keys={["Enter"]} desc="Insert newline in chat input" />
           <ShortcutRow keys={["Shift", "Enter"]} desc="Send chat message" />
           <ShortcutRow keys={["Esc"]} desc="Cancel generation / close dialog / context drawer" />

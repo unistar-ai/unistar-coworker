@@ -62,7 +62,7 @@ export default function Layout({ tabLabels }: LayoutProps) {
 
   // Global keyboard shortcuts:
   //  Ctrl/Cmd+1..6 — switch to the Nth tab (in TAB_ORDER).
-  //  Ctrl/Cmd+K    — focus the chat input (switching to Chat first if needed).
+  //  Ctrl/Cmd+K    — open command palette.
   // Skipped when the user is typing in an input/textarea/contentEditable so we
   // don't swallow printable combos, except for the explicit Cmd/Ctrl modifiers
   // which are safe.

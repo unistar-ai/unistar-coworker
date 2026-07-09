@@ -342,7 +342,7 @@ pub struct AppState {
     pub approval_dialog: Option<ApprovalDialog>,
     /// Prevents duplicate approve/deny from rapid clicks or Enter repeats.
     pub approval_decision_in_flight: Option<uuid::Uuid>,
-    /// Tracks pending approval count to detect new workflow approvals.
+    /// Tracks pending approval count to detect new approvals after store refresh.
     pub last_pending_approval_count: usize,
     /// Toggle with `\` on Chat tab — shows live LLM context from the agent loop.
     pub chat_context_visible: bool,
