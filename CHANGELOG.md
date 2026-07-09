@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-07-09
+
+### Fixed
+
+- `init --repos` uncommented GitHub/repos/workflows in `coworker.example.yaml` (regression after workspace-first template).
+- README / README_CN crate version synced with `Cargo.toml`.
+
+### Changed
+
+- Workspace `description` and issue template aligned with general-agent positioning.
+
+[2.4.1]: https://github.com/unistar-ai/unistar-coworker/compare/v2.4.0...v2.4.1
+
 ## [2.4.0] - 2026-07-08
 
 ### Added

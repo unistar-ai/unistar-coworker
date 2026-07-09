@@ -693,7 +693,7 @@ unistar-coworker/
 └── Cargo.lock
 ```
 
-Crate version: **2.3.0** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)). Local LLM setup: [docs/local-models.md](./docs/local-models.md).
+Crate version: **2.4.1** (workspace `[workspace.package]` in [Cargo.toml](./Cargo.toml)). Local LLM setup: [docs/local-models.md](./docs/local-models.md).
 
 ---
 

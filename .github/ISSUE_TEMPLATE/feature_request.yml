@@ -6,15 +6,15 @@ body:
   - type: markdown
     attributes:
       value: |
-        unistar-coworker is a **local personal GitHub ops secretary** — not a SaaS or team product.
-        See [README.md](https://github.com/unistar-ai/unistar-coworker/blob/main/README.md) for product boundaries.
+        unistar-coworker is a **local-first general agent for local LLMs** — not a SaaS or team product.
+        GitHub/MCP/workflows are optional integrations. See [README.md](https://github.com/unistar-ai/unistar-coworker/blob/main/README.md) for product boundaries.
 
   - type: input
     id: version
     attributes:
       label: unistar-coworker version
       description: Output of `unistar-coworker --version` (if applicable)
-      placeholder: "2.1.0"
+      placeholder: "2.4.0"
     validations:
       required: false
 

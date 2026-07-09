@@ -180,18 +180,7 @@ pub(crate) async fn run_init(
     let mut lines: Vec<String> = template.lines().map(String::from).collect();
 
     if let Some(repos) = &repos_csv {
-        if let Some(idx) = lines.iter().position(|l| l.trim() == "repos:") {
-            let j = idx + 1;
-            while j < lines.len() && lines[j].starts_with("  - ") {
-                lines.remove(j);
-            }
-            for (k, r) in repos.split(',').enumerate() {
-                let r = r.trim();
-                if !r.is_empty() {
-                    lines.insert(idx + 1 + k, format!("  - {r}"));
-                }
-            }
-        }
+        apply_init_repos(&mut lines, repos);
     }
     if let Some(url) = &llm_url_seed {
         if let Some(idx) = lines.iter().position(|l| {
@@ -243,6 +232,68 @@ pub(crate) async fn run_init(
         );
     }
     Ok(())
+}
+
+/// When `--repos` is passed, enable the GitHub block in `coworker.example.yaml` (commented by default).
+fn apply_init_repos(lines: &mut Vec<String>, repos_csv: &str) {
+    let slugs: Vec<String> = repos_csv
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if slugs.is_empty() {
+        return;
+    }
+
+    for line in lines.iter_mut() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("# github:")
+            || trimmed.starts_with("#   gh_command:")
+            || trimmed.starts_with("#   env:")
+            || trimmed.starts_with("#   timeout_secs:")
+            || trimmed.starts_with("# workflows:")
+            || trimmed.starts_with("#   daily-work:")
+        {
+            if let Some(rest) = trimmed.strip_prefix("# ") {
+                *line = rest.to_string();
+            } else if let Some(rest) = trimmed.strip_prefix('#') {
+                *line = rest.trim_start().to_string();
+            }
+        }
+    }
+
+    let repos_idx = lines.iter().position(|l| {
+        let t = l.trim();
+        t == "repos:" || t == "# repos:"
+    });
+
+    if let Some(idx) = repos_idx {
+        lines[idx] = "repos:".to_string();
+        let j = idx + 1;
+        while j < lines.len()
+            && (lines[j].starts_with("  - ") || lines[j].trim_start().starts_with("#   - "))
+        {
+            lines.remove(j);
+        }
+        for (k, r) in slugs.iter().enumerate() {
+            lines.insert(idx + 1 + k, format!("  - {r}"));
+        }
+        return;
+    }
+
+    if let Some(chat_idx) = lines.iter().position(|l| l.trim() == "chat:") {
+        let mut block = vec!["github:".into(), "  gh_command: gh".into(), "repos:".into()];
+        for r in &slugs {
+            block.push(format!("  - {r}"));
+        }
+        block.push("workflows:".into());
+        block.push("  daily-work: {}".into());
+        block.push(String::new());
+        for (i, line) in block.into_iter().enumerate() {
+            lines.insert(chat_idx + i, line);
+        }
+    }
 }
 
 async fn run_interactive_prompts() -> Result<(
@@ -415,6 +466,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn init_without_repos_stays_workspace_first() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coworker.yaml");
+        run_init(false, None, Some(path.clone()), None, None, false)
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("acme/widget"));
+        assert!(raw.contains("tool_mode: auto"));
+    }
+
+    #[tokio::test]
     async fn init_non_interactive_writes_template() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("coworker.yaml");
@@ -432,6 +495,8 @@ mod tests {
         assert!(raw.contains("acme/widget"));
         assert!(raw.contains("acme/api"));
         assert!(raw.contains("http://127.0.0.1:11434/v1"));
+        assert!(raw.contains("github:"));
+        assert!(raw.contains("workflows:"));
     }
 
     #[tokio::test]
