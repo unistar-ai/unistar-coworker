@@ -31,8 +31,8 @@ use uuid::Uuid;
 
 use coworker_core::agent::chat_loop::ChatProgress;
 use coworker_core::app::{
-    apply_event, export_chat_transcript_markdown, hydrate_from_store, load_chat_session_ui,
-    spawn_approval_decision, AppEvent, SharedState, Tab,
+    apply_event, export_chat_transcript_markdown, load_chat_session_ui, spawn_approval_decision,
+    AppEvent, SharedState, Tab,
 };
 use coworker_core::engine::Engine;
 use coworker_core::error::Result;
@@ -54,7 +54,6 @@ pub async fn run(
     engine: Arc<Engine>,
     store: Arc<dyn Store>,
     events_rx: broadcast::Receiver<AppEvent>,
-    attach: bool,
     auth_token: Option<String>,
 ) -> Result<()> {
     let (snap_tx, _) = broadcast::channel::<String>(256);
@@ -65,13 +64,7 @@ pub async fn run(
         snap_tx: snap_tx.clone(),
     });
 
-    spawn_event_loop(
-        state.clone(),
-        store.clone(),
-        events_rx,
-        snap_tx.clone(),
-        attach,
-    );
+    spawn_event_loop(state.clone(), events_rx, snap_tx.clone());
 
     let app = build_router(runtime, auth_token);
 
@@ -214,16 +207,13 @@ async fn require_auth(
 
 fn spawn_event_loop(
     state: SharedState,
-    store: Arc<dyn Store>,
     events_rx: broadcast::Receiver<AppEvent>,
     snap_tx: broadcast::Sender<String>,
-    attach: bool,
 ) {
     tokio::spawn(async move {
         use tokio::time::{interval, MissedTickBehavior};
 
         let mut events_rx = events_rx;
-        let mut poll = interval(std::time::Duration::from_secs(2));
         let mut arm_poll = interval(std::time::Duration::from_millis(100));
         arm_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut live_poll = interval(std::time::Duration::from_millis(100));
@@ -265,13 +255,6 @@ fn spawn_event_loop(
                     } else {
                         live_dirty = false;
                         publish_live_patch(&state, &snap_tx).await;
-                    }
-                }
-                _ = poll.tick(), if attach => {
-                    if hydrate_from_store(&state, store.as_ref()).await.is_ok() {
-                        live_dirty = false;
-                        chat_dirty = false;
-                        publish_snapshot(&state, &snap_tx).await;
                     }
                 }
                 _ = arm_poll.tick() => {

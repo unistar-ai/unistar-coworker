@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-07-09
+
+### Removed
+
+- Store `workflow_runs` API and table/dir creation; `store compact` now purges legacy batch-workflow artifacts.
+- `attach_mode` protocol field and daemon attach polling (TUI/Web).
+- `WorkflowStarted` / `WorkflowFinished` events → `BackgroundTaskStarted` / `BackgroundTaskFinished`.
+- `engine_workflow_id` → `engine_task_label` in UI protocol.
+
+### Changed
+
+- `Transcript.workflow_id` renamed to `kind` (serde alias keeps old JSON readable).
+- `maybe_notify_new_workflow_approvals` → `maybe_notify_new_approvals`.
+
+[3.0.1]: https://github.com/unistar-ai/unistar-coworker/compare/v3.0.0...v3.0.1
+
 ## [3.0.0] - 2026-07-09
 
 ### Removed (breaking)

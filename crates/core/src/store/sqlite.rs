@@ -11,7 +11,7 @@ use crate::agent::context::harness_nudge_base;
 use crate::error::{CoworkerError, Result};
 use crate::store::{
     Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole,
-    ChatRuntimeState, ChatSession, Digest, PrSnapshot, Store, Transcript, WorkflowRun,
+    ChatRuntimeState, ChatSession, Digest, PrSnapshot, Store, Transcript,
 };
 
 pub struct SqliteStore {
@@ -68,11 +68,6 @@ fn migrate(conn: &Connection) -> Result<()> {
             level TEXT NOT NULL,
             event TEXT NOT NULL,
             message TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS workflow_runs (
-            id TEXT PRIMARY KEY,
-            workflow_id TEXT NOT NULL,
-            payload_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS backport_queue (
             id TEXT PRIMARY KEY,
@@ -302,53 +297,6 @@ impl Store for SqliteStore {
                 .collect();
             list.sort_by_key(|b| std::cmp::Reverse(b.created_at));
             Ok(list)
-        })
-    }
-
-    async fn start_workflow_run(&self, workflow_id: &str) -> Result<Uuid> {
-        let workflow_id = workflow_id.to_string();
-        self.with_conn(move |conn| {
-            let run = WorkflowRun {
-                id: Uuid::new_v4(),
-                workflow_id,
-                started_at: Utc::now(),
-                finished_at: None,
-                error: None,
-                summary: None,
-            };
-            conn.execute(
-                "INSERT INTO workflow_runs (id, workflow_id, payload_json) VALUES (?1,?2,?3)",
-                params![
-                    run.id.to_string(),
-                    run.workflow_id,
-                    serde_json::to_string(&run)?,
-                ],
-            )?;
-            Ok(run.id)
-        })
-    }
-
-    async fn finish_workflow_run(
-        &self,
-        id: &Uuid,
-        summary: Option<&str>,
-        error: Option<&str>,
-    ) -> Result<()> {
-        let id = *id;
-        let summary = summary.map(str::to_string);
-        let error = error.map(str::to_string);
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare("SELECT payload_json FROM workflow_runs WHERE id = ?1")?;
-            let json: String = stmt.query_row([id.to_string()], |row| row.get(0))?;
-            let mut run: WorkflowRun = serde_json::from_str(&json)?;
-            run.finished_at = Some(Utc::now());
-            run.summary = summary;
-            run.error = error;
-            conn.execute(
-                "UPDATE workflow_runs SET payload_json = ?1 WHERE id = ?2",
-                params![serde_json::to_string(&run)?, id.to_string()],
-            )?;
-            Ok(())
         })
     }
 

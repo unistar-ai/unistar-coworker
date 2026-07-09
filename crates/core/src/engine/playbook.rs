@@ -12,10 +12,10 @@ pub async fn few_shot_prefix(store: &dyn Store, limit: usize) -> String {
     let mut out = String::from("## Playbook examples (prior triage)\n\n");
     for t in transcripts {
         out.push_str(&format!(
-            "- {}/#{} workflow={} verdict={}\n  excerpt: {}\n",
+            "- {}/#{} kind={} verdict={}\n  excerpt: {}\n",
             t.repo,
             t.pr_number,
-            t.workflow_id,
+            t.kind,
             t.verdict,
             t.turns_json.chars().take(200).collect::<String>()
         ));
@@ -27,7 +27,7 @@ pub async fn few_shot_prefix(store: &dyn Store, limit: usize) -> String {
 pub fn transcript_from_triage(
     repo: &str,
     pr_number: u32,
-    workflow_id: &str,
+    kind: &str,
     verdict: &str,
     turns: &str,
 ) -> Transcript {
@@ -35,7 +35,7 @@ pub fn transcript_from_triage(
         id: uuid::Uuid::new_v4(),
         repo: repo.to_string(),
         pr_number,
-        workflow_id: workflow_id.to_string(),
+        kind: kind.to_string(),
         turns_json: turns.to_string(),
         verdict: verdict.to_string(),
         created_at: chrono::Utc::now(),

@@ -33,7 +33,7 @@ pub struct DigestSummary {
     /// PRs with at least one LLM `policy` verdict run.
     #[serde(default)]
     pub policy_gates: u32,
-    /// Wall-clock seconds for the workflow run that produced this digest.
+    /// Wall-clock seconds to produce this digest (legacy batch jobs).
     #[serde(default)]
     pub duration_secs: f64,
     /// False while a background job is still publishing partial digests (legacy store field).
@@ -161,16 +161,6 @@ pub struct AuditEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowRun {
-    pub id: Uuid,
-    pub workflow_id: String,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-    pub error: Option<String>,
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogLine {
     pub ts: DateTime<Utc>,
     pub level: String,
@@ -262,7 +252,9 @@ pub struct Transcript {
     pub id: Uuid,
     pub repo: String,
     pub pr_number: u32,
-    pub workflow_id: String,
+    /// Triage kind label (e.g. `triage`). Legacy JSON used `workflow_id`.
+    #[serde(alias = "workflow_id")]
+    pub kind: String,
     pub turns_json: String,
     pub verdict: String,
     pub created_at: DateTime<Utc>,

@@ -171,11 +171,11 @@ pub enum AppEvent {
     StoreUpdated,
     DigestReady(Digest),
     LogLine(LogLine),
-    WorkflowStarted {
-        workflow_id: String,
+    BackgroundTaskStarted {
+        label: String,
     },
-    WorkflowFinished {
-        workflow_id: String,
+    BackgroundTaskFinished {
+        label: String,
         ok: bool,
         message: String,
     },
@@ -291,8 +291,8 @@ pub struct AppState {
     pub selected_index: usize,
     pub status: String,
     pub engine_busy: bool,
-    /// Active workflow id while `engine_busy` (shown in status bar).
-    pub engine_workflow_id: Option<String>,
+    /// Active background task label while `engine_busy` (shown in status bar).
+    pub engine_task_label: Option<String>,
     pub github_ok: bool,
     pub llm_ok: bool,
     /// Last MCP `tool_list` round-trip (ms), measured at engine start.
@@ -364,8 +364,6 @@ pub struct AppState {
     pub pr_overview_cache: HashMap<String, String>,
     /// In-flight overview fetch (`repo#number`).
     pub pr_overview_fetching: Option<String>,
-    /// Legacy: reserved for shared-store polling (unused; always false).
-    pub attach_mode: bool,
     /// PR cursor within the selected Dashboard digest (`n` / `N`).
     pub dashboard_digest_pr_index: usize,
     /// Digest list index the PR cursor applies to.
@@ -400,7 +398,7 @@ impl AppState {
             selected_index: 0,
             status: "ready".into(),
             engine_busy: false,
-            engine_workflow_id: None,
+            engine_task_label: None,
             github_ok: false,
             llm_ok: false,
             github_latency_ms: None,
@@ -442,7 +440,6 @@ impl AppState {
             digest_folded_sections: default_folded_digest_sections(),
             pr_overview_cache: HashMap::new(),
             pr_overview_fetching: None,
-            attach_mode: false,
             dashboard_digest_pr_index: 0,
             dashboard_digest_pr_digest_idx: None,
             app_version: String::new(),
@@ -659,8 +656,8 @@ impl AppState {
         );
     }
 
-    /// After store hydrate, open modal when workflow approvals grew (attach / refresh).
-    pub fn maybe_notify_new_workflow_approvals(&mut self, prev_pending_count: usize) {
+    /// After store hydrate, open modal when pending approvals grew.
+    pub fn maybe_notify_new_approvals(&mut self, prev_pending_count: usize) {
         self.last_pending_approval_count = self.approvals.len();
         if !self.config.chat.auto_approve_mutations
             && self.approval_dialog.is_none()

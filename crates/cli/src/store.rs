@@ -109,7 +109,7 @@ pub(crate) fn render_compact_summary(
         ("audit entries", stats.audit_entries_removed),
         ("audit files", stats.audit_files_removed),
         ("digests", stats.digests_removed),
-        ("workflow runs", stats.workflow_runs_removed),
+        ("legacy workflow runs", stats.legacy_workflow_runs_removed),
     ];
     let max = rows.iter().map(|(_, n)| *n).max().unwrap_or(0).max(1);
     let mut table_rows: Vec<Vec<String>> = Vec::new();

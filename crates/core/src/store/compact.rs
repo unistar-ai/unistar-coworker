@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use crate::config::StorageBackend;
 use crate::error::{CoworkerError, Result};
-use crate::store::{AuditEntry, Digest, WorkflowRun};
+use crate::store::{AuditEntry, Digest};
 
 use super::json::JsonStore;
 use super::sqlite::SqliteStore;
@@ -14,7 +14,6 @@ use super::sqlite::SqliteStore;
 pub struct CompactOptions {
     pub audit_days: u32,
     pub digest_keep: u32,
-    pub workflow_runs_days: u32,
     /// When true, count what would be pruned but do not delete anything.
     pub dry_run: bool,
 }
@@ -24,7 +23,6 @@ impl Default for CompactOptions {
         Self {
             audit_days: 90,
             digest_keep: 30,
-            workflow_runs_days: 30,
             dry_run: false,
         }
     }
@@ -35,7 +33,8 @@ pub struct CompactStats {
     pub audit_entries_removed: u32,
     pub audit_files_removed: u32,
     pub digests_removed: u32,
-    pub workflow_runs_removed: u32,
+    /// Legacy batch-workflow run files/rows removed from older stores.
+    pub legacy_workflow_runs_removed: u32,
 }
 
 pub fn compact(
@@ -64,11 +63,7 @@ pub fn compact_json(root: &Path, opts: &CompactOptions) -> Result<CompactStats> 
         audit_entries_removed,
         audit_files_removed,
         digests_removed: prune_json_digests(root, opts.digest_keep, opts.dry_run)?,
-        workflow_runs_removed: prune_json_workflow_runs(
-            root,
-            opts.workflow_runs_days,
-            opts.dry_run,
-        )?,
+        legacy_workflow_runs_removed: purge_json_workflow_runs(root, opts.dry_run)?,
     })
 }
 
@@ -84,19 +79,11 @@ pub fn compact_sqlite(path: &Path, wal: bool, opts: &CompactOptions) -> Result<C
         audit_entries_removed: prune_sqlite_audit(&store, opts.audit_days, opts.dry_run)?,
         audit_files_removed: 0,
         digests_removed: prune_sqlite_digests(&store, opts.digest_keep, opts.dry_run)?,
-        workflow_runs_removed: prune_sqlite_workflow_runs(
-            &store,
-            opts.workflow_runs_days,
-            opts.dry_run,
-        )?,
+        legacy_workflow_runs_removed: purge_sqlite_workflow_runs(&store, opts.dry_run)?,
     })
 }
 
 fn audit_cutoff(days: u32) -> DateTime<Utc> {
-    Utc::now() - Duration::days(i64::from(days))
-}
-
-fn workflow_run_cutoff(days: u32) -> DateTime<Utc> {
     Utc::now() - Duration::days(i64::from(days))
 }
 
@@ -161,25 +148,25 @@ fn prune_json_digests(root: &Path, digest_keep: u32, dry_run: bool) -> Result<u3
     Ok(removed)
 }
 
-fn prune_json_workflow_runs(root: &Path, workflow_runs_days: u32, dry_run: bool) -> Result<u32> {
+/// Remove legacy `workflow_runs/*.json` left from pre-3.0 batch workflows.
+fn purge_json_workflow_runs(root: &Path, dry_run: bool) -> Result<u32> {
     let dir = root.join("workflow_runs");
     if !dir.is_dir() {
         return Ok(0);
     }
-    let cutoff = workflow_run_cutoff(workflow_runs_days);
     let mut removed = 0u32;
     for entry in fs::read_dir(&dir)? {
         let path = entry?.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
-        let run: WorkflowRun = serde_json::from_str(&fs::read_to_string(&path)?)?;
-        if run.finished_at.is_some_and(|t| t < cutoff) {
-            removed += 1;
-            if !dry_run {
-                fs::remove_file(path)?;
-            }
+        removed += 1;
+        if !dry_run {
+            fs::remove_file(path)?;
         }
+    }
+    if removed > 0 && !dry_run {
+        let _ = fs::remove_dir(&dir);
     }
     Ok(removed)
 }
@@ -224,29 +211,25 @@ fn prune_sqlite_digests(store: &SqliteStore, digest_keep: u32, dry_run: bool) ->
     })
 }
 
-fn prune_sqlite_workflow_runs(
-    store: &SqliteStore,
-    workflow_runs_days: u32,
-    dry_run: bool,
-) -> Result<u32> {
-    let cutoff = workflow_run_cutoff(workflow_runs_days);
+fn purge_sqlite_workflow_runs(store: &SqliteStore, dry_run: bool) -> Result<u32> {
     store.with_conn(|conn| {
-        let mut stmt = conn.prepare("SELECT id, payload_json FROM workflow_runs")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut removed = 0u32;
-        for row in rows {
-            let (id, json) = row?;
-            let run: WorkflowRun = serde_json::from_str(&json)?;
-            if run.finished_at.is_some_and(|t| t < cutoff) {
-                removed += 1;
-                if !dry_run {
-                    conn.execute("DELETE FROM workflow_runs WHERE id = ?1", [&id])?;
-                }
-            }
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workflow_runs'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if !exists {
+            return Ok(0);
         }
-        Ok(removed)
+        if dry_run {
+            let n: i64 = conn.query_row("SELECT COUNT(*) FROM workflow_runs", [], |r| r.get(0))?;
+            return Ok(n as u32);
+        }
+        let n = conn.execute("DELETE FROM workflow_runs", [])?;
+        Ok(n as u32)
     })
 }
 
@@ -301,7 +284,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn json_compact_prunes_audit_digests_and_workflow_runs() {
+    fn json_compact_prunes_audit_digests_and_legacy_workflow_runs() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         JsonStore::open(root.to_path_buf()).unwrap();
@@ -335,29 +318,15 @@ mod tests {
             write_json(&root.join(format!("digests/{date}.json")), &digest);
         }
 
-        let old_run = WorkflowRun {
-            id: Uuid::new_v4(),
-            workflow_id: "daily-work".into(),
-            started_at: old_ts,
-            finished_at: Some(old_ts + Duration::hours(1)),
-            error: None,
-            summary: Some("done".into()),
-        };
+        let legacy_dir = root.join("workflow_runs");
+        fs::create_dir_all(&legacy_dir).unwrap();
         write_json(
-            &root.join(format!("workflow_runs/{}.json", old_run.id)),
-            &old_run,
+            &legacy_dir.join("old-run.json"),
+            &serde_json::json!({"id": Uuid::new_v4(), "workflow_id": "daily-work"}),
         );
-        let recent_run = WorkflowRun {
-            id: Uuid::new_v4(),
-            workflow_id: "daily-work".into(),
-            started_at: recent_ts,
-            finished_at: Some(recent_ts + Duration::minutes(5)),
-            error: None,
-            summary: Some("recent".into()),
-        };
         write_json(
-            &root.join(format!("workflow_runs/{}.json", recent_run.id)),
-            &recent_run,
+            &legacy_dir.join("other-run.json"),
+            &serde_json::json!({"id": Uuid::new_v4(), "workflow_id": "daily-work"}),
         );
 
         let stats = compact_json(
@@ -365,7 +334,6 @@ mod tests {
             &CompactOptions {
                 audit_days: 90,
                 digest_keep: 3,
-                workflow_runs_days: 30,
                 dry_run: false,
             },
         )
@@ -373,7 +341,8 @@ mod tests {
 
         assert_eq!(stats.audit_entries_removed, 1);
         assert_eq!(stats.digests_removed, 6);
-        assert_eq!(stats.workflow_runs_removed, 1);
+        assert_eq!(stats.legacy_workflow_runs_removed, 2);
+        assert!(!legacy_dir.exists());
 
         assert!(!root.join("audit/2020-01.jsonl").exists());
 
@@ -388,13 +357,6 @@ mod tests {
             .filter_map(|e| e.ok())
             .collect();
         assert_eq!(remaining_digests.len(), 3);
-
-        assert!(!root
-            .join(format!("workflow_runs/{}.json", old_run.id))
-            .exists());
-        assert!(root
-            .join(format!("workflow_runs/{}.json", recent_run.id))
-            .exists());
     }
 
     #[test]
@@ -420,7 +382,6 @@ mod tests {
             &CompactOptions {
                 audit_days: 30,
                 digest_keep: 30,
-                workflow_runs_days: 30,
                 dry_run: false,
             },
         )
@@ -468,33 +429,26 @@ mod tests {
                 store.save_digest(&sample_digest(date)).await.unwrap();
             }
 
-            let old_id = store.start_workflow_run("daily-work").await.unwrap();
-            store
-                .finish_workflow_run(&old_id, Some("done"), None)
-                .await
-                .unwrap();
             store
                 .with_conn(|conn| {
-                    use rusqlite::params;
-                    let mut run: WorkflowRun = serde_json::from_str(&conn.query_row(
-                        "SELECT payload_json FROM workflow_runs WHERE id = ?1",
-                        [old_id.to_string()],
-                        |row| row.get::<_, String>(0),
-                    )?)?;
-                    run.started_at = old_ts;
-                    run.finished_at = Some(old_ts + Duration::hours(1));
                     conn.execute(
-                        "UPDATE workflow_runs SET payload_json = ?1 WHERE id = ?2",
-                        params![serde_json::to_string(&run)?, old_id.to_string()],
+                        "CREATE TABLE IF NOT EXISTS workflow_runs (
+                            id TEXT PRIMARY KEY,
+                            workflow_id TEXT NOT NULL,
+                            payload_json TEXT NOT NULL
+                        )",
+                        [],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO workflow_runs (id, workflow_id, payload_json) VALUES (?1,?2,?3)",
+                        rusqlite::params![
+                            Uuid::new_v4().to_string(),
+                            "daily-work",
+                            r#"{"summary":"legacy"}"#
+                        ],
                     )?;
                     Ok(())
                 })
-                .unwrap();
-
-            let recent_id = store.start_workflow_run("daily-work").await.unwrap();
-            store
-                .finish_workflow_run(&recent_id, Some("recent"), None)
-                .await
                 .unwrap();
         });
 
@@ -504,7 +458,6 @@ mod tests {
             &CompactOptions {
                 audit_days: 90,
                 digest_keep: 2,
-                workflow_runs_days: 30,
                 dry_run: false,
             },
         )
@@ -512,7 +465,7 @@ mod tests {
 
         assert_eq!(stats.audit_entries_removed, 1);
         assert_eq!(stats.digests_removed, 3);
-        assert_eq!(stats.workflow_runs_removed, 1);
+        assert_eq!(stats.legacy_workflow_runs_removed, 1);
 
         rt.block_on(async {
             let digests = store.list_digests(10).await.unwrap();

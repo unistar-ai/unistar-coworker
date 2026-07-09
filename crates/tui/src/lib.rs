@@ -31,14 +31,13 @@ use ratatui::widgets::{
 };
 use ratatui::DefaultTerminal;
 use std::io::{stdout, Write};
-use std::time::Instant;
 use tokio::sync::broadcast;
 use unicode_width::UnicodeWidthStr;
 
 use coworker_core::agent::chat_loop::is_chat_cancelled;
 use coworker_core::app::{
-    apply_event, export_chat_transcript_markdown, hydrate_from_store, load_chat_session_ui,
-    spawn_approval_decision, AppEvent, AppState, ChatPaneFocus, DashboardSection, SharedState, Tab,
+    apply_event, export_chat_transcript_markdown, load_chat_session_ui, spawn_approval_decision,
+    AppEvent, AppState, ChatPaneFocus, DashboardSection, SharedState, Tab,
 };
 use coworker_core::engine::Engine;
 use coworker_core::error::Result;
@@ -57,26 +56,10 @@ pub async fn run(
     enable_terminal_modes()?;
     spinner::reset_session();
 
-    const ATTACH_POLL: Duration = Duration::from_secs(2);
-    let mut last_attach_poll = Instant::now();
-
     let result = async {
         loop {
             while let Ok(ev) = events_rx.try_recv() {
                 apply_event(&state, ev).await;
-            }
-
-            if {
-                let s = state.read().await;
-                s.attach_mode
-            } && last_attach_poll.elapsed() >= ATTACH_POLL
-            {
-                let prev = state.read().await.approvals.len();
-                if hydrate_from_store(&state, store.as_ref()).await.is_ok() {
-                    let mut s = state.write().await;
-                    s.maybe_notify_new_workflow_approvals(prev);
-                }
-                last_attach_poll = Instant::now();
             }
 
             maybe_request_pr_overview(&state, &engine).await;
@@ -2096,8 +2079,8 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: The
         .chat_turn_phase()
         .map(|p| format!(" │ phase: {p}"))
         .unwrap_or_default();
-    let workflow_note = state
-        .engine_workflow_id
+    let task_note = state
+        .engine_task_label
         .as_ref()
         .filter(|_| state.engine_busy)
         .map(|id| format!(" │ {id}"))
@@ -2117,9 +2100,9 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: The
     );
     line.spans.extend(context_status_spans(th, state));
     line.spans.extend(store_status_spans(th, state));
-    if !workflow_note.is_empty() {
+    if !task_note.is_empty() {
         line.spans.push(Span::styled(
-            workflow_note,
+            task_note,
             Style::default().fg(th.accent).bg(th.surface),
         ));
     }

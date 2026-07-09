@@ -3,7 +3,7 @@
 use super::{AppEvent, AppState, ChatPendingApproval, SharedState};
 use crate::agent::chat_loop::{ChatActivityFlow, ChatProgress};
 
-pub fn parse_triage_workflow_target(rest: &str) -> Option<(String, u32)> {
+pub fn parse_triage_task_label(rest: &str) -> Option<(String, u32)> {
     let (repo, num) = rest.rsplit_once('#')?;
     let number: u32 = num.parse().ok()?;
     if repo.is_empty() {
@@ -17,7 +17,7 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
     match ev {
         AppEvent::StoreUpdated => {
             let prev = s.last_pending_approval_count;
-            s.maybe_notify_new_workflow_approvals(prev);
+            s.maybe_notify_new_approvals(prev);
             s.status = "store updated".into();
         }
         AppEvent::DigestReady(d) => {
@@ -33,25 +33,21 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
             };
         }
         AppEvent::LogLine(l) => s.push_log(&l.level, l.message),
-        AppEvent::WorkflowStarted { workflow_id } => {
+        AppEvent::BackgroundTaskStarted { label } => {
             s.engine_busy = true;
-            s.engine_workflow_id = Some(workflow_id.clone());
-            s.status = format!("running {workflow_id}");
+            s.engine_task_label = Some(label.clone());
+            s.status = format!("running {label}");
         }
-        AppEvent::WorkflowFinished {
-            workflow_id,
-            ok,
-            message,
-        } => {
+        AppEvent::BackgroundTaskFinished { label, ok, message } => {
             s.engine_busy = false;
-            s.engine_workflow_id = None;
+            s.engine_task_label = None;
             let mut status = if ok {
                 message.clone()
             } else {
                 format!("error: {message}")
             };
-            if let Some(rest) = workflow_id.strip_prefix("triage:") {
-                if let Some((repo, number)) = parse_triage_workflow_target(rest) {
+            if let Some(rest) = label.strip_prefix("triage:") {
+                if let Some((repo, number)) = parse_triage_task_label(rest) {
                     let key = AppState::pr_overview_key(&repo, number);
                     s.pr_overview_cache.remove(&key);
                     if ok {
@@ -60,7 +56,7 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                 }
             }
             s.status = status;
-            s.push_log("info", format!("{workflow_id} finished: {message}"));
+            s.push_log("info", format!("{label} finished: {message}"));
         }
         AppEvent::StatusMessage(m) => {
             s.status = m.clone();

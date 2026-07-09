@@ -195,9 +195,9 @@ impl Engine {
     pub fn spawn_triage_pr(self: &Arc<Self>, repo: String, pr_number: u32) {
         let engine = Arc::clone(self);
         tokio::spawn(async move {
-            let wf = format!("triage:{repo}#{pr_number}");
-            let _ = engine.events.send(AppEvent::WorkflowStarted {
-                workflow_id: wf.clone(),
+            let label = format!("triage:{repo}#{pr_number}");
+            let _ = engine.events.send(AppEvent::BackgroundTaskStarted {
+                label: label.clone(),
             });
             let result = engine.triage_pr_for_number(&repo, pr_number).await;
             let (ok, message) = match result {
@@ -209,11 +209,9 @@ impl Engine {
                     engine.emit_log("warn", format!("post-triage hydrate: {e}"));
                 }
             }
-            let _ = engine.events.send(AppEvent::WorkflowFinished {
-                workflow_id: wf,
-                ok,
-                message,
-            });
+            let _ = engine
+                .events
+                .send(AppEvent::BackgroundTaskFinished { label, ok, message });
         });
     }
 

@@ -2418,7 +2418,7 @@ function updateStatus() {
   if (dot.className !== `brand-dot ${live}`) dot.className = `brand-dot ${live}`;
 
   const parts = [state.status || "ready"];
-  if (state.engine_busy) parts.push(state.engine_workflow_id || "workflow");
+  if (state.engine_busy) parts.push(state.engine_task_label || "task");
   if (state.chat_busy) {
     const phase = state.chat_turn_phase;
     if (phase) parts.push(phase);

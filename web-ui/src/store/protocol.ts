@@ -133,7 +133,7 @@ export interface WebSnapshot {
   tabs: string[];
   status: string;
   engine_busy: boolean;
-  engine_workflow_id: string | null;
+  engine_task_label: string | null;
   chat_enabled: boolean;
   chat_busy: boolean;
   chat_session_id: string | null;
@@ -177,7 +177,6 @@ export interface WebSnapshot {
   github_latency_ms: number | null;
   llm_latency_ms: number | null;
   mcp_servers: McpServerStatus[];
-  attach_mode: boolean;
   auto_approve_mutations: boolean;
   ui_theme: string;
   app_version: string;

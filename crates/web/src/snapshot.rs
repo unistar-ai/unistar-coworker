@@ -23,7 +23,7 @@ pub struct WebSnapshot {
     pub tabs: Vec<String>,
     pub status: String,
     pub engine_busy: bool,
-    pub engine_workflow_id: Option<String>,
+    pub engine_task_label: Option<String>,
     pub chat_enabled: bool,
     pub chat_busy: bool,
     pub chat_session_id: Option<String>,
@@ -73,7 +73,6 @@ pub struct WebSnapshot {
     pub github_latency_ms: Option<u128>,
     pub llm_latency_ms: Option<u128>,
     pub mcp_servers: Vec<Value>,
-    pub attach_mode: bool,
     /// When true, mutating GitHub/MCP tools run without approval (`chat.auto_approve_mutations`).
     pub auto_approve_mutations: bool,
     /// Default Web UI theme from config (`dark` | `light`); user override in localStorage.
@@ -248,7 +247,7 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
         tabs,
         status: s.status.clone(),
         engine_busy: s.engine_busy,
-        engine_workflow_id: s.engine_workflow_id.clone(),
+        engine_task_label: s.engine_task_label.clone(),
         chat_enabled: s.config.chat.enabled,
         chat_busy: s.chat_busy,
         chat_session_id: s.chat_session_id.map(|id| id.to_string()),
@@ -317,7 +316,6 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
                 })
             })
             .collect(),
-        attach_mode: s.attach_mode,
         auto_approve_mutations: s.config.chat.auto_approve_mutations,
         ui_theme: s.config.web_theme_id().to_string(),
         app_version: s.app_version.clone(),

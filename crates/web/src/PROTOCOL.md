@@ -27,8 +27,8 @@ Fields (see [`snapshot.rs`](./snapshot.rs) `WebSnapshot` for the authoritative l
 | `tab` | string | active tab id |
 | `tabs` | string[] | enabled tab ids |
 | `status` | string | status bar text |
-| `engine_busy` | bool | workflow running |
-| `engine_workflow_id` | string? | workflow id when busy |
+| `engine_busy` | bool | background task running |
+| `engine_task_label` | string? | task label when busy (e.g. `triage:org/repo#42`) |
 | `chat_enabled` | bool | chat tab available |
 | `chat_busy` | bool | chat turn in progress |
 | `chat_session_id` | string? | current session UUID |
@@ -65,7 +65,6 @@ Fields (see [`snapshot.rs`](./snapshot.rs) `WebSnapshot` for the authoritative l
 | `github_ok` / `llm_ok` | bool | connectivity probes |
 | `github_latency_ms` / `llm_latency_ms` | u128? | |
 | `mcp_servers` | object[] | per-server status |
-| `attach_mode` | bool | Legacy shared-store flag (always false) |
 | `auto_approve_mutations` | bool | `chat.auto_approve_mutations` |
 | `ui_theme` | string | `dark` / `light` |
 

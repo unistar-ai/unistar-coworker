@@ -11,7 +11,7 @@ use crate::agent::context::harness_nudge_base;
 use crate::error::{CoworkerError, Result};
 use crate::store::{
     Approval, ApprovalStatus, AuditEntry, BackportQueueItem, ChatMessage, ChatRole,
-    ChatRuntimeState, ChatSession, Digest, PrSnapshot, Store, Transcript, WorkflowRun,
+    ChatRuntimeState, ChatSession, Digest, PrSnapshot, Store, Transcript,
 };
 use async_trait::async_trait;
 
@@ -27,7 +27,6 @@ impl JsonStore {
         fs::create_dir_all(root.join("pr_snapshots"))?;
         fs::create_dir_all(root.join("approvals"))?;
         fs::create_dir_all(root.join("audit"))?;
-        fs::create_dir_all(root.join("workflow_runs"))?;
         fs::create_dir_all(root.join("backport_queue"))?;
         fs::create_dir_all(root.join("chat/sessions"))?;
         fs::create_dir_all(root.join("chat/messages"))?;
@@ -283,37 +282,6 @@ impl Store for JsonStore {
             .collect();
         list.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(list)
-    }
-
-    async fn start_workflow_run(&self, workflow_id: &str) -> Result<Uuid> {
-        let run = WorkflowRun {
-            id: Uuid::new_v4(),
-            workflow_id: workflow_id.to_string(),
-            started_at: Utc::now(),
-            finished_at: None,
-            error: None,
-            summary: None,
-        };
-        let path = self
-            .root
-            .join("workflow_runs")
-            .join(format!("{}.json", run.id));
-        Self::write_json(&path, &run)?;
-        Ok(run.id)
-    }
-
-    async fn finish_workflow_run(
-        &self,
-        id: &Uuid,
-        summary: Option<&str>,
-        error: Option<&str>,
-    ) -> Result<()> {
-        let path = self.root.join("workflow_runs").join(format!("{id}.json"));
-        let mut run: WorkflowRun = read_json(&path)?;
-        run.finished_at = Some(Utc::now());
-        run.summary = summary.map(str::to_string);
-        run.error = error.map(str::to_string);
-        Self::write_json(&path, &run)
     }
 
     async fn create_chat_session(

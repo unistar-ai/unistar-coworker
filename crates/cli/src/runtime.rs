@@ -65,7 +65,7 @@ pub(crate) async fn run_web(
     spawn_sighup_reload(Arc::clone(&engine));
     engine.clone().spawn_background();
 
-    coworker_web::run(bind, state, engine, store, rx, false, auth_token).await
+    coworker_web::run(bind, state, engine, store, rx, auth_token).await
 }
 
 pub(crate) async fn run_tui(

@@ -27,7 +27,7 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
-    /// Export store reports without running a full workflow
+    /// Export store reports without chat
     Report {
         #[command(subcommand)]
         kind: ReportKind,

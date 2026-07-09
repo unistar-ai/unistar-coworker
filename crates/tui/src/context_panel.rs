@@ -143,12 +143,6 @@ pub fn store_status_spans(th: ThemePalette, state: &AppState) -> Vec<Span<'stati
             Style::default().fg(th.warn).bg(th.surface),
         ));
     }
-    if state.attach_mode {
-        spans.push(Span::styled(
-            "attach ",
-            Style::default().fg(th.accent).bg(th.surface),
-        ));
-    }
     spans.push(Span::styled(" ", surface));
     spans
 }

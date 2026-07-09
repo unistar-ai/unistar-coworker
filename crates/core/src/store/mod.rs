@@ -38,14 +38,6 @@ pub trait Store: Send + Sync {
 
     async fn append_audit(&self, entry: &AuditEntry) -> Result<()>;
 
-    async fn start_workflow_run(&self, workflow_id: &str) -> Result<Uuid>;
-    async fn finish_workflow_run(
-        &self,
-        id: &Uuid,
-        summary: Option<&str>,
-        error: Option<&str>,
-    ) -> Result<()>;
-
     async fn create_chat_session(
         &self,
         title: Option<&str>,
