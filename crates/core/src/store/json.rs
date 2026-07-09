@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use fs2::FileExt;
 use uuid::Uuid;
 
 use crate::agent::context::harness_nudge_base;
@@ -30,22 +29,6 @@ impl JsonStore {
         fs::create_dir_all(root.join("chat/messages"))?;
 
         Ok(Self { root })
-    }
-
-    fn lock_path(&self) -> PathBuf {
-        self.root.join(".coworker.lock")
-    }
-
-    fn with_lock<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(self.lock_path())?;
-        lock_file.lock_exclusive().map_err(CoworkerError::Io)?;
-        let result = f();
-        let _ = lock_file.unlock();
-        result
     }
 
     fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -96,10 +79,6 @@ impl JsonStore {
         out.push_str(&line);
         fs::write(path, out).map_err(CoworkerError::Io)?;
         Ok(())
-    }
-
-    fn repo_file(repo: &str) -> String {
-        repo.replace('/', "__")
     }
 }
 

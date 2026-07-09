@@ -654,60 +654,6 @@ fn message_continuation_indent(role: &str) -> String {
     " ".repeat(cols)
 }
 
-pub fn ci_status_style(th: ThemePalette, summary: &str) -> Style {
-    let lower = summary.to_ascii_lowercase();
-    if lower.contains("fail") || lower.contains("red") {
-        Style::default().fg(th.err)
-    } else if lower.contains("ok") || lower.contains("green") || lower.contains("pass") {
-        Style::default().fg(th.ok)
-    } else if lower.contains("pending") || lower.contains("wait") {
-        Style::default().fg(th.warn)
-    } else {
-        Style::default().fg(th.muted)
-    }
-}
-
-/// Compact CI status glyph for PR list rows.
-pub fn pr_ci_glyph(summary: &str) -> &'static str {
-    let lower = summary.to_ascii_lowercase();
-    if lower.contains("fail") || lower.contains("red") {
-        "✗"
-    } else if lower.contains("ok") || lower.contains("green") || lower.contains("pass") {
-        "✓"
-    } else if lower.contains("pending") || lower.contains("wait") {
-        "◷"
-    } else {
-        "·"
-    }
-}
-
-/// Compact review status glyph for PR list rows.
-pub fn pr_review_glyph(summary: &str) -> &'static str {
-    let lower = summary.to_ascii_lowercase();
-    if lower.contains("changes") {
-        "✗"
-    } else if lower.contains("review") {
-        "◉"
-    } else if lower.contains("approved") {
-        "✓"
-    } else {
-        "·"
-    }
-}
-
-pub fn review_status_style(th: ThemePalette, summary: &str) -> Style {
-    let lower = summary.to_ascii_lowercase();
-    if lower.contains("changes") {
-        Style::default().fg(th.err)
-    } else if lower.contains("review") {
-        Style::default().fg(th.warn)
-    } else if lower.contains("approved") {
-        Style::default().fg(th.ok)
-    } else {
-        Style::default().fg(th.muted)
-    }
-}
-
 pub fn log_level_style(th: ThemePalette, level: &str) -> Style {
     match level.to_ascii_lowercase().as_str() {
         "error" => Style::default().fg(th.err).add_modifier(Modifier::BOLD),
@@ -968,14 +914,6 @@ mod tests {
         let th = ThemePalette::from_tui(&tui, ThemeMode::Dark);
         assert_eq!(th.accent, Color::Rgb(255, 85, 0));
         assert_eq!(th.accent_dim, Color::Rgb(170, 56, 0));
-    }
-
-    #[test]
-    fn pr_glyphs_reflect_status() {
-        assert_eq!(pr_ci_glyph("passing (3/3)"), "✓");
-        assert_eq!(pr_ci_glyph("failing (1/3)"), "✗");
-        assert_eq!(pr_review_glyph("review-required"), "◉");
-        assert_eq!(pr_review_glyph("approved"), "✓");
     }
 
     #[test]

@@ -838,6 +838,7 @@ pub async fn resume_chat_after_approval(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn resume_chat_after_user_answer(
     config: &Config,
     store: Arc<dyn Store>,

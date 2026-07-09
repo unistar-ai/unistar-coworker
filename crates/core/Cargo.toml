@@ -29,7 +29,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2"
 uuid = { version = "1", features = ["serde", "v4"] }
-fs2 = "0.4"
 chromiumoxide = { version = "0.9", default-features = true, optional = true }
 rusqlite = { version = "0.34", features = ["bundled"] }
 

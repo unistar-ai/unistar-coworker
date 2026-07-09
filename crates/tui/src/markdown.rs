@@ -1,77 +1,11 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::collections::HashSet;
 use unicode_width::UnicodeWidthStr;
 
 use coworker_core::agent::context::truncate_chars;
 
 use super::theme::ThemePalette;
-
-/// ATX `##` section titles in document order (excludes `###` and deeper).
-pub fn markdown_h2_section_titles(input: &str) -> Vec<String> {
-    input
-        .lines()
-        .filter_map(|line| {
-            let t = line.trim();
-            if !t.starts_with("## ") || t.starts_with("### ") {
-                return None;
-            }
-            Some(t.trim_start_matches("## ").trim().to_string())
-        })
-        .collect()
-}
-
-/// Hide body text under folded `##` sections; headers stay visible with a fold hint.
-pub fn filter_folded_markdown_sections(
-    input: &str,
-    folded: &HashSet<String>,
-    expand_hint: &str,
-) -> String {
-    if folded.is_empty() {
-        return input.to_string();
-    }
-    let mut out = String::new();
-    let mut in_folded = false;
-    let mut skipped_lines = 0usize;
-    for line in input.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("## ") && !trimmed.starts_with("### ") {
-            if in_folded && skipped_lines > 0 {
-                out.push_str(&format!(
-                    "\n  _… {skipped_lines} line(s) folded — {expand_hint} to expand_"
-                ));
-            }
-            skipped_lines = 0;
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(line);
-            let title = trimmed.trim_start_matches("## ").trim();
-            in_folded = folded.contains(title);
-            if in_folded {
-                out.push_str(" `[folded]`");
-            }
-            continue;
-        }
-        if in_folded {
-            if !trimmed.is_empty() {
-                skipped_lines += 1;
-            }
-            continue;
-        }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(line);
-    }
-    if in_folded && skipped_lines > 0 {
-        out.push_str(&format!(
-            "\n  _… {skipped_lines} line(s) folded — {expand_hint} to expand_"
-        ));
-    }
-    out
-}
 
 /// Incremental markdown renderer for streaming assistant output.
 ///
@@ -2258,25 +2192,6 @@ open PR(s) in acme/widget (3):\n\
         assert_eq!(stable_line_prefix_byte_len("ab\n"), 3);
         assert_eq!(stable_line_prefix_byte_len("ab\ncd"), 3);
         assert_eq!(stable_line_prefix_byte_len("ab\ncd\n"), 6);
-    }
-
-    #[test]
-    fn markdown_h2_section_titles_skips_h3() {
-        let md = "## Needs attention\n### repo\n## Ignorable";
-        let titles = markdown_h2_section_titles(md);
-        assert_eq!(titles, vec!["Needs attention", "Ignorable"]);
-    }
-
-    #[test]
-    fn filter_folded_markdown_sections_hides_body() {
-        let md = "## Needs attention\n\n- item\n\n## Ignorable\n\n- skip me";
-        let folded: HashSet<String> = ["Ignorable"].into_iter().map(str::to_string).collect();
-        let out = filter_folded_markdown_sections(md, &folded, "Z");
-        assert!(out.contains("Needs attention"));
-        assert!(out.contains("- item"));
-        assert!(out.contains("Ignorable"));
-        assert!(out.contains("[folded]"));
-        assert!(!out.contains("skip me"));
     }
 
     #[test]

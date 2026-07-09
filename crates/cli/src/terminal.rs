@@ -111,36 +111,6 @@ fn hbar(widths: &[usize], l: char, m: char, r: char) -> String {
     s
 }
 
-/// A titled box panel for a short block of text.
-pub(crate) fn panel(title: &str, body: &str, tty: bool) -> String {
-    if !tty {
-        return format!("{title}\n{body}\n");
-    }
-    let lines: Vec<&str> = body.lines().collect();
-    let inner_w = lines
-        .iter()
-        .map(|l| disp_width(l))
-        .max()
-        .unwrap_or(0)
-        .max(disp_width(title))
-        .max(8);
-    let mut s = String::new();
-    let title_pad = inner_w.saturating_sub(disp_width(title));
-    s.push('┌');
-    s.push_str(&format!("─ {title}"));
-    s.push_str(&"─".repeat(title_pad + 1));
-    s.push('┐');
-    s.push('\n');
-    for l in lines {
-        s.push_str(&format!("│ {:<width$} │\n", l, width = inner_w));
-    }
-    s.push('└');
-    s.push_str(&"─".repeat(inner_w + 2));
-    s.push('┘');
-    s.push('\n');
-    s
-}
-
 /// ANSI percentage bar: `███░░░ 42%`. Plain mode returns `42%`.
 pub(crate) fn progress_bar(pct: f64, width: usize, tty: bool) -> String {
     if !tty {
