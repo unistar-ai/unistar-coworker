@@ -78,7 +78,13 @@ export default function ConfigTab() {
 
       <div className="config-section">
         <div className="config-section-title">Connectivity</div>
-        <ProbeRow label="GitHub" ok={githubOk} latency={githubLatency} />
+        <ProbeRow
+          label="GitHub"
+          ok={githubOk}
+          latency={githubLatency}
+          optional
+          optionalHint="optional — install gh + auth when using PR/CI tools"
+        />
         <ProbeRow label="LLM" ok={llmOk} latency={llmLatency} />
         <button
           type="button"
@@ -150,11 +156,14 @@ export default function ConfigTab() {
       <div className="config-section">
         <div className="config-section-title">Keyboard shortcuts</div>
         <div className="config-shortcuts">
-          <ShortcutRow keys={["Ctrl/⌘", "1–6"]} desc="Switch to tab 1–6" />
+          <ShortcutRow keys={["Ctrl/⌘", "1–4"]} desc="Switch to tab 1–4" />
           <ShortcutRow keys={["Ctrl/⌘", "K"]} desc="Open command palette" />
           <ShortcutRow keys={["Enter"]} desc="Insert newline in chat input" />
           <ShortcutRow keys={["Shift", "Enter"]} desc="Send chat message" />
           <ShortcutRow keys={["Esc"]} desc="Cancel generation / close dialog / context drawer" />
+          <div className="config-muted config-llm-hint">
+            TUI uses Enter to send and Shift+Enter for newline (opposite of Web).
+          </div>
         </div>
       </div>
     </div>
@@ -180,18 +189,33 @@ function ProbeRow({
   label,
   ok,
   latency,
+  optional = false,
+  optionalHint,
 }: {
   label: string;
   ok: boolean;
   latency: number | null;
+  optional?: boolean;
+  optionalHint?: string;
 }) {
+  const status = ok
+    ? latency != null
+      ? `${latency}ms`
+      : "ok"
+    : optional
+      ? "not configured"
+      : "offline";
+  const dotClass = ok ? "ok" : optional ? "optional" : "dead";
   return (
     <div className="config-probe-row">
-      <span className={`config-probe-dot ${ok ? "ok" : "dead"}`} />
+      <span className={`config-probe-dot ${dotClass}`} />
       <span className="config-probe-label">{label}</span>
-      <span className={`config-probe-status${ok ? " ok" : ""}`}>
-        {ok ? (latency != null ? `${latency}ms` : "ok") : "offline"}
+      <span className={`config-probe-status${ok ? " ok" : optional ? " optional" : ""}`}>
+        {status}
       </span>
+      {!ok && optional && optionalHint ? (
+        <span className="config-muted config-probe-hint">{optionalHint}</span>
+      ) : null}
     </div>
   );
 }

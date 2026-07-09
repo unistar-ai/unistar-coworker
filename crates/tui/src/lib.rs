@@ -629,6 +629,9 @@ async fn handle_chat_slash_command(
                 "system> **Chat**: Enter send; Shift+Enter newline; ↑/↓ input history; j/k scroll msgs; o expand tool (input empty); Esc cancel; End latest; \\ toggle ctx panel",
             );
             s.push_chat_line(
+                "system> **GitHub**: include `owner/repo` or a PR URL in your message — there is no default repo list.",
+            );
+            s.push_chat_line(
                 "system> **Tabs**: Tab/BackTab cycle; 0–3 jump; q quit; Ctrl+c quit; ? open Chat; r refresh store; Approvals y/n; Logs / filter; Config R probe",
             );
             s.status = "chat help".into();
@@ -1152,7 +1155,7 @@ fn draw_list(
                 ListItem::new(format!("llm: {}", state.config.llm.model)),
                 ListItem::new(format!(
                     "github: {}",
-                    context_panel::format_probe_latency(state.github_ok, state.github_latency_ms)
+                    context_panel::format_github_probe(state.github_ok, state.github_latency_ms)
                 )),
                 ListItem::new(format!(
                     "llm probe: {}",
@@ -1212,7 +1215,7 @@ struct DetailBody {
 fn config_connectivity_detail(state: &AppState) -> String {
     const BAR_W: usize = 24;
     let github_status =
-        context_panel::format_probe_latency(state.github_ok, state.github_latency_ms);
+        context_panel::format_github_probe(state.github_ok, state.github_latency_ms);
     let llm_status = context_panel::format_probe_latency(state.llm_ok, state.llm_latency_ms);
     let github_bar = state
         .github_ok
@@ -1235,9 +1238,14 @@ fn config_connectivity_detail(state: &AppState) -> String {
         **GitHub** — {github_status}{github_bar}\n\n\
         **LLM** — {llm_status}{llm_bar}\n\n\
         _Bar scale: 0–2000ms_\n\n\
-        Press **R** to re-probe GitHub and LLM latency.",
+        GitHub is optional (workspace-only agents need no `gh`). Press **R** to re-probe.\n\n\
+        For PR/CI chat, name `owner/repo` or paste a PR URL — there is no default repo list.",
         state.config.github.gh_command,
-        if state.github_ok { "ok" } else { "offline" },
+        if state.github_ok {
+            "ok"
+        } else {
+            "optional / offline"
+        },
         state.config.llm.base_url,
         if state.llm_ok { "ok" } else { "offline" },
         github_status = github_status,

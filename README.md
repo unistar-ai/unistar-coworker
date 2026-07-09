@@ -511,7 +511,7 @@ Three layers; do not blur responsibilities:
 
 | Layer | Location | Role |
 |-------|----------|------|
-| **Skill** | `skills/*/SKILL.md` | Reusable technique — triage rules, tone, digest format. No harness logic. |
+| **Skill** | `skills/*/SKILL.md` | Reusable technique — triage rules, tone, workflow guidance. No harness logic. |
 | **Prompt** | `prompts/chat.md` | Chat system prompt body; `skills:` frontmatter selects default techniques. Embedded at build time. |
 | **Harness** | `crates/core/src/agent/`, `crates/core/src/engine/` | Deterministic Rust — MCP pool, approvals, token budget, chat loop |
 

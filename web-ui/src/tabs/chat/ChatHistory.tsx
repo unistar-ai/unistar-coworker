@@ -128,7 +128,7 @@ export default function ChatHistory({
       <EmptyState
         icon={MessageSquare}
         title="No messages yet"
-        description="Send a message to start coding…"
+        description="Ask about your workspace — code, tests, or docs. For GitHub, name owner/repo or paste a PR URL (no default repo)."
       />
     );
   }

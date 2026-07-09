@@ -78,6 +78,11 @@ pub async fn run_checks_with_extras(
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "coworker.yaml (cwd or .coworker/)".into());
+    let config_path_for_raw = config_override.clone().or_else(|| {
+        [PathBuf::from("coworker.yaml"), PathBuf::from(".coworker/coworker.yaml")]
+            .into_iter()
+            .find(|p| p.exists())
+    });
     let cfg = match &loaded {
         Ok(c) => {
             report.push_check(DoctorCheck {
@@ -87,6 +92,22 @@ pub async fn run_checks_with_extras(
                 latency_ms: None,
                 hint: None,
             });
+            if let Some(path) = &config_path_for_raw {
+                if let Ok(raw) = std::fs::read_to_string(path) {
+                    if yaml_has_legacy_repos_key(&raw) {
+                        report.push_check(DoctorCheck {
+                            name: "config-repos",
+                            status: "warn",
+                            detail: "legacy `repos:` key is ignored (removed in v4.2)".into(),
+                            latency_ms: None,
+                            hint: Some(
+                                "name owner/repo or paste a PR URL in chat; use `report ci --repo owner/name`"
+                                    .into(),
+                            ),
+                        });
+                    }
+                }
+            }
             Some(c.clone())
         }
         Err(e) => {
@@ -441,6 +462,14 @@ fn push_llm_model_tier_checks(report: &mut DoctorReport, llm: &LlmConfig) {
     }
 }
 
+/// True when raw YAML still declares a top-level `repos:` key (ignored since v4.2).
+pub fn yaml_has_legacy_repos_key(raw: &str) -> bool {
+    raw.lines().any(|line| {
+        let t = line.trim();
+        t == "repos:" || t.starts_with("repos:")
+    })
+}
+
 /// Redact `api_key` fields in raw coworker.yaml for diagnostic bundles.
 pub fn redact_coworker_yaml(raw: &str) -> String {
     let Ok(mut value) = serde_yaml::from_str::<Value>(raw) else {
@@ -474,6 +503,14 @@ fn redact_yaml_secrets(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yaml_has_legacy_repos_key_detects_top_level() {
+        assert!(yaml_has_legacy_repos_key("repos:\n  - acme/widget\n"));
+        assert!(yaml_has_legacy_repos_key("repos: [acme/widget]\n"));
+        assert!(!yaml_has_legacy_repos_key("# repos:\nllm:\n  default: {}\n"));
+        assert!(!yaml_has_legacy_repos_key("llm:\n  default: {}\n"));
+    }
 
     #[test]
     fn redact_coworker_yaml_masks_api_keys() {

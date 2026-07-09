@@ -3,7 +3,8 @@
 GitHub and CI behavior is **not** the product identity — it is an optional **domain pack** loaded via skills, `github:` config, and chat tools.
 
 - **Harness:** in-process `GithubHarness` (`gh` CLI) — no external GitHub MCP required.
-- **Chat:** load skills on demand (`ci-triage`, `my-prs`, …) and call harness tools with explicit `repo` (or PR links in the message).
+- **Chat:** load skills on demand (`ci-triage`, `my-prs`, …) and call harness tools with an explicit `repo` argument, or include `owner/repo` / a PR URL in the message.
+- **No default repo list** — there is no `repos:` config; the agent will not infer a repo from git remotes or environment.
 
 Enable in `coworker.yaml`:
 
@@ -13,6 +14,8 @@ github:
 ```
 
 Workspace-only setups can omit all of the above.
+
+**CLI:** `unistar-coworker report ci --repo owner/name` (repeat `--repo` for multiple).
 
 ---
 

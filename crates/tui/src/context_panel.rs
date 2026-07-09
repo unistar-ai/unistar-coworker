@@ -181,6 +181,15 @@ pub fn format_probe_latency(ok: bool, latency_ms: Option<u128>) -> String {
     }
 }
 
+/// GitHub harness is optional — show a neutral label when unavailable.
+pub fn format_github_probe(ok: bool, latency_ms: Option<u128>) -> String {
+    if ok {
+        format_probe_latency(true, latency_ms)
+    } else {
+        "optional".to_string()
+    }
+}
+
 fn role_style(th: ThemePalette, display_role: &str) -> Style {
     let fg = match display_role {
         "system" => th.muted,
@@ -650,6 +659,8 @@ mod tests {
         assert!(bar.starts_with("[█████"));
         assert_eq!(format_probe_latency(true, Some(42)), "42ms");
         assert_eq!(format_probe_latency(false, Some(42)), "offline");
+        assert_eq!(format_github_probe(false, Some(42)), "optional");
+        assert_eq!(format_github_probe(true, Some(42)), "42ms");
     }
 
     #[test]

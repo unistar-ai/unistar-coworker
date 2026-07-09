@@ -45,7 +45,7 @@ Three layers; do not blur responsibilities:
 
 | Layer | Location | Role |
 |-------|----------|------|
-| **Skill** | `skills/*/SKILL.md` | Reusable technique: triage rules, tone, digest style. No harness logic. Template: [`skills/_base/SKILL_TEMPLATE.md`](./skills/_base/SKILL_TEMPLATE.md). |
+| **Skill** | `skills/*/SKILL.md` | Reusable technique: triage rules, tone, workflow guidance. No harness logic. Template: [`skills/_base/SKILL_TEMPLATE.md`](./skills/_base/SKILL_TEMPLATE.md). |
 | **Prompt** | `prompts/*.md` | Chat system prompt body; frontmatter `skills:` lists default techniques. |
 | **Harness** | `crates/core/src/agent/*.rs`, `crates/core/src/engine/*.rs` | Deterministic Rust: MCP, store, approvals, token budget, chat loop. |
 

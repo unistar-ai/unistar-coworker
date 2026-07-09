@@ -348,7 +348,7 @@ async fn api_chat(State(rt): State<Arc<WebRuntime>>, Json(body): Json<ChatBody>)
     }
     if msg == "/help" {
         let mut s = rt.state.write().await;
-        s.status = "Slash: /clear /new — reset transcript + LLM context; /sessions /session <id> — history; /export [path] — markdown; /approve /deny — pending approval".into();
+        s.status = "Slash: /clear /new — reset; /sessions /session <id>; /export; /approve /deny. GitHub: name owner/repo or paste a PR URL (no default repo).".into();
         drop(s);
         publish_snapshot(&rt.state, &rt.snap_tx).await;
         return StatusCode::NO_CONTENT;

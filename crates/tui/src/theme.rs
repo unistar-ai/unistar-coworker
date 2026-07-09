@@ -291,9 +291,9 @@ pub fn status_line(
         ),
         Span::styled(" │ gh ", Style::default().fg(th.border).bg(th.surface)),
         Span::styled(
-            if github_ok { "ok" } else { "off" },
+            if github_ok { "ok" } else { "opt" },
             Style::default()
-                .fg(if github_ok { th.ok } else { th.err })
+                .fg(if github_ok { th.ok } else { th.muted })
                 .bg(th.surface),
         ),
         Span::styled(" │ llm ", Style::default().fg(th.border).bg(th.surface)),

@@ -71,7 +71,7 @@
 | **GithubHarness** | 可选进程内 `gh` 调用 GitHub/CI；payload 有 cap |
 | **TUI** | 聊天、审批、日志、配置、全屏聊天 |
 | **Web UI** | `serve` 浏览器聊天、会话、明暗主题、带来源标签的流式工具/reasoning 卡片、审批弹窗、Markdown 导出 |
-| **Store** | JSON（默认）或 SQLite：digest、快照、flaky 账本、聊天会话、审计日志；`store migrate` 与 `store compact` 命令 |
+| **Store** | JSON（默认）或 SQLite：审批、聊天会话、审计日志；`store migrate` 与 `store compact` 命令 |
 
 ---
 
@@ -343,7 +343,7 @@ cargo run --release -- store migrate --from json --to sqlite \
 定期清理保持 store 紧凑：
 
 ```bash
-cargo run --release -- store compact            # 默认：审计 90d、保留 30 个 digest
+cargo run --release -- store compact            # 默认：审计 90d + 清理遗留 store 文件
 cargo run --release -- store compact --audit-days 180 --dry-run
 ```
 
@@ -443,7 +443,7 @@ mcp:
 
 | 层 | 路径 | 职责 |
 |----|------|------|
-| **Skill** | `skills/*/SKILL.md` | 可复用技巧 — triage 规则、语气、digest 格式。不含 harness 逻辑。 |
+| **Skill** | `skills/*/SKILL.md` | 可复用技巧 — triage 规则、语气、流程说明。不含 harness 逻辑。 |
 | **Prompt** | `prompts/chat.md` | Chat system prompt；frontmatter `skills:` 指定默认技巧。编译期内嵌。 |
 | **Harness** | `crates/core/src/agent/`、`crates/core/src/engine/` | 确定性 Rust — MCP 池、审批、token 预算、chat 循环 |
 

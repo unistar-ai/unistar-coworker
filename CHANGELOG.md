@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-07-09
+
+### Changed
+
+- Empty states / `/help` / placeholders: workspace-first copy; GitHub requires explicit `owner/repo` or PR URL.
+- Config GitHub probe: optional / not-configured styling (not a red "offline" alarm for workspace-only).
+- TUI status `gh` shows `opt` (muted) when harness unavailable; Config connectivity detail explains optional GitHub.
+- `doctor` warns when legacy `repos:` is still present in coworker.yaml.
+- Approvals empty state points to chat modal + `/approve` / `/deny`.
+- Docs: README_CN store/compact, QUICKSTART GitHub steps, github-ops-pack (no default repo).
+
+[4.2.1]: https://github.com/unistar-ai/unistar-coworker/compare/v4.2.0...v4.2.1
+
 ## [4.2.0] - 2026-07-09
 
 ### Removed (BREAKING)

@@ -69,11 +69,15 @@ fn welcome_lines(th: ThemePalette) -> Vec<Line<'static>> {
             Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "  Ask about PRs, CI, reviews, or your workspace.",
+            "  Ask about your workspace — code, tests, or docs.",
             Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
         )),
         Line::from(Span::styled(
-            "  e.g.  list open PRs with failing CI",
+            "  e.g.  explain src/main.rs · run the unit tests",
+            Style::default().fg(th.muted),
+        )),
+        Line::from(Span::styled(
+            "  GitHub: name owner/repo or paste a PR URL (no default repo).",
             Style::default().fg(th.muted),
         )),
     ]

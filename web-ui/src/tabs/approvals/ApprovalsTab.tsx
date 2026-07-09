@@ -61,7 +61,7 @@ function PendingList() {
       <EmptyState
         icon={Hand}
         title="No pending approvals"
-        description="Mutating tool calls that need your confirmation will queue up here."
+        description="Mutating tool calls that need confirmation appear here and as a chat modal. Use Approve / Deny in the modal, or /approve /deny."
       />
     );
   }

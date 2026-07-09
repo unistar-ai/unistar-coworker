@@ -426,7 +426,7 @@ function ChatInput({ busy }: { busy: boolean }) {
         placeholder={
           busy
             ? "Waiting for model…"
-            : "Message… (Enter newline · Shift+Enter send · /help · /clear · /new)"
+            : "Message… (Enter newline · Shift+Enter send · /help). GitHub: owner/repo or PR URL"
         }
         rows={1}
       />

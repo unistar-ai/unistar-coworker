@@ -25,9 +25,10 @@ Full docs: [README.md](README.md) · Docker details: [docs/docker.md](docs/docke
 ### Optional — GitHub
 
 9. Set GitHub auth: `export GH_TOKEN=...` or run `gh auth login` on the host.
-10. For GitHub/CI: `gh auth login`, then chat with PR links or explicit `owner/repo` in messages.
-11. Try GitHub in chat: `./unistar-coworker chat --once "Summarize open PRs in owner/repo"`  
-    Or use chat: `./unistar-coworker chat --once "triage PR #42 in owner/repo"`
+10. In chat, name `owner/repo` or paste a PR URL — the agent does **not** guess a default repo.
+11. Try: `./unistar-coworker chat --once "Summarize open PRs in owner/repo"`  
+    Or: `./unistar-coworker chat --once "triage https://github.com/owner/repo/pull/42"`  
+    CLI report: `./unistar-coworker report ci --repo owner/repo`
 12. Read `coworker.example.yaml` or [coworker.minimal.yaml](./coworker.minimal.yaml) for advanced settings.
 
 ---

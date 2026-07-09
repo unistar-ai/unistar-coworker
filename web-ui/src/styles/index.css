@@ -4635,6 +4635,9 @@ html.theme-transition * {
 .config-probe-status.ok {
   color: var(--ok);
 }
+.config-probe-status.optional {
+  color: var(--muted);
+}
 .config-probe-dot {
   width: 8px;
   height: 8px;
@@ -4646,6 +4649,13 @@ html.theme-transition * {
 }
 .config-probe-dot.dead {
   background: var(--danger);
+}
+.config-probe-dot.optional {
+  background: var(--muted);
+}
+.config-probe-hint {
+  margin-left: 0.35rem;
+  font-size: 11px;
 }
 .config-mcp-card {
   background: var(--bg);
