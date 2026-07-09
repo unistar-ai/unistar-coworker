@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `init --repos` uncommented GitHub/repos/workflows in `coworker.example.yaml` (regression after workspace-first template).
 - README / README_CN crate version synced with `Cargo.toml`.
+- `repos` defaults to `[]` when omitted — `coworker.example.yaml` and `coworker.minimal.yaml` parse again.
 
 ### Changed
 

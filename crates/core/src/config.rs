@@ -26,6 +26,7 @@ pub struct Config {
     pub schedule: ScheduleConfig,
     #[serde(default)]
     pub workflows: WorkflowsSettings,
+    #[serde(default)]
     pub repos: Vec<String>,
     #[serde(default)]
     pub policy: PolicyConfig,
@@ -1351,6 +1352,21 @@ repos: [acme/widget]
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.chat.tool_mode, ChatToolMode::Auto);
+    }
+
+    #[test]
+    fn workspace_only_yaml_without_repos_parses() {
+        let yaml = r#"
+llm:
+  default:
+    base_url: http://localhost:11434/v1
+    model: gemma4:26b-a4b-it-qat
+    context_limit: 64000
+chat:
+  workspace: .
+"#;
+        let cfg = Config::load_from_str(yaml).unwrap();
+        assert!(cfg.repos.is_empty());
     }
 
     #[test]
