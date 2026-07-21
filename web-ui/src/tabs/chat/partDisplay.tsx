@@ -16,6 +16,7 @@ import {
   subtitleUsesMono,
   toolRowTitle,
 } from "./toolDisplay";
+import { ToolLucideIcon } from "./toolIcons";
 
 export type DisplayStep = {
   key: string;
@@ -139,7 +140,7 @@ function describeGroup(
   const icon = shell ? (
     <Terminal size={15} strokeWidth={2} />
   ) : (
-    <span className="chat-process-emoji">{meta.icon}</span>
+    <ToolLucideIcon toolName={group.toolName} />
   );
 
   const title = toolRowTitle(group.toolName, meta.label, group.status);

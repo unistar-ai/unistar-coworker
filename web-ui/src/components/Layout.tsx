@@ -16,7 +16,7 @@ import { useTheme } from "next-themes";
 import { lazy, Suspense, useEffect, useState } from "react";
 import Skeleton from "./Skeleton";
 import Footer from "./Footer";
-import { formatTokens } from "../tabs/chat/parser";
+import ContextWindowMeter from "./ContextWindowMeter";
 
 const ApprovalsTab = lazy(() => import("../tabs/approvals/ApprovalsTab"));
 const ApprovalModal = lazy(() => import("../tabs/approvals/ApprovalModal"));
@@ -168,30 +168,8 @@ export default function Layout({ tabLabels }: LayoutProps) {
 
 function CtxUsage() {
   const tab = useStore((s) => s.tab);
-  const contextVisible = useStore((s) => s.chat_context_visible);
-  const ctx = useStore((s) => s.chat_context);
-
-  if (tab !== "chat" || !ctx) return null;
-
-  const used = (ctx.message_tokens || 0) + (ctx.tools_tokens || 0);
-  const budget = ctx.input_budget || 1;
-  const limit = ctx.context_limit || budget;
-  const pct = Math.min(100, Math.round((used / budget) * 100));
-  const barCls = pct >= 95 ? "err" : pct >= 80 ? "warn" : "";
-
-  if (!contextVisible) return null;
-
-  return (
-    <div className="ctx-usage" title="LLM context usage">
-      <div>
-        ctx {formatTokens(used)} / {formatTokens(budget)} of {formatTokens(limit)} (
-        {pct}%)
-      </div>
-      <div className={`token-bar ${barCls}`}>
-        <span style={{ width: `${pct}%` }} />
-      </div>
-    </div>
-  );
+  if (tab !== "chat") return null;
+  return <ContextWindowMeter className="topbar-ctx-meter" />;
 }
 
 function ConnDot() {

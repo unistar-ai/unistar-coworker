@@ -6757,3 +6757,220 @@ html.theme-transition * {
 /* NOTE: .messages-pane / .messages / .chat-layout / .chat-shell 的权威定义
  * 在本文件上方（聊天布局段）。此处曾有重复定义会因层叠覆盖掉上方的
  * height:100% / min-height:0 等关键属性，已移除。 */
+
+/* --- yahu-inspired transcript + context meter --- */
+.context-window-meter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 100px;
+  max-width: 160px;
+  font-size: 0.68rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.messages-header .context-window-meter {
+  flex: 0 1 140px;
+  margin-left: auto;
+}
+.topbar-ctx-meter {
+  max-width: 180px;
+}
+.context-window-track {
+  flex: 1 1 auto;
+  height: 5px;
+  min-width: 48px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+  overflow: hidden;
+}
+.context-window-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.16s ease;
+}
+.context-window-meter.is-warn .context-window-fill {
+  background: var(--warn, #d97706);
+}
+.context-window-meter.is-err .context-window-fill {
+  background: var(--danger, #dc2626);
+}
+.context-window-label {
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-load-older-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+  margin: 0.25rem auto 0.75rem;
+  max-width: 50rem;
+}
+.chat-load-older-center {
+  align-self: center;
+}
+
+.chat-new-messages-separator,
+.chat-history-coverage-gap {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0.65rem 0;
+  max-width: 50rem;
+  width: 100%;
+  align-self: center;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.chat-new-messages-line,
+.chat-history-coverage-line {
+  flex: 1;
+  height: 1px;
+  background: color-mix(in srgb, var(--border) 85%, transparent);
+}
+.chat-new-messages-label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  font-size: 0.68rem;
+}
+.chat-history-coverage-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  text-align: center;
+  line-height: 1.35;
+}
+
+.assistant-turn-meta {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-right: auto;
+  font-variant-numeric: tabular-nums;
+}
+.message-turn-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.chat-shell.is-compact-transcript .message-turn-frame.is-compact .message-turn-avatar {
+  display: none;
+}
+.chat-shell.is-compact-transcript .message-turn-frame.is-compact .message-turn-head {
+  grid-template-columns: minmax(0, 1fr);
+}
+.chat-shell.is-compact-transcript .chat-turn,
+.chat-shell.is-compact-transcript .msg-block {
+  margin-bottom: 0.35rem;
+}
+.chat-shell.is-compact-transcript .chat-process-panel {
+  margin-bottom: 0.35rem;
+}
+.chat-shell.is-compact-transcript .tool-chip {
+  padding: 0.35rem 0.5rem;
+}
+
+.tool-chip-icon svg {
+  display: block;
+}
+
+.ops-master-detail {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  gap: 0;
+}
+.ops-master-pane {
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  min-height: 0;
+  overflow: auto;
+  padding: 0.5rem 0.65rem;
+}
+.ops-detail-pane {
+  min-height: 0;
+  overflow: auto;
+  padding: 0.65rem 0.85rem;
+}
+.config-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+.config-nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 0.25rem 0.35rem;
+  border-radius: 6px;
+}
+.config-nav a:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.config-section[id] {
+  scroll-margin-top: 0.75rem;
+}
+
+.ops-master-list {
+  list-style: none;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ops-master-empty {
+  font-size: 0.8rem;
+  margin: 0.65rem 0 0;
+}
+.ops-master-item {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 0.45rem 0.5rem;
+  cursor: pointer;
+  display: grid;
+  gap: 2px;
+}
+.ops-master-item:hover,
+.ops-master-item.is-active {
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+.ops-master-item-title {
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1.25;
+}
+.ops-master-item-meta {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.ops-master-status {
+  font-size: 0.65rem;
+  justify-self: start;
+  margin-bottom: 2px;
+}
+@media (max-width: 900px) {
+  .ops-master-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ops-master-pane {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    max-height: 42vh;
+  }
+  .messages-header .context-window-meter {
+    display: none;
+  }
+}

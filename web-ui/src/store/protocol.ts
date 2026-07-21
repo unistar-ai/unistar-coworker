@@ -140,6 +140,8 @@ export interface WebSnapshot {
   chat_history_turn_parts: Record<string, ChatMessagePart[]>;
   /** Older messages exist in store or were dropped from the in-memory window. */
   chat_older_available: boolean;
+  chat_lines_truncated?: boolean;
+  chat_older_in_store?: boolean;
   chat_context_revision: number;
   chat_streaming: string | null;
   chat_reasoning: string | null;
@@ -206,6 +208,8 @@ export interface WebChatPatch {
   chat_history_turn_parts: Record<string, ChatMessagePart[]>;
   /** Older messages exist in store or were dropped from the in-memory window. */
   chat_older_available: boolean;
+  chat_lines_truncated?: boolean;
+  chat_older_in_store?: boolean;
   chat_context_revision: number;
   chat_streaming: string | null;
   chat_reasoning: string | null;

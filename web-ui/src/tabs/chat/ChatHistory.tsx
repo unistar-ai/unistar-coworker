@@ -30,6 +30,7 @@ import {
   toolCollapsedSummary,
   toolRowTitle,
 } from "./toolDisplay";
+import { ToolLucideIcon } from "./toolIcons";
 import ErrorMessageBody from "./ErrorMessageBody";
 import {
   estimateItemSize,
@@ -40,6 +41,7 @@ import {
   VIRTUAL_THRESHOLD,
 } from "./chatScroll";
 import { useChatScrollOrchestrator } from "./useChatScrollOrchestrator";
+import { NewMessagesSeparator } from "./TranscriptMarkers";
 
 export default function ChatHistory({
   items,
@@ -48,6 +50,7 @@ export default function ChatHistory({
   onStickBottomChange,
   searchQuery = "",
   activeMatchKey = "",
+  newMessageBoundaryKey = null,
 }: {
   items: ChatHistoryItem[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -55,6 +58,7 @@ export default function ChatHistory({
   onStickBottomChange?: (stick: boolean) => void;
   searchQuery?: string;
   activeMatchKey?: string;
+  newMessageBoundaryKey?: string | null;
 }) {
   const chatBusy = useStore((s) => s.chat_busy);
   const chatStreaming = useStore((s) => s.chat_streaming);
@@ -239,12 +243,14 @@ export default function ChatHistory({
           {items.map((item, index) => {
             const key = itemKey(item);
             const liveTail = liveNestedInLast && index === items.length - 1;
+            const showNewSep = newMessageBoundaryKey === key;
             return (
               <div
                 key={key}
                 data-block-key={key}
                 className={`${itemWrapClass(item)}${newKeys.has(key) ? " is-new" : ""}${searchMatches.has(key) ? " is-search-match" : ""}${activeMatchKey === key ? " is-search-active" : ""}`}
               >
+                {showNewSep && <NewMessagesSeparator />}
                 <HistoryItemView
                   item={item}
                   mcpPrefixes={mcpPrefixes}
@@ -280,6 +286,7 @@ export default function ChatHistory({
             const item = items[vi.index];
             const key = itemKey(item);
             const liveTail = liveNestedInLast && vi.index === items.length - 1;
+            const showNewSep = newMessageBoundaryKey === key;
             return (
               <div
                 key={key}
@@ -296,6 +303,7 @@ export default function ChatHistory({
                 }}
               >
                 <div data-block-key={key} className={`${itemWrapClass(item)}${newKeys.has(key) ? " is-new" : ""}${searchMatches.has(key) ? " is-search-match" : ""}${activeMatchKey === key ? " is-search-active" : ""}`}>
+                  {showNewSep && <NewMessagesSeparator />}
                   <HistoryItemView
                     item={item}
                     mcpPrefixes={mcpPrefixes}
@@ -650,7 +658,7 @@ function ToolCompactChip({
       }}
     >
       <span className="tool-chip-icon" aria-hidden="true">
-        {meta.icon}
+        <ToolLucideIcon toolName={group.toolName} size={14} />
       </span>
       <span className="tool-chip-main">
         <span className="tool-chip-name">
@@ -663,7 +671,6 @@ function ToolCompactChip({
           <span className="tool-chip-out">{summary}</span>
         )}
         {group.ms != null && <span className="tool-chip-ms">{group.ms}ms</span>}
-        <ToolStatusPill status={group.status} />
         <ChevronRight size={12} className="tool-chip-chevron" aria-hidden="true" />
       </span>
     </div>

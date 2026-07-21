@@ -46,6 +46,12 @@ pub struct WebSnapshot {
     pub chat_history_turn_parts: serde_json::Map<String, Value>,
     /// True when older transcript lines were dropped from memory or store has more history.
     pub chat_older_available: bool,
+    /// In-memory `chat_lines` window dropped oldest rows (distinct from store pagination).
+    #[serde(default)]
+    pub chat_lines_truncated: bool,
+    /// Store has messages before the loaded transcript window.
+    #[serde(default)]
+    pub chat_older_in_store: bool,
     pub chat_context_revision: u64,
     pub chat_streaming: Option<String>,
     pub chat_reasoning: Option<String>,
@@ -122,6 +128,12 @@ pub struct WebChatPatch {
     pub chat_history_turn_parts: serde_json::Map<String, Value>,
     /// True when older transcript lines were dropped from memory or store has more history.
     pub chat_older_available: bool,
+    /// In-memory `chat_lines` window dropped oldest rows (distinct from store pagination).
+    #[serde(default)]
+    pub chat_lines_truncated: bool,
+    /// Store has messages before the loaded transcript window.
+    #[serde(default)]
+    pub chat_older_in_store: bool,
     pub chat_context_revision: u64,
     pub chat_streaming: Option<String>,
     pub chat_reasoning: Option<String>,
@@ -237,6 +249,8 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
         chat_turn_parts: build_chat_turn_parts(s),
         chat_history_turn_parts: build_history_turn_parts(s),
         chat_older_available: chat_older_available(s),
+        chat_lines_truncated: s.chat_lines_truncated,
+        chat_older_in_store: s.chat_older_messages_available,
         chat_context_revision: s.chat_context_revision,
         chat_streaming: live.chat_streaming,
         chat_reasoning: live.chat_reasoning,
@@ -524,6 +538,8 @@ pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
         chat_turn_parts: build_chat_turn_parts(s),
         chat_history_turn_parts: build_history_turn_parts(s),
         chat_older_available: chat_older_available(s),
+        chat_lines_truncated: s.chat_lines_truncated,
+        chat_older_in_store: s.chat_older_messages_available,
         chat_context_revision: s.chat_context_revision,
         chat_streaming: live.chat_streaming,
         chat_reasoning: live.chat_reasoning,
@@ -646,6 +662,8 @@ storage: {{ backend: json, path: ./data }}
         "chat_turn_parts",
         "chat_history_turn_parts",
         "chat_older_available",
+        "chat_lines_truncated",
+        "chat_older_in_store",
         "chat_context_revision",
         "chat_streaming",
         "chat_reasoning",
@@ -803,6 +821,8 @@ storage: {{ backend: json, path: ./data }}
             "chat_turn_parts",
             "chat_history_turn_parts",
             "chat_older_available",
+            "chat_lines_truncated",
+            "chat_older_in_store",
             "chat_context_revision",
             "chat_streaming",
             "chat_reasoning",

@@ -6,7 +6,9 @@ import ChatHistory from "./ChatHistory";
 import ContextPanel from "./ContextPanel";
 import SessionPicker from "./SessionPicker";
 import { useChatUiStore } from "../../store/chatUiStore";
-import { PanelRightOpen, Search, Download, Trash2, ChevronUp, ChevronDown, ArrowDown, MessageSquareOff, MessageSquare, MessageCircleQuestion } from "lucide-react";
+import ContextWindowMeter from "../../components/ContextWindowMeter";
+import { PanelRightOpen, Search, Download, Trash2, ChevronUp, ChevronDown, ArrowDown, MessageSquareOff, MessageSquare, MessageCircleQuestion, Rows3 } from "lucide-react";
+import { HistoryCoverageGap } from "./TranscriptMarkers";
 import {
   buildChatBlocks,
   groupIntoTurns,
@@ -38,6 +40,9 @@ export default function ChatTab() {
   const outputs = useStore((s) => s.chat_tool_outputs);
   const reasoningOriginals = useStore((s) => s.chat_reasoning_originals);
   const chatOlderAvailable = useStore((s) => s.chat_older_available);
+  const chatLinesTruncated = useStore((s) => s.chat_lines_truncated);
+  const chatOlderInStore = useStore((s) => s.chat_older_in_store);
+  const chatHistoryRevision = useStore((s) => s.chat_history_revision);
   const autoApprove = useStore((s) => s.auto_approve_mutations);
   const awaitingUserAnswer = useStore((s) => !!s.chat_pending_user_question);
 
@@ -74,9 +79,13 @@ export default function ChatTab() {
     }
   };
   const [stickBottom, setStickBottom] = useState(true);
+  const [newMessageBoundaryKey, setNewMessageBoundaryKey] = useState<string | null>(null);
+  const prevItemCountRef = useRef(0);
   const isMobile = useIsMobile();
   const userMessageStyle = useChatUiStore((s) => s.userMessageStyle);
   const toggleUserMessageStyle = useChatUiStore((s) => s.toggleUserMessageStyle);
+  const desktopCompactTranscript = useChatUiStore((s) => s.desktopCompactTranscript);
+  const toggleDesktopCompactTranscript = useChatUiStore((s) => s.toggleDesktopCompactTranscript);
 
   // Esc cancels generation when busy.
   useEffect(() => {
@@ -173,6 +182,15 @@ export default function ChatTab() {
 
   const activeMatchKey = searchMatchKeys[activeMatchIdx] || "";
 
+  useEffect(() => {
+    const prev = prevItemCountRef.current;
+    if (items.length > prev && !stickBottom && items[prev]) {
+      setNewMessageBoundaryKey(itemKey(items[prev]));
+    }
+    if (stickBottom) setNewMessageBoundaryKey(null);
+    prevItemCountRef.current = items.length;
+  }, [items, stickBottom, chatHistoryRevision]);
+
   const gotoMatch = (idx: number) => {
     if (searchMatchKeys.length === 0) return;
     const next = ((idx % searchMatchKeys.length) + searchMatchKeys.length) % searchMatchKeys.length;
@@ -218,7 +236,9 @@ export default function ChatTab() {
   const mobileDrawerOpen = isMobile && mobileCtxOpen && contextVisible;
 
   return (
-    <div className="chat-shell">
+    <div
+      className={`chat-shell${desktopCompactTranscript ? " is-compact-transcript" : ""}`}
+    >
       <div className={`chat-layout ${showContextPanel ? "" : "no-context"}`}>
         <div className="messages-pane">
           <div className="messages-header">
@@ -235,7 +255,24 @@ export default function ChatTab() {
             {countLabel && (
               <span className="messages-count">{countLabel}</span>
             )}
+            <ContextWindowMeter className="messages-ctx-meter" />
             <div className="messages-header-actions">
+              <button
+                type="button"
+                className={`btn-header-action btn-header-layout${desktopCompactTranscript ? " is-active" : ""}`}
+                onClick={toggleDesktopCompactTranscript}
+                title={
+                  desktopCompactTranscript
+                    ? "紧凑 transcript（点击恢复标准布局）"
+                    : "标准 transcript（点击切换紧凑模式）"
+                }
+                aria-pressed={desktopCompactTranscript}
+              >
+                <Rows3 size={14} className="btn-header-icon" />
+                <span className="btn-header-label">
+                  {desktopCompactTranscript ? "紧凑" : "标准"}
+                </span>
+              </button>
               <button
                 type="button"
                 className={`btn-header-action btn-header-layout${userMessageStyle === "bubble" ? " is-active" : ""}`}
@@ -359,11 +396,15 @@ export default function ChatTab() {
           <div ref={scrollRef} className="messages">
             <div className="msg-history">
               {chatOlderAvailable && !chatBusy && (
-                <div className="chat-load-older-banner">
-                  <span>较早的消息未显示</span>
+                <div className="chat-load-older-wrap">
+                  {(chatOlderInStore || chatLinesTruncated) && (
+                    <HistoryCoverageGap
+                      variant={chatLinesTruncated && !chatOlderInStore ? "memory" : "store"}
+                    />
+                  )}
                   <button
                     type="button"
-                    className="chat-load-older-btn"
+                    className="chat-load-older-btn chat-load-older-center"
                     disabled={loadingOlder}
                     onClick={() => void loadOlderMessages()}
                   >
@@ -378,6 +419,7 @@ export default function ChatTab() {
                 onStickBottomChange={setStickBottom}
                 searchQuery={searchQuery}
                 activeMatchKey={activeMatchKey}
+                newMessageBoundaryKey={newMessageBoundaryKey}
               />
             </div>
           </div>

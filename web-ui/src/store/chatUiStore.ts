@@ -10,6 +10,7 @@ export type UserMessageStyle = "plain" | "bubble";
 
 const USER_STYLE_KEY = "chat.userMessageStyle";
 const TOOL_MD_KEY = "chat.toolMarkdown";
+const COMPACT_TRANSCRIPT_KEY = "chat.desktopCompactTranscript";
 
 function loadUserMessageStyle(): UserMessageStyle {
   try {
@@ -32,6 +33,16 @@ function loadToolMarkdown(): boolean {
   return true;
 }
 
+function loadDesktopCompactTranscript(): boolean {
+  try {
+    const v = localStorage.getItem(COMPACT_TRANSCRIPT_KEY);
+    if (v === "1" || v === "true") return true;
+  } catch {
+    /* localStorage unavailable */
+  }
+  return false;
+}
+
 /** Client-only UI state (not synced over WebSocket). */
 export const useChatUiStore = create<{
   contextFocus: ContextToolFocus | null;
@@ -40,17 +51,22 @@ export const useChatUiStore = create<{
   userMessageStyle: UserMessageStyle;
   /** When true, tool results that qualify as markdown are rendered as Markdown. */
   toolMarkdown: boolean;
+  /** Tighter desktop transcript (yahu-style compact turns). */
+  desktopCompactTranscript: boolean;
   openContextForTool: (focus: ContextToolFocus) => void;
   clearContextFocus: () => void;
   setUserMessageStyle: (style: UserMessageStyle) => void;
   toggleUserMessageStyle: () => void;
   setToolMarkdown: (enabled: boolean) => void;
   toggleToolMarkdown: () => void;
+  setDesktopCompactTranscript: (enabled: boolean) => void;
+  toggleDesktopCompactTranscript: () => void;
 }>((set, get) => ({
   contextFocus: null,
   contextFocusSeq: 0,
   userMessageStyle: loadUserMessageStyle(),
   toolMarkdown: loadToolMarkdown(),
+  desktopCompactTranscript: loadDesktopCompactTranscript(),
   openContextForTool: (focus) => {
     void apiPost("/api/chat/context", { visible: true });
     set((s) => ({
@@ -81,5 +97,16 @@ export const useChatUiStore = create<{
   },
   toggleToolMarkdown: () => {
     get().setToolMarkdown(!get().toolMarkdown);
+  },
+  setDesktopCompactTranscript: (enabled) => {
+    try {
+      localStorage.setItem(COMPACT_TRANSCRIPT_KEY, enabled ? "1" : "0");
+    } catch {
+      /* localStorage unavailable */
+    }
+    set({ desktopCompactTranscript: enabled });
+  },
+  toggleDesktopCompactTranscript: () => {
+    get().setDesktopCompactTranscript(!get().desktopCompactTranscript);
   },
 }));

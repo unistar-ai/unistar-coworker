@@ -12,6 +12,8 @@ export interface MessageTurnFrameProps {
   footer?: ReactNode;
   /** Keep footer visible (e.g. latest assistant). */
   footerPinned?: boolean;
+  /** Desktop compact transcript — hide avatar column. */
+  compact?: boolean;
 }
 
 /** Cherry-style message frame: avatar + name column + body + optional footer. */
@@ -23,10 +25,13 @@ export default function MessageTurnFrame({
   children,
   footer,
   footerPinned = false,
+  compact = false,
 }: MessageTurnFrameProps) {
   const timeLabel = formatMessageTime(timeIso);
   return (
-    <div className={`message-turn-frame role-${role}${footerPinned ? " footer-pinned" : ""}`}>
+    <div
+      className={`message-turn-frame role-${role}${footerPinned ? " footer-pinned" : ""}${compact ? " is-compact" : ""}`}
+    >
       <div className="message-turn-head">
         <span className="message-turn-avatar" aria-hidden="true">
           {role === "user" ? (

@@ -38,7 +38,9 @@ Fields (see [`snapshot.rs`](./snapshot.rs) `WebSnapshot` for the authoritative l
 | `chat_history_revision` | u64 | bumps on history change |
 | `chat_turn_parts` | object[]? | in-flight turn process parts (`null` when idle) |
 | `chat_history_turn_parts` | map<string, object[]> | completed-turn process parts keyed by `you>` line index |
-| `chat_older_available` | bool | older messages in store or lines truncated |
+| `chat_older_available` | bool | `chat_lines_truncated \|\| chat_older_in_store` (UI: show load-older) |
+| `chat_lines_truncated` | bool | in-memory `chat_lines` window dropped oldest rows |
+| `chat_older_in_store` | bool | store has messages before the loaded transcript window |
 | `chat_context_revision` | u64 | bumps on context change |
 | `chat_streaming` | string? | in-progress assistant text |
 | `chat_reasoning` | string? | in-progress reasoning text |
@@ -104,7 +106,9 @@ is not truncated).
 | `chat_history_revision` | u64 |
 | `chat_turn_parts` | object[]? |
 | `chat_history_turn_parts` | map<string, object[]> |
-| `chat_older_available` | bool |
+| `chat_older_available` | bool | same as snapshot |
+| `chat_lines_truncated` | bool | same as snapshot |
+| `chat_older_in_store` | bool | same as snapshot |
 | `chat_context_revision` | u64 |
 | `chat_streaming` | string? |
 | `chat_reasoning` | string? |

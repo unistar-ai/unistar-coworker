@@ -24,6 +24,8 @@ import { partsToDisplaySteps } from "./partDisplay";
 import TurnProcessPanel from "./TurnProcessPanel";
 import { highlightSearchText } from "./searchHighlight";
 import ErrorMessageBody from "./ErrorMessageBody";
+import AssistantTurnMeta from "./AssistantTurnMeta";
+import { turnMetaFromAgentTurn } from "./turnStats";
 
 export const ChatSearchQueryContext = createContext("");
 
@@ -76,6 +78,7 @@ export function TurnMessageBody({
 /** User turn — plain (Cherry MessageHeader) or bubble layout. */
 export function UserTurnView({ msg }: { msg: ChatMessage }) {
   const userMessageStyle = useChatUiStore((s) => s.userMessageStyle);
+  const compactTranscript = useChatUiStore((s) => s.desktopCompactTranscript);
   const timeIso = useLineTimeIso(msg.lineIndex);
   const body = <TurnMessageBody msg={msg} framed />;
 
@@ -89,7 +92,7 @@ export function UserTurnView({ msg }: { msg: ChatMessage }) {
 
   return (
     <article className="chat-user-turn">
-      <MessageTurnFrame role="user" name="你" timeIso={timeIso}>
+      <MessageTurnFrame role="user" name="你" timeIso={timeIso} compact={compactTranscript}>
         {body}
       </MessageTurnFrame>
     </article>
@@ -106,6 +109,7 @@ export default function AgentTurnCard({
   renderBlock: (props: BlockRendererProps) => React.ReactNode;
 }) {
   const historyParts = useStore((s) => s.chat_history_turn_parts);
+  const compactTranscript = useChatUiStore((s) => s.desktopCompactTranscript);
   const agentParts = useMemo(
     () => resolveHistoryAgentParts(turn, historyParts),
     [turn, historyParts],
@@ -118,6 +122,7 @@ export default function AgentTurnCard({
     [turn.process],
   );
   const summary = formatTurnProcessSummary(stats, durationMs, failedTools);
+  const turnMeta = turnMetaFromAgentTurn(turn);
   const steps = useMemo(
     () => partsToDisplaySteps(processParts, mcpPrefixes),
     [processParts, mcpPrefixes],
@@ -142,9 +147,13 @@ export default function AgentTurnCard({
         role={answerIsError ? "error" : "agent"}
         name={answerIsError ? "错误" : "助手"}
         timeIso={timeIso}
+        compact={compactTranscript}
         footer={
           answerMsg && !answerIsError ? (
-            <AgentMessageActions msg={answerMsg} isLastAssistant={isLastAssistant} />
+            <>
+              {turnMeta && <AssistantTurnMeta text={turnMeta} />}
+              <AgentMessageActions msg={answerMsg} isLastAssistant={isLastAssistant} />
+            </>
           ) : undefined
         }
         footerPinned={!!isLastAssistant && !answerIsError}
@@ -209,8 +218,8 @@ export function AgentMessageActions({
           type="button"
           className="chat-agent-action"
           onClick={() => void apiPost("/api/chat/regenerate", { message_id: assistantId })}
-          aria-label={isLastAssistant ? "重新生成回复" : "从此处分支"}
-          title={isLastAssistant ? "重新生成" : "分支"}
+          aria-label={isLastAssistant ? "重新生成回复" : "从此消息重新生成"}
+          title={isLastAssistant ? "重新生成" : "重新生成"}
         >
           <RefreshCw size={15} />
         </button>

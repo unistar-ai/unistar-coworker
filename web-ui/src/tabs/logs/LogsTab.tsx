@@ -46,8 +46,9 @@ export default function LogsTab() {
   const newCount = stickBottom ? 0 : logs.length - prevCount.current;
 
   return (
-    <div className="panel log-list">
-      <div className="toolbar">
+    <div className="ops-master-detail log-ops-layout">
+      <aside className="ops-master-pane">
+        <div className="config-section-title">日志</div>
         <button
           type="button"
           className="btn btn-ghost"
@@ -55,7 +56,8 @@ export default function LogsTab() {
         >
           Filter: {logFilter || "all"}
         </button>
-      </div>
+      </aside>
+      <div className="ops-detail-pane log-list">
       {logs.length === 0 ? (
         <EmptyState
           icon={ScrollText}
@@ -116,6 +118,7 @@ export default function LogsTab() {
           {newCount > 0 && <span className="log-scroll-fab-badge">{newCount}</span>}
         </button>
       )}
+      </div>
     </div>
   );
 }
