@@ -728,10 +728,8 @@ pub struct ChatTurnInput {
     pub resume: Option<ResumeChatAfterApproval>,
     /// Continue a paused turn after the user answers an `ask_user` question.
     pub resume_user_answer: Option<ResumeChatAfterUserAnswer>,
-    /// Regenerate mode (Pi-style branching): instead of appending a new user
-    /// message, fork a sibling assistant reply from `regenerate_from` (the
-    /// assistant message being replaced). The new reply shares that message's
-    /// parent and becomes the active branch leaf.
+    /// Regenerate: truncate the target assistant message and everything after it,
+    /// then re-run the turn from the preceding user message.
     pub regenerate_from: Option<Uuid>,
 }
 
@@ -917,9 +915,7 @@ pub async fn run_chat_turn(
         }
     };
     let session_id = session.id;
-    let (history, fork_parent) = if is_regenerate {
-        // Branching: rebuild the conversation up to the parent of the
-        // assistant message being replaced, then fork a new sibling reply.
+    let (history, turn_user_id) = if is_regenerate {
         let all = store.list_chat_messages(&session.id, usize::MAX).await?;
         let target_id = regenerate_from.expect("regenerate_from set");
         let target = all
@@ -927,32 +923,33 @@ pub async fn run_chat_turn(
             .find(|m| m.id == target_id)
             .cloned()
             .ok_or_else(|| CoworkerError::Workflow(format!("unknown chat message {target_id}")))?;
-        let parent_id = target
-            .parent_message_id
-            .or_else(|| {
-                all.iter()
-                    .rev()
-                    .find(|m| {
-                        m.role == ChatRole::User
-                            && m.ts < target.ts
-                            && !all.iter().any(|c| c.parent_message_id == Some(m.id))
-                    })
-                    .map(|m| m.id)
-            })
+        if target.role != ChatRole::Assistant {
+            return Err(CoworkerError::Workflow(
+                "regenerate target must be an assistant message".into(),
+            ));
+        }
+        let cut = all
+            .iter()
+            .position(|m| m.id == target_id)
+            .ok_or_else(|| CoworkerError::Workflow(format!("unknown chat message {target_id}")))?;
+        store
+            .truncate_chat_messages_from(&session.id, target_id)
+            .await?;
+        session.active_leaf_message_id = None;
+        store.update_chat_session(&session).await?;
+        let history: Vec<ChatMessage> = all.into_iter().take(cut).collect();
+        let turn_user_id = history
+            .iter()
+            .rev()
+            .find(|m| m.role == ChatRole::User)
+            .map(|m| m.id)
             .ok_or_else(|| {
                 CoworkerError::Workflow("cannot regenerate: no parent user message".into())
             })?;
-        let path = crate::store::branch_path_to_root(&all, parent_id);
-        // Keep the full branch path; pack_session_history trims with tool-pair alignment.
-        (path, parent_id)
+        (history, turn_user_id)
     } else {
-        let prior = store.list_chat_messages(&session.id, usize::MAX).await?;
-        let branch_leaf = session
-            .active_leaf_message_id
-            .or_else(|| prior.last().map(|m| m.id));
-        let user_msg_id = if let Some(ref answer_resume) = resume_user_answer {
-            // Persist the human answer as a normal user message, then continue the turn.
-            let id = append_message_parented(
+        let turn_user_id = if let Some(ref answer_resume) = resume_user_answer {
+            append_message(
                 store.as_ref(),
                 &session.id,
                 ChatRole::User,
@@ -960,15 +957,10 @@ pub async fn run_chat_turn(
                 None,
                 None,
                 None,
-                None,
-                branch_leaf,
-                Some(0),
             )
-            .await?;
-            session.active_leaf_message_id = Some(id);
-            id
+            .await?
         } else if !is_resume {
-            let id = append_message_parented(
+            append_message(
                 store.as_ref(),
                 &session.id,
                 ChatRole::User,
@@ -976,19 +968,14 @@ pub async fn run_chat_turn(
                 None,
                 None,
                 None,
-                None,
-                branch_leaf,
-                Some(0),
             )
-            .await?;
-            session.active_leaf_message_id = Some(id);
-            id
+            .await?
         } else {
             Uuid::nil()
         };
         let history = store.list_chat_messages(&session.id, usize::MAX).await?;
-        let fork_parent = if user_msg_id != Uuid::nil() {
-            user_msg_id
+        let turn_user_id = if turn_user_id != Uuid::nil() {
+            turn_user_id
         } else {
             history
                 .iter()
@@ -997,7 +984,7 @@ pub async fn run_chat_turn(
                 .map(|m| m.id)
                 .unwrap_or(Uuid::nil())
         };
-        (history, fork_parent)
+        (history, turn_user_id)
     };
     let user_task = if resume_user_answer.is_some() {
         // Prefer the original task (user message before the answer we just appended).
@@ -1019,7 +1006,7 @@ pub async fn run_chat_turn(
     } else if is_regenerate {
         history
             .iter()
-            .find(|m| m.id == fork_parent)
+            .find(|m| m.id == turn_user_id)
             .map(|m| m.content.clone())
             .unwrap_or_default()
     } else {
@@ -1525,9 +1512,7 @@ user, or call tools if more work remains.";
                     }
                 };
                 if accept_reply {
-                    let branch_index =
-                        next_branch_index(store.as_ref(), &session.id, fork_parent).await;
-                    let id = append_message_parented(
+                    append_message(
                         store.as_ref(),
                         &session.id,
                         ChatRole::Assistant,
@@ -1535,12 +1520,8 @@ user, or call tools if more work remains.";
                         None,
                         None,
                         None,
-                        None,
-                        Some(fork_parent),
-                        Some(branch_index),
                     )
                     .await?;
-                    session.active_leaf_message_id = Some(id);
                     append_assistant_to_llm_context(&mut llm_messages, &message);
                     emit_context_snapshot(
                         &progress,
@@ -2015,8 +1996,7 @@ from tool results already in context.";
         chat_stop_reason(max_duration_secs, max_turns, turn_started)
     };
     let fallback = synthesize_turn_exhausted_reply(&tool_calls, user_task, stop);
-    let branch_index = next_branch_index(store.as_ref(), &session.id, fork_parent).await;
-    let id = append_message_parented(
+    append_message(
         store.as_ref(),
         &session.id,
         ChatRole::Assistant,
@@ -2024,12 +2004,8 @@ from tool results already in context.";
         None,
         None,
         None,
-        None,
-        Some(fork_parent),
-        Some(branch_index),
     )
     .await?;
-    session.active_leaf_message_id = Some(id);
     append_assistant_to_llm_context(&mut llm_messages, &fallback);
     emit_context_snapshot(
         &progress,
@@ -2060,21 +2036,24 @@ pub(crate) async fn append_message(
     tool_name: Option<&str>,
     tool_calls_json: Option<String>,
     reasoning_original: Option<&str>,
-) -> Result<()> {
-    append_message_parented(
-        store,
-        session_id,
-        role,
-        content,
-        tool_name,
-        tool_calls_json,
-        reasoning_original,
-        None,
-        None,
-        None,
-    )
-    .await?;
-    Ok(())
+) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    store
+        .append_chat_message(&ChatMessage {
+            id,
+            session_id: *session_id,
+            role,
+            content: content.to_string(),
+            ts: Utc::now(),
+            tool_name: tool_name.map(str::to_string),
+            tool_calls_json,
+            tool_call_id: None,
+            reasoning_original: reasoning_original.map(str::to_string),
+            parent_message_id: None,
+            branch_index: None,
+        })
+        .await?;
+    Ok(id)
 }
 
 /// Persist a native tool result with its `tool_call_id` so history reload keeps
@@ -2087,73 +2066,30 @@ pub(crate) async fn append_tool_result_message(
     tool_args_json: String,
     tool_call_id: Option<&str>,
 ) -> Result<()> {
-    append_message_parented(
-        store,
-        session_id,
-        ChatRole::Tool,
-        content,
-        Some(tool_name),
-        Some(tool_args_json),
-        None,
-        tool_call_id,
-        None,
-        None,
-    )
-    .await?;
-    Ok(())
-}
-
-/// Like [`append_message`] but records the branch parent (`parent_message_id`)
-/// and sibling index (`branch_index`) so sessions form a Pi-style message tree.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn append_message_parented(
-    store: &dyn Store,
-    session_id: &Uuid,
-    role: ChatRole,
-    content: &str,
-    tool_name: Option<&str>,
-    tool_calls_json: Option<String>,
-    reasoning_original: Option<&str>,
-    tool_call_id: Option<&str>,
-    parent_message_id: Option<Uuid>,
-    branch_index: Option<u32>,
-) -> Result<Uuid> {
-    let mut session = store
-        .get_chat_session(session_id)
-        .await?
-        .ok_or_else(|| CoworkerError::Store(format!("unknown chat session {session_id}")))?;
-    let parent = parent_message_id.or(session.active_leaf_message_id);
     let id = Uuid::new_v4();
     store
         .append_chat_message(&ChatMessage {
             id,
             session_id: *session_id,
-            role,
+            role: ChatRole::Tool,
             content: content.to_string(),
             ts: Utc::now(),
-            tool_name: tool_name.map(str::to_string),
-            tool_calls_json,
+            tool_name: Some(tool_name.to_string()),
+            tool_calls_json: Some(tool_args_json),
             tool_call_id: tool_call_id.map(str::to_string),
-            reasoning_original: reasoning_original.map(str::to_string),
-            parent_message_id: parent,
-            branch_index,
+            reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
         })
         .await?;
-    session.active_leaf_message_id = Some(id);
-    store.update_chat_session(&session).await?;
-    Ok(id)
+    Ok(())
 }
 
-/// Persist an assistant reply that contains native tool calls, linking it into
-/// the session branch tree (Pi-style message tree) via `parent_message_id` /
-/// `branch_index` so regenerate can fork a sibling reply later.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn persist_native_assistant_tool_call_parented(
+/// Persist an assistant reply that contains native tool calls.
+pub(crate) async fn persist_native_assistant_tool_call_step(
     store: &dyn Store,
     session_id: &Uuid,
     step: &ChatAgentStep,
-    parent_message_id: Option<Uuid>,
-    branch_index: Option<u32>,
 ) -> Result<Uuid> {
     let calls: Vec<LlmToolCall> = step
         .tool_calls
@@ -2165,46 +2101,23 @@ pub(crate) async fn persist_native_assistant_tool_call_parented(
         })
         .collect();
     let tool_calls_json = serde_json::to_string(&calls)?;
-    append_message_parented(
-        store,
-        session_id,
-        ChatRole::Assistant,
-        &step.message,
-        None,
-        Some(tool_calls_json),
-        None,
-        None,
-        parent_message_id,
-        branch_index,
-    )
-    .await
-}
-
-/// Resolve the parent user message for the current active branch of a session.
-/// Used to link newly persisted assistant replies into the session tree.
-pub(crate) async fn fork_parent_for_session(store: &dyn Store, session_id: &Uuid) -> Option<Uuid> {
-    let session = store.get_chat_session(session_id).await.ok().flatten()?;
-    let branch = store
-        .list_active_branch_messages(&session, usize::MAX)
-        .await
-        .ok()?;
-    branch
-        .iter()
-        .rev()
-        .find(|m| m.role == ChatRole::User)
-        .map(|m| m.id)
-}
-
-/// Count existing children of `parent` in a session — used to assign the next
-/// sibling `branch_index` when forking a new assistant reply.
-pub(crate) async fn next_branch_index(store: &dyn Store, session_id: &Uuid, parent: Uuid) -> u32 {
-    match store.list_chat_messages(session_id, usize::MAX).await {
-        Ok(msgs) => msgs
-            .iter()
-            .filter(|m| m.parent_message_id == Some(parent))
-            .count() as u32,
-        Err(_) => 0,
-    }
+    let id = Uuid::new_v4();
+    store
+        .append_chat_message(&ChatMessage {
+            id,
+            session_id: *session_id,
+            role: ChatRole::Assistant,
+            content: step.message.clone(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: Some(tool_calls_json),
+            tool_call_id: None,
+            reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
+        })
+        .await?;
+    Ok(id)
 }
 
 async fn apply_approval_resolution(
@@ -2409,8 +2322,7 @@ async fn queue_ask_user_pause(
     runtime_panel: (String, u64),
     reasoning_originals: &HashMap<String, String>,
 ) -> Result<()> {
-    let parent = fork_parent_for_session(store, session_id).await;
-    persist_native_assistant_tool_call_parented(store, session_id, step, parent, None).await?;
+    persist_native_assistant_tool_call_step(store, session_id, step).await?;
 
     let pending_body = format_pending_question_body(&pause.request);
     let body = format_tool_user_question_pending_message(

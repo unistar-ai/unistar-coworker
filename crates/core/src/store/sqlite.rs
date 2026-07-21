@@ -351,6 +351,32 @@ impl Store for SqliteStore {
         })
     }
 
+    async fn truncate_chat_messages_from(
+        &self,
+        session_id: &Uuid,
+        from_message_id: Uuid,
+    ) -> Result<()> {
+        let sid = session_id.to_string();
+        let from_id = from_message_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM chat_messages WHERE session_id = ?1 ORDER BY ts ASC, id ASC",
+            )?;
+            let ids: Vec<String> = stmt
+                .query_map([&sid], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let Some(cut) = ids.iter().position(|id| id == &from_id) else {
+                return Err(CoworkerError::Store(format!(
+                    "chat message {from_message_id} not found"
+                )));
+            };
+            for id in &ids[cut..] {
+                conn.execute("DELETE FROM chat_messages WHERE id = ?1", [id])?;
+            }
+            Ok(())
+        })
+    }
+
     async fn list_chat_sessions(&self, limit: usize) -> Result<Vec<ChatSession>> {
         self.with_conn(move |conn| {
             let mut stmt = conn

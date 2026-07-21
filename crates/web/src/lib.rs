@@ -400,9 +400,8 @@ async fn api_chat_clear(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-/// Regenerate an assistant reply as a new branch (Pi-style session tree).
-/// Body may include `message_id` to fork from a specific assistant message;
-/// when omitted, regenerates the last assistant in the active branch.
+/// Regenerate an assistant reply: truncates that message and everything after it,
+/// then re-runs the model from the preceding user turn.
 async fn api_chat_regenerate(
     State(rt): State<Arc<WebRuntime>>,
     body: Option<Json<RegenerateBody>>,
@@ -417,16 +416,12 @@ async fn api_chat_regenerate(
             Some(id) => id,
             None => return StatusCode::NOT_FOUND,
         };
-        let session = match rt.store.get_chat_session(&sid).await {
-            Ok(Some(session)) => session,
-            _ => return StatusCode::NOT_FOUND,
-        };
-        let branch = match rt.store.list_active_branch_messages(&session, 100).await {
+        let messages = match rt.store.list_chat_messages(&sid, 100).await {
             Ok(m) => m,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
         };
         let assistant_id = if let Some(id) = requested_id {
-            match branch
+            match messages
                 .iter()
                 .find(|m| m.id == id && m.role == ChatRole::Assistant)
             {
@@ -434,7 +429,11 @@ async fn api_chat_regenerate(
                 None => return StatusCode::NOT_FOUND,
             }
         } else {
-            match branch.iter().rev().find(|m| m.role == ChatRole::Assistant) {
+            match messages
+                .iter()
+                .rev()
+                .find(|m| m.role == ChatRole::Assistant)
+            {
                 Some(m) => m.id,
                 None => return StatusCode::NOT_FOUND,
             }
@@ -598,11 +597,7 @@ async fn api_chat_export(
         let sid = { rt.state.read().await.chat_session_id };
         if let Some(sid) = sid {
             if let Ok(Some(session)) = rt.store.get_chat_session(&sid).await {
-                if let Ok(messages) = rt
-                    .store
-                    .list_active_branch_messages(&session, usize::MAX)
-                    .await
-                {
+                if let Ok(messages) = rt.store.list_chat_messages(&sid, usize::MAX).await {
                     let mut out = String::new();
                     let meta = serde_json::json!({
                         "type": "session",

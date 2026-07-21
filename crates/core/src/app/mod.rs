@@ -1042,25 +1042,16 @@ pub async fn load_chat_session_ui_with_limit(
     session_id: uuid::Uuid,
     limit: usize,
 ) -> crate::error::Result<()> {
-    let session = store.get_chat_session(&session_id).await?.ok_or_else(|| {
+    store.get_chat_session(&session_id).await?.ok_or_else(|| {
         crate::error::CoworkerError::Store(format!("unknown chat session {session_id}"))
     })?;
-    // Compare against the *active branch* only — using all session messages
-    // (including inactive regenerate branches) falsely sets older-available.
-    let branch_all = store
-        .list_active_branch_messages(&session, usize::MAX)
-        .await?;
-    let older_available = limit != usize::MAX && branch_all.len() > limit;
-    let branch: Vec<_> = if older_available {
-        branch_all[branch_all.len() - limit..].to_vec()
-    } else {
-        branch_all
-    };
-    // Active-leaf spine is user ↔ final assistants only (process rows are
-    // siblings under the user for regenerate). Expand so the UI transcript
-    // keeps tool/reasoning/harness history.
     let all_messages = store.list_chat_messages(&session_id, usize::MAX).await?;
-    let messages = crate::store::expand_branch_with_process_messages(&all_messages, &branch);
+    let older_available = limit != usize::MAX && all_messages.len() > limit;
+    let messages: Vec<_> = if older_available {
+        all_messages[all_messages.len() - limit..].to_vec()
+    } else {
+        all_messages
+    };
     // Capture the prior context BEFORE clear_chat_transcript() nulls it, so we
     // can preserve its discovered tools & skills across the transcript reload.
     let prev_context = state.chat_context.clone();
@@ -1481,10 +1472,8 @@ repos: [acme/widget]
         assert!(ctx.skill_blocks[0].always);
     }
 
-    /// Inactive regenerate branches must not flip `chat_older_messages_available`
-    /// when the active branch itself fits in the load limit.
     #[tokio::test]
-    async fn load_chat_session_ui_older_flag_ignores_inactive_branches() {
+    async fn load_chat_session_ui_linear_transcript_in_order() {
         use crate::store::sqlite::SqliteStore;
         use std::sync::Arc;
         use tempfile::tempdir;
@@ -1494,56 +1483,30 @@ repos: [acme/widget]
             Arc::new(SqliteStore::open(dir.path().join("test.db"), false).expect("open store"))
                 as Arc<dyn crate::store::Store>;
 
-        let mut session = store
-            .create_chat_session(Some("branch-test"), None)
+        let session = store
+            .create_chat_session(Some("linear"), None)
             .await
             .expect("create session");
         let sid = session.id;
 
-        let user = ChatMessage {
-            id: Uuid::new_v4(),
-            session_id: sid,
-            role: ChatRole::User,
-            content: "q".into(),
-            ts: Utc::now(),
-            tool_name: None,
-            tool_calls_json: None,
-            tool_call_id: None,
-            reasoning_original: None,
-            parent_message_id: None,
-            branch_index: None,
-        };
-        let stale = ChatMessage {
-            id: Uuid::new_v4(),
-            session_id: sid,
-            role: ChatRole::Assistant,
-            content: "old answer".into(),
-            ts: Utc::now(),
-            tool_name: None,
-            tool_calls_json: None,
-            tool_call_id: None,
-            reasoning_original: None,
-            parent_message_id: Some(user.id),
-            branch_index: Some(0),
-        };
-        let active = ChatMessage {
-            id: Uuid::new_v4(),
-            session_id: sid,
-            role: ChatRole::Assistant,
-            content: "new answer".into(),
-            ts: Utc::now(),
-            tool_name: None,
-            tool_calls_json: None,
-            tool_call_id: None,
-            reasoning_original: None,
-            parent_message_id: Some(user.id),
-            branch_index: Some(1),
-        };
-        store.append_chat_message(&user).await.expect("user");
-        store.append_chat_message(&stale).await.expect("stale");
-        store.append_chat_message(&active).await.expect("active");
-        session.active_leaf_message_id = Some(active.id);
-        store.update_chat_session(&session).await.expect("leaf");
+        for (role, content) in [(ChatRole::User, "q"), (ChatRole::Assistant, "answer")] {
+            store
+                .append_chat_message(&ChatMessage {
+                    id: Uuid::new_v4(),
+                    session_id: sid,
+                    role,
+                    content: content.into(),
+                    ts: Utc::now(),
+                    tool_name: None,
+                    tool_calls_json: None,
+                    tool_call_id: None,
+                    reasoning_original: None,
+                    parent_message_id: None,
+                    branch_index: None,
+                })
+                .await
+                .expect("append");
+        }
 
         let mut state = AppState::new(
             serde_yaml::from_str(
@@ -1557,20 +1520,18 @@ storage: { backend: json, path: ./data }
             "coworker.yaml".into(),
         );
 
-        // Limit far above active-branch size; store still has the inactive sibling.
         load_chat_session_ui_with_limit(&mut state, store.as_ref(), sid, 300)
             .await
             .expect("load");
-        assert!(
-            !state.chat_older_messages_available,
-            "inactive branch messages must not set older-available"
-        );
+        assert!(!state.chat_older_messages_available);
+        let joined = state.chat_lines.join("\n");
+        assert!(joined.contains("you> q"));
+        assert!(joined.contains("assistant> answer"));
     }
 
-    /// Final answers parent to the user for regenerate; process rows are siblings.
-    /// Session reload must still rebuild tool/reasoning transcript lines.
+    /// Linear transcript reload includes tool/reasoning rows in timestamp order.
     #[tokio::test]
-    async fn load_chat_session_ui_includes_process_siblings() {
+    async fn load_chat_session_ui_includes_process_messages() {
         use crate::store::sqlite::SqliteStore;
         use std::sync::Arc;
         use tempfile::tempdir;
@@ -1580,18 +1541,19 @@ storage: { backend: json, path: ./data }
             Arc::new(SqliteStore::open(dir.path().join("test.db"), false).expect("open store"))
                 as Arc<dyn crate::store::Store>;
 
-        let mut session = store
+        let session = store
             .create_chat_session(Some("process-reload"), None)
             .await
             .expect("create session");
         let sid = session.id;
 
+        let base = Utc::now();
         let user = ChatMessage {
             id: Uuid::new_v4(),
             session_id: sid,
             role: ChatRole::User,
             content: "analyze commits".into(),
-            ts: Utc::now(),
+            ts: base,
             tool_name: None,
             tool_calls_json: None,
             tool_call_id: None,
@@ -1604,12 +1566,12 @@ storage: { backend: json, path: ./data }
             session_id: sid,
             role: ChatRole::Reasoning,
             content: "[agent reasoning summary] Checking the repo.".into(),
-            ts: Utc::now(),
+            ts: base + chrono::Duration::milliseconds(1),
             tool_name: None,
             tool_calls_json: None,
             tool_call_id: None,
             reasoning_original: Some("raw thought".into()),
-            parent_message_id: Some(user.id),
+            parent_message_id: None,
             branch_index: None,
         };
         let tool = ChatMessage {
@@ -1617,12 +1579,12 @@ storage: { backend: json, path: ./data }
             session_id: sid,
             role: ChatRole::Tool,
             content: "ok: listed files".into(),
-            ts: Utc::now(),
+            ts: base + chrono::Duration::milliseconds(2),
             tool_name: Some("bash_run".into()),
             tool_calls_json: Some(r#"{"command":"ls"}"#.into()),
             tool_call_id: None,
             reasoning_original: None,
-            parent_message_id: Some(reasoning.id),
+            parent_message_id: None,
             branch_index: None,
         };
         let answer = ChatMessage {
@@ -1630,19 +1592,17 @@ storage: { backend: json, path: ./data }
             session_id: sid,
             role: ChatRole::Assistant,
             content: "Here are the commits.".into(),
-            ts: Utc::now(),
+            ts: base + chrono::Duration::milliseconds(3),
             tool_name: None,
             tool_calls_json: None,
             tool_call_id: None,
             reasoning_original: None,
-            parent_message_id: Some(user.id),
-            branch_index: Some(0),
+            parent_message_id: None,
+            branch_index: None,
         };
         for msg in [&user, &reasoning, &tool, &answer] {
             store.append_chat_message(msg).await.expect("append");
         }
-        session.active_leaf_message_id = Some(answer.id);
-        store.update_chat_session(&session).await.expect("leaf");
 
         let mut state = AppState::new(
             serde_yaml::from_str(
@@ -1681,7 +1641,7 @@ storage: { backend: json, path: ./data }
     }
 
     #[tokio::test]
-    async fn load_chat_session_ui_older_flag_when_active_branch_truncated() {
+    async fn load_chat_session_ui_older_flag_when_transcript_truncated() {
         use crate::store::sqlite::SqliteStore;
         use std::sync::Arc;
         use tempfile::tempdir;
@@ -1696,11 +1656,9 @@ storage: { backend: json, path: ./data }
             .await
             .expect("create session");
         let sid = session.id;
-        let mut parent: Option<Uuid> = None;
         for i in 0..6 {
-            let id = Uuid::new_v4();
             let msg = ChatMessage {
-                id,
+                id: Uuid::new_v4(),
                 session_id: sid,
                 role: if i % 2 == 0 {
                     ChatRole::User
@@ -1713,11 +1671,10 @@ storage: { backend: json, path: ./data }
                 tool_calls_json: None,
                 tool_call_id: None,
                 reasoning_original: None,
-                parent_message_id: parent,
+                parent_message_id: None,
                 branch_index: None,
             };
             store.append_chat_message(&msg).await.expect("append");
-            parent = Some(id);
         }
 
         let mut state = AppState::new(
@@ -1737,7 +1694,7 @@ storage: { backend: json, path: ./data }
             .expect("load");
         assert!(
             state.chat_older_messages_available,
-            "active branch longer than limit must set older-available"
+            "transcript longer than limit must set older-available"
         );
         assert!(
             state.chat_lines.len() <= 3,

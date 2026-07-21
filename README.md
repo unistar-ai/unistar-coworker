@@ -79,7 +79,7 @@
 | **Web UI** | Browser chat (`serve`), sessions, light/dark theme, streaming tool/reasoning cards, LLM profile switcher, branch regenerate, approval modal, Markdown/JSONL export |
 | **Scripting** | `doctor`, `init`, `rpc` (JSONL stdin/stdout), `export session`, shell completions, stable exit codes (`0/2/3/4`) |
 | **Ops** | `SIGHUP` / `POST /api/reload` hot-reload config, skills, prompts, MCP; `GET /api/doctor` health JSON |
-| **Sessions** | Pi-style message tree — regenerate / branch from any assistant reply; export active branch as JSONL or HTML |
+| **Sessions** | Linear chat transcript — regenerate truncates from the chosen assistant reply onward; export full session as JSONL or HTML |
 | **Store** | JSON (default) or SQLite for approvals, chat sessions, audit log; `store migrate` and `store compact` commands |
 
 ---

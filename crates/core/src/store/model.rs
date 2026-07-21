@@ -109,8 +109,7 @@ pub struct ChatSession {
     /// Last injected runtime context revision + snapshot for delta updates across turns.
     #[serde(default)]
     pub runtime_state: ChatRuntimeState,
-    /// Active branch leaf message id (the current cursor). `None` means the
-    /// flat tail of the session is the active branch (backward compatible).
+    /// Legacy field from the removed Pi-style message tree (always ignored).
     #[serde(default)]
     pub active_leaf_message_id: Option<Uuid>,
 }
@@ -151,12 +150,9 @@ pub struct ChatMessage {
     /// `None` for non-reasoning messages or when no compression occurred.
     #[serde(default)]
     pub reasoning_original: Option<String>,
-    /// Branch support (Pi-style session tree). `parent_message_id` points at
-    /// the message this one forks from (an assistant reply it is a sibling of,
-    /// or the message it directly follows). `None` for root-level messages.
+    /// Legacy tree fields (ignored; chat history is linear by timestamp).
     #[serde(default)]
     pub parent_message_id: Option<Uuid>,
-    /// Sibling index under the same `parent_message_id` (0 = first child).
     #[serde(default)]
     pub branch_index: Option<u32>,
 }

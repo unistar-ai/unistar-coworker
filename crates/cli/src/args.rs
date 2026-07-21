@@ -110,7 +110,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Export stored data (Pi-style session tree: JSONL + HTML)
+    /// Export stored data (chat sessions: JSONL + HTML)
     Export {
         #[command(subcommand)]
         target: ExportTarget,
@@ -136,7 +136,7 @@ pub(crate) enum Commands {
 
 #[derive(Subcommand)]
 pub(crate) enum ExportTarget {
-    /// Export a full chat session (active branch: user/assistant/tool messages)
+    /// Export a full chat session (user/assistant/tool messages in order)
     Session {
         /// Chat session id
         id: uuid::Uuid,

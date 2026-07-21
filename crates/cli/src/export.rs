@@ -9,9 +9,7 @@ pub(crate) async fn run_export_cmd(store: &dyn store::Store, target: ExportTarge
         .get_chat_session(&id)
         .await?
         .ok_or_else(|| CoworkerError::Workflow(format!("unknown chat session {id}")))?;
-    let messages = store
-        .list_active_branch_messages(&session, usize::MAX)
-        .await?;
+    let messages = store.list_chat_messages(&id, usize::MAX).await?;
     let rendered = match format {
         ExportFormat::Jsonl => export_session_jsonl(&session, &messages),
         ExportFormat::Html => export_session_html(&session, &messages),

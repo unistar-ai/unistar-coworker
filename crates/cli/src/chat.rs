@@ -244,28 +244,21 @@ pub(crate) async fn run_chat_cli(
                             continue;
                         }
                     };
-                    let session = match store.get_chat_session(&sid).await {
-                        Ok(Some(s)) => s,
-                        _ => {
-                            eprintln!("(session not found)");
-                            continue;
-                        }
-                    };
-                    let branch = match store.list_active_branch_messages(&session, 200).await {
+                    let messages = match store.list_chat_messages(&sid, 200).await {
                         Ok(m) => m,
                         Err(e) => {
                             eprintln!("{} {e}", err_prefix());
                             continue;
                         }
                     };
-                    let last_assistant = branch
+                    let last_assistant = messages
                         .iter()
                         .rev()
                         .find(|m| m.role == store::model::ChatRole::Assistant)
                         .map(|m| m.id);
                     match last_assistant {
                         Some(aid) => {
-                            eprintln!("(regenerating branch from assistant {aid})");
+                            eprintln!("(regenerating from assistant {aid})");
                             match run_repl_turn(&engine, &mut rx, &rl, Some(sid), "", Some(aid))
                                 .await
                             {

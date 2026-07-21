@@ -319,6 +319,44 @@ impl Store for JsonStore {
         Ok(msgs)
     }
 
+    async fn truncate_chat_messages_from(
+        &self,
+        session_id: &Uuid,
+        from_message_id: Uuid,
+    ) -> Result<()> {
+        let path = self
+            .root
+            .join("chat/messages")
+            .join(format!("{session_id}.jsonl"));
+        if !path.exists() {
+            return Err(CoworkerError::Store(format!(
+                "chat message {from_message_id} not found"
+            )));
+        }
+        let raw = fs::read_to_string(&path)?;
+        let mut msgs: Vec<ChatMessage> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let Some(idx) = msgs.iter().position(|m| m.id == from_message_id) else {
+            return Err(CoworkerError::Store(format!(
+                "chat message {from_message_id} not found"
+            )));
+        };
+        msgs.truncate(idx);
+        let mut out = msgs
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        fs::write(&path, out)?;
+        Ok(())
+    }
+
     async fn list_chat_sessions(&self, limit: usize) -> Result<Vec<ChatSession>> {
         let dir = self.root.join("chat/sessions");
         if !dir.exists() {
