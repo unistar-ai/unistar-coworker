@@ -17,7 +17,7 @@
     "@radix-ui/react-toast": "^1.2.19",
     "@tanstack/react-virtual": "^3.14.5",
     "highlight.js": "^11.11.1",
-    "lucide-react": "^0.469.0",
+    "lucide-react": "^1.25.0",
     "next-themes": "^0.4.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.7",
