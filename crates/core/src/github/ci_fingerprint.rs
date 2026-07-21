@@ -31,7 +31,7 @@ pub fn compute_failure_fingerprint(
     };
     let payload = format!("{repo}|{workflow}|{job}|{fallback}");
     let hash = Sha256::digest(payload.as_bytes());
-    format!("{hash:x}")
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn truncate_runes(s: &str, max: usize) -> String {

@@ -587,7 +587,7 @@ fn compute_failure_fingerprint(
     };
     let payload = format!("{repo}|{workflow}|{job}|{fallback}");
     let hash = Sha256::digest(payload.as_bytes());
-    format!("{hash:x}")
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn extract_test_name_from_logs(logs: &str) -> String {
