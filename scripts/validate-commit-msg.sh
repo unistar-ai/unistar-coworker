@@ -4,7 +4,7 @@
 set -euo pipefail
 
 readonly TYPES='build|chore|ci|deps|docs|feat|fix|perf|refactor|revert|style|test'
-readonly SCOPES='core|cli|web|tui|web-ui|ci|docker|release|packaging|docs|skills|deps'
+readonly SCOPES='core|cli|web|tui|web-ui|ci|docker|release|packaging|docs|skills|deps-dev|deps'
 readonly HEADER_RE="^(${TYPES})(\\((${SCOPES})\\))?(!)?: [a-z].*$"
 readonly MAX_HEADER_LEN=100
 
