@@ -2521,10 +2521,13 @@ html.theme-transition * {
   overflow: hidden;
 }
 .chat-process-history-peek-label {
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
   font-weight: 600;
   font-size: 0.76rem;
   color: color-mix(in srgb, var(--text) 78%, var(--muted));
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .chat-process-history-peek-sep {
@@ -2579,7 +2582,9 @@ html.theme-transition * {
 /* Live-only 5rem preview while processing */
 .chat-process-live-preview {
   position: relative;
-  height: 5rem;
+  /* One compact peek line — avoid tall empty cards when collapsed. */
+  min-height: 2.15rem;
+  max-height: 5rem;
   margin: 0 0 0.35rem;
   border-radius: 8px;
   background: color-mix(in srgb, var(--text) 3.5%, var(--bg));
@@ -2589,8 +2594,9 @@ html.theme-transition * {
 }
 .chat-process-live-preview-dismiss {
   position: absolute;
-  top: 0.35rem;
+  top: 50%;
   right: 0.35rem;
+  transform: translateY(-50%);
   z-index: 2;
   display: inline-flex;
   align-items: center;
@@ -2602,7 +2608,7 @@ html.theme-transition * {
   background: color-mix(in srgb, var(--panel) 88%, transparent);
   color: var(--muted);
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.55;
   transition: opacity 0.15s ease, color 0.15s ease;
 }
 .chat-process-live-preview:hover .chat-process-live-preview-dismiss,
@@ -2614,13 +2620,16 @@ html.theme-transition * {
 }
 .chat-process-live-preview-scroll {
   height: 100%;
+  max-height: 5rem;
   overflow: auto;
   padding: 0.35rem 1.75rem 0.35rem 0.55rem;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  justify-content: flex-end;
+  gap: 0.2rem;
   pointer-events: none;
   scrollbar-width: thin;
+  min-width: 0;
 }
 
 @keyframes chat-process-row-in {
@@ -2665,13 +2674,15 @@ html.theme-transition * {
 }
 .chat-process-preview-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 0.4rem;
   padding: 0.2rem 0.25rem;
   border-radius: 4px;
   background: transparent;
   border: none;
   width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   text-align: left;
   color: inherit;
   font: inherit;
@@ -2682,36 +2693,46 @@ html.theme-transition * {
 .chat-process-preview-icon {
   display: inline-flex;
   flex-shrink: 0;
-  margin-top: 0.1rem;
   color: var(--muted);
 }
 .chat-process-preview-text {
-  flex: 1;
+  flex: 1 1 0%;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 0.35rem;
+  overflow: hidden;
 }
 .chat-process-preview-title {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: 0.78rem;
   font-weight: 600;
   color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-process-preview-sep {
+  flex-shrink: 0;
+  opacity: 0.45;
+  color: var(--muted);
 }
 .chat-process-preview-subtitle {
+  flex: 1 1 0%;
+  min-width: 0;
   font-size: 0.72rem;
   color: var(--muted);
-  line-height: 1.4;
+  line-height: 1.35;
   overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--mono, ui-monospace, monospace);
-  word-break: break-all;
 }
 .chat-process-preview-subtitle.reasoning-live {
   font-family: var(--font-sans);
-  word-break: break-word;
-  white-space: pre-wrap;
+  white-space: nowrap;
 }
 .chat-process-preview-status {
   flex-shrink: 0;
@@ -2935,6 +2956,7 @@ html.theme-transition * {
 .chat-process-row-text {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
@@ -2949,7 +2971,9 @@ html.theme-transition * {
   font-size: 0.8125rem;
   color: color-mix(in srgb, var(--text) 88%, var(--muted));
   line-height: 1.35;
-  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .chat-process-row.kind-tool .chat-process-row-title {
@@ -2962,8 +2986,8 @@ html.theme-transition * {
   gap: 0.4rem;
 }
 .chat-process-row.kind-tool.is-open .chat-process-row-title {
-  flex: 0 0 auto;
-  white-space: nowrap;
+  flex: 0 1 auto;
+  max-width: 42%;
 }
 .chat-process-row-text.is-tool.is-inline {
   flex-direction: row;
@@ -2971,8 +2995,20 @@ html.theme-transition * {
   gap: 0.4rem;
 }
 .chat-process-row-text.is-tool.is-inline .chat-process-row-title {
-  flex: 0 0 auto;
-  min-width: max-content;
+  flex: 0 1 auto;
+  max-width: 42%;
+}
+.chat-process-row-text.is-inline .chat-process-row-title {
+  flex: 1 1 auto;
+}
+.chat-process-row-text.is-inline:has(.chat-process-row-subtitle) .chat-process-row-title {
+  flex: 0 1 auto;
+  max-width: 42%;
+}
+.chat-process-row.kind-tool.is-open:not(:has(.chat-process-row-subtitle)) .chat-process-row-title,
+.chat-process-row-text.is-tool.is-inline:not(:has(.chat-process-row-subtitle)) .chat-process-row-title {
+  flex: 1 1 auto;
+  max-width: none;
 }
 .chat-process-row-text.is-tool.is-inline .chat-process-row-subtitle,
 .chat-process-row.kind-tool.is-open .chat-process-row-subtitle {
@@ -3019,11 +3055,15 @@ html.theme-transition * {
   align-items: center;
   gap: 0.2rem;
   flex-shrink: 0;
+  margin-left: 0.15rem;
+  padding-left: 0.2rem;
   font-size: 0.7rem;
   font-weight: 500;
   color: var(--ok);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  position: relative;
+  z-index: 1;
 }
 .chat-process-row-status.status-err {
   color: var(--danger);

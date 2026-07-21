@@ -214,9 +214,7 @@ use coworker_core::logging;
 use coworker_core::store::open_store;
 
 use super::terminal::set_plain;
-use super::{
-    catalog, chat, doctor_init, export, report, rpc, runtime, store, upgrade_check,
-};
+use super::{catalog, chat, doctor_init, export, report, rpc, runtime, store, upgrade_check};
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();

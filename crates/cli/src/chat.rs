@@ -379,7 +379,12 @@ pub(crate) async fn run_turn_with_progress<F>(
     prefix: Option<String>,
     stream_raw: bool,
     turn: F,
-) -> Result<(ChatTurnResult, bool, Option<PendingApproval>, Option<PendingUserQuestion>)>
+) -> Result<(
+    ChatTurnResult,
+    bool,
+    Option<PendingApproval>,
+    Option<PendingUserQuestion>,
+)>
 where
     F: Future<Output = Result<ChatTurnResult>>,
 {

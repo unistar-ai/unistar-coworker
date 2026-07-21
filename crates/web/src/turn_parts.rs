@@ -33,10 +33,7 @@ pub fn build_history_turn_parts(s: &AppState) -> Map<String, Value> {
     let mut out = Map::new();
     for (ui, &user_idx) in user_indices.iter().enumerate() {
         let start = user_idx + 1;
-        let end = user_indices
-            .get(ui + 1)
-            .copied()
-            .unwrap_or(lines.len());
+        let end = user_indices.get(ui + 1).copied().unwrap_or(lines.len());
         // While busy, skip the in-flight turn — LiveZone owns `chat_turn_parts`.
         if s.chat_busy && ui + 1 == user_indices.len() {
             continue;
@@ -298,17 +295,15 @@ fn split_tool_call(body: &str) -> (String, Option<String>) {
 }
 
 fn split_tool_done(body: &str) -> (String, Option<String>, Option<String>) {
-    let ms = body
-        .rsplit_once('(')
-        .and_then(|(rest, tail)| {
-            tail.strip_suffix("ms)")?;
-            let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.is_empty() {
-                None
-            } else {
-                Some((rest.trim_end(), digits))
-            }
-        });
+    let ms = body.rsplit_once('(').and_then(|(rest, tail)| {
+        tail.strip_suffix("ms)")?;
+        let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            None
+        } else {
+            Some((rest.trim_end(), digits))
+        }
+    });
     let (rest, ms) = match ms {
         Some((r, m)) => (r, Some(m)),
         None => (body, None),

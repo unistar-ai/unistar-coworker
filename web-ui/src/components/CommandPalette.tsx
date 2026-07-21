@@ -2,7 +2,6 @@ import { useState, useMemo, useEffect, useRef } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useTheme } from "next-themes";
 import { useStore } from "../store/wsStore";
-import { useChatUiStore } from "../store/chatUiStore";
 import { apiPost } from "../lib/api";
 import {
   MessageSquare,
@@ -16,7 +15,6 @@ import {
   Moon,
   RefreshCw,
   Search,
-  FileCode2,
   type LucideIcon,
 } from "lucide-react";
 
@@ -39,8 +37,6 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
   const [selectedIdx, setSelectedIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const { theme, setTheme } = useTheme();
-  const toolMarkdown = useChatUiStore((s) => s.toolMarkdown);
-  const toggleToolMarkdown = useChatUiStore((s) => s.toggleToolMarkdown);
 
   const tabs = useStore((s) => s.tabs);
   const setTab = useStore((s) => s.setTab);
@@ -147,21 +143,8 @@ export default function CommandPalette({ open, onOpenChange }: CommandPalettePro
       },
     });
 
-    cmds.push({
-      id: "toggle-tool-markdown",
-      label: toolMarkdown
-        ? "Tool results: show as plain text"
-        : "Tool results: render Markdown",
-      icon: FileCode2,
-      keywords: "tool markdown md plain text render output",
-      action: () => {
-        toggleToolMarkdown();
-        close();
-      },
-    });
-
     return cmds;
-  }, [tabs, setTab, theme, setTheme, chatBusy, onOpenChange, toolMarkdown, toggleToolMarkdown]);
+  }, [tabs, setTab, theme, setTheme, chatBusy, onOpenChange]);
 
   // Filter by query
   const filtered = useMemo(() => {

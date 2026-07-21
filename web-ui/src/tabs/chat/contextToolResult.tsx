@@ -299,6 +299,9 @@ export function ContextToolResultView({
   const kindLabel = KIND_LABEL[parsed.kind];
   const hasArgs = Boolean(parsed.args && Object.keys(parsed.args).length) || Boolean(parsed.argsPretty);
   const hasBody = Boolean(parsed.body.trim());
+  const canToggleMarkdown =
+    hasBody &&
+    prepareToolStepDisplay(parsed.toolName, content).display === "markdown";
 
   return (
     <div className={`ctx-tool-result kind-${parsed.kind}${parsed.ok ? "" : " is-error"}`}>
@@ -324,7 +327,9 @@ export function ContextToolResultView({
         <section className="tool-detail-pane is-result" aria-label="结果">
           <header className="tool-detail-pane-head">
             <span className="tool-detail-pane-label">结果</span>
-            <ToolMarkdownToggle className="tool-detail-pane-action" />
+            {canToggleMarkdown && (
+              <ToolMarkdownToggle className="tool-detail-pane-action" />
+            )}
           </header>
           <div className="tool-detail-pane-body">
             {hasBody ? (

@@ -197,11 +197,7 @@ fn is_inactive_assistant_sibling(
         .unwrap_or(true)
 }
 
-fn insert_subtree(
-    all: &[ChatMessage],
-    root: Uuid,
-    include: &mut std::collections::HashSet<Uuid>,
-) {
+fn insert_subtree(all: &[ChatMessage], root: Uuid, include: &mut std::collections::HashSet<Uuid>) {
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         if !include.insert(id) {
@@ -384,7 +380,12 @@ mod tests {
             msg_role(user_answer, Some(ask_tool), ChatRole::User, Some(0)),
             msg_role(reasoning, Some(user_answer), ChatRole::Reasoning, None),
             bash_msg,
-            msg_role(final_answer, Some(user_answer), ChatRole::Assistant, Some(0)),
+            msg_role(
+                final_answer,
+                Some(user_answer),
+                ChatRole::Assistant,
+                Some(0),
+            ),
         ];
         // Active-leaf walk: final → user_answer → ask_tool → ask_carrier → user1
         let branch = branch_path_to_root(&all, final_answer);

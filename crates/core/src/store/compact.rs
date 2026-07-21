@@ -199,11 +199,10 @@ fn purge_sqlite_legacy_artifacts(store: &SqliteStore, dry_run: bool) -> Result<u
                 continue;
             }
             if dry_run {
-                let n: i64 = conn.query_row(
-                    &format!("SELECT COUNT(*) FROM {table}"),
-                    [],
-                    |row| row.get(0),
-                )?;
+                let n: i64 =
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })?;
                 total += n as u32;
             } else {
                 let n = conn.execute(&format!("DELETE FROM {table}"), [])?;
@@ -227,7 +226,8 @@ fn purge_sqlite_workflow_runs(store: &SqliteStore, dry_run: bool) -> Result<u32>
             return Ok(0);
         }
         if dry_run {
-            let n: i64 = conn.query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))?;
+            let n: i64 =
+                conn.query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))?;
             return Ok(n as u32);
         }
         let n = conn.execute("DELETE FROM workflow_runs", [])?;

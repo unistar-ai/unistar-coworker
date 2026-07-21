@@ -5,6 +5,7 @@ import { toolMeta, type ToolGroup, type ToolStep } from "./parser";
 import { buildContextToolFocus } from "./contextFocus";
 import {
   preferArgBlock,
+  prepareToolStepDisplay,
   resolveToolArgPairs,
 } from "./toolDisplay";
 import { ToolStepOutput } from "./toolOutput";
@@ -41,6 +42,11 @@ export default function ToolDetailBody({
   const steps = contentSteps(group);
   const running = group.status === "running" || group.status === "pending";
   const hasResult = steps.length > 0;
+  const canToggleMarkdown = steps.some((s) => {
+    const raw = (s.output || s.text || "").trim();
+    if (!raw) return false;
+    return prepareToolStepDisplay(group.toolName, raw).display === "markdown";
+  });
 
   const openContext = (e: MouseEvent) => {
     e.preventDefault();
@@ -101,7 +107,9 @@ export default function ToolDetailBody({
           {group.ms != null && group.ms !== "" && (
             <span className="tool-detail-pane-meta">{group.ms}ms</span>
           )}
-          <ToolMarkdownToggle className="tool-detail-pane-action" />
+          {canToggleMarkdown && (
+            <ToolMarkdownToggle className="tool-detail-pane-action" />
+          )}
         </header>
         <div className="tool-detail-pane-body">
           {hasResult ? (

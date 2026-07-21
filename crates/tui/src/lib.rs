@@ -1081,18 +1081,21 @@ fn draw_hints(frame: &mut ratatui::Frame, area: Rect, state: &AppState, th: Them
             }
         }
         Tab::Approvals => "y: approve (runs tool)  n: deny  q: quit".into(),
-        Tab::Logs => return frame.render_widget(
-            Paragraph::new(theme::hint_bar(
-                th,
-                &format!(
-                    "filter: {} (/)  j/k scroll  q: quit",
-                    state.log_filter.label()
-                ),
-            ))
-            .style(Style::default().bg(th.title_bg)),
-            area,
-        ),
-        _ => "j/k: scroll  {/}: detail  drag detail: copy  Config: R probe  Tab: next  q: quit".into(),
+        Tab::Logs => {
+            return frame.render_widget(
+                Paragraph::new(theme::hint_bar(
+                    th,
+                    &format!(
+                        "filter: {} (/)  j/k scroll  q: quit",
+                        state.log_filter.label()
+                    ),
+                ))
+                .style(Style::default().bg(th.title_bg)),
+                area,
+            )
+        }
+        _ => "j/k: scroll  {/}: detail  drag detail: copy  Config: R probe  Tab: next  q: quit"
+            .into(),
     };
     frame.render_widget(
         Paragraph::new(theme::hint_bar(th, &hint)).style(Style::default().bg(th.title_bg)),

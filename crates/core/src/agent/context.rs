@@ -970,9 +970,9 @@ fn select_history_segment_range(
         let seg = &segments[seg_start - 1];
         if count > 0 && count + seg.message_count > take {
             if count == 1
-                && segments
-                    .get(seg_start)
-                    .is_some_and(|s| s.kind == HistoryPackSegmentKind::Plain && s.message_count == 1)
+                && segments.get(seg_start).is_some_and(|s| {
+                    s.kind == HistoryPackSegmentKind::Plain && s.message_count == 1
+                })
                 && seg.kind == HistoryPackSegmentKind::NativeToolGroup
             {
                 seg_start -= 1;
@@ -985,7 +985,8 @@ fn select_history_segment_range(
     if seg_start < segments.len() {
         let seg = &segments[seg_start];
         if segment_is_ask_user_echo_only(history, seg) {
-            if seg_start > 0 && segments[seg_start - 1].kind == HistoryPackSegmentKind::NativeToolGroup
+            if seg_start > 0
+                && segments[seg_start - 1].kind == HistoryPackSegmentKind::NativeToolGroup
             {
                 seg_start -= 1;
             } else {
@@ -1044,7 +1045,10 @@ fn history_tool_group_to_llm(group: &[ChatMessage]) -> Vec<LlmTurnMessage> {
     out
 }
 
-fn history_segment_to_llm(history: &[ChatMessage], seg: &HistoryPackSegment) -> Vec<LlmTurnMessage> {
+fn history_segment_to_llm(
+    history: &[ChatMessage],
+    seg: &HistoryPackSegment,
+) -> Vec<LlmTurnMessage> {
     match seg.kind {
         HistoryPackSegmentKind::Plain => history[seg.start..seg.end]
             .iter()
@@ -1057,11 +1061,16 @@ fn history_segment_to_llm(history: &[ChatMessage], seg: &HistoryPackSegment) -> 
                 Some(chat_message_to_llm(msg))
             })
             .collect(),
-        HistoryPackSegmentKind::NativeToolGroup => history_tool_group_to_llm(&history[seg.start..seg.end]),
+        HistoryPackSegmentKind::NativeToolGroup => {
+            history_tool_group_to_llm(&history[seg.start..seg.end])
+        }
     }
 }
 
-fn pack_history_to_llm_messages(history: &[ChatMessage], max_messages: usize) -> (Vec<LlmTurnMessage>, usize) {
+fn pack_history_to_llm_messages(
+    history: &[ChatMessage],
+    max_messages: usize,
+) -> (Vec<LlmTurnMessage>, usize) {
     let segments = history_pack_segments(history);
     let (range, dropped_count) = select_history_segment_range(history, &segments, max_messages);
     let mut out = Vec::new();
@@ -1721,10 +1730,7 @@ fn demote_orphan_tool_messages(messages: &mut [LlmTurnMessage]) {
             if expecting_tools {
                 continue;
             }
-            let label = msg
-                .tool_name
-                .clone()
-                .unwrap_or_else(|| "tool".to_string());
+            let label = msg.tool_name.clone().unwrap_or_else(|| "tool".to_string());
             if !is_tool_result_transcript(&msg.content) {
                 msg.content = format!("tool_result({label}):\n{}", msg.content);
             }
@@ -2705,7 +2711,9 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
 
         let assistant_idx = messages
             .iter()
-            .position(|m| m.role == "assistant" && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()))
+            .position(|m| {
+                m.role == "assistant" && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+            })
             .expect("assistant tool_calls kept");
         let expected: std::collections::HashSet<_> = messages[assistant_idx]
             .tool_calls
@@ -2889,9 +2897,7 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
                 id: Uuid::new_v4(),
                 session_id: session,
                 role: ChatRole::Tool,
-                content: format!(
-                    "tool_result(ask_user):\nargs: {{}}\n\nUser answered:\n{answer}"
-                ),
+                content: format!("tool_result(ask_user):\nargs: {{}}\n\nUser answered:\n{answer}"),
                 ts: Utc::now(),
                 tool_name: Some("ask_user".into()),
                 tool_calls_json: Some("{}".into()),

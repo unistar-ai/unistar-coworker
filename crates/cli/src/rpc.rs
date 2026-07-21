@@ -249,15 +249,11 @@ fn rpc_progress_json(p: &coworker_core::agent::chat_loop::ChatProgress) -> Optio
             serde_json::json!({"stage": "approval_resolved", "tool": tool_name, "approved": approved})
         }
         ChatProgress::UserQuestionQueued {
-            question,
-            options,
-            ..
+            question, options, ..
         } => {
             serde_json::json!({"stage": "ask_user", "question": question, "options": options})
         }
-        ChatProgress::UserAnswerResolved {
-            answer_preview, ..
-        } => {
+        ChatProgress::UserAnswerResolved { answer_preview, .. } => {
             serde_json::json!({"stage": "ask_user_answered", "answer": answer_preview})
         }
         ChatProgress::ReasoningSummary { preview, .. } => {

@@ -6,7 +6,7 @@ import ChatHistory from "./ChatHistory";
 import ContextPanel from "./ContextPanel";
 import SessionPicker from "./SessionPicker";
 import { useChatUiStore } from "../../store/chatUiStore";
-import { PanelRightOpen, Search, Download, Trash2, ChevronUp, ChevronDown, ArrowDown, MessageSquareOff, MessageSquare, MessageCircleQuestion, FileCode2 } from "lucide-react";
+import { PanelRightOpen, Search, Download, Trash2, ChevronUp, ChevronDown, ArrowDown, MessageSquareOff, MessageSquare, MessageCircleQuestion } from "lucide-react";
 import {
   buildChatBlocks,
   groupIntoTurns,
@@ -77,8 +77,6 @@ export default function ChatTab() {
   const isMobile = useIsMobile();
   const userMessageStyle = useChatUiStore((s) => s.userMessageStyle);
   const toggleUserMessageStyle = useChatUiStore((s) => s.toggleUserMessageStyle);
-  const toolMarkdown = useChatUiStore((s) => s.toolMarkdown);
-  const toggleToolMarkdown = useChatUiStore((s) => s.toggleToolMarkdown);
 
   // Esc cancels generation when busy.
   useEffect(() => {
@@ -252,22 +250,6 @@ export default function ChatTab() {
                 <MessageSquare size={14} className="btn-header-icon" />
                 <span className="btn-header-label">
                   {userMessageStyle === "bubble" ? "气泡" : "平铺"}
-                </span>
-              </button>
-              <button
-                type="button"
-                className={`btn-header-action btn-header-tool-md${toolMarkdown ? " is-active" : ""}`}
-                onClick={toggleToolMarkdown}
-                title={
-                  toolMarkdown
-                    ? "工具结果：Markdown 渲染（点击切换为原文）"
-                    : "工具结果：原文（点击切换为 Markdown 渲染）"
-                }
-                aria-pressed={toolMarkdown}
-              >
-                <FileCode2 size={14} className="btn-header-icon" />
-                <span className="btn-header-label">
-                  {toolMarkdown ? "MD" : "原文"}
                 </span>
               </button>
               <button

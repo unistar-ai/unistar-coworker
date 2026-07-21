@@ -629,8 +629,7 @@ impl AppState {
             if !crate::agent::context::is_tool_user_question_pending_transcript(body) {
                 continue;
             }
-            let Some(id) =
-                crate::agent::ask_user_tool::question_id_from_pending_transcript(body)
+            let Some(id) = crate::agent::ask_user_tool::question_id_from_pending_transcript(body)
             else {
                 continue;
             };
@@ -1670,10 +1669,7 @@ storage: { backend: json, path: ./data }
             joined.contains("… reasoning:"),
             "reasoning line missing: {joined}"
         );
-        assert!(
-            joined.contains("bash_run"),
-            "tool line missing: {joined}"
-        );
+        assert!(joined.contains("bash_run"), "tool line missing: {joined}");
         assert!(
             joined.contains("assistant> Here are the commits."),
             "answer line missing: {joined}"

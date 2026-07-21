@@ -33,8 +33,7 @@ use uuid::Uuid;
 use coworker_core::agent::chat_loop::ChatProgress;
 use coworker_core::app::{
     apply_event, export_chat_transcript_markdown, load_chat_session_ui,
-    load_chat_session_ui_with_limit, spawn_approval_decision,
-    AppEvent, SharedState, Tab,
+    load_chat_session_ui_with_limit, spawn_approval_decision, AppEvent, SharedState, Tab,
 };
 use coworker_core::engine::Engine;
 use coworker_core::error::Result;

@@ -36,11 +36,10 @@ use crate::agent::chat_duplicate::{
 };
 use crate::agent::chat_loop::{
     activity_flow_kind_for_tool, append_message, append_tool_result_message, ci_analyze_lacks_runs,
-    emit_activity_flow,
-    emit_activity_flow_clear, emit_progress, ensure_chat_not_cancelled, finalize_tool_args,
-    format_flow_tool_done, format_flow_tool_start, format_tool_args_short, is_flow_activity_tool,
-    is_mutating_tool, race_chat_cancel, tool_output_indicates_failure, ChatProgress,
-    PreparedToolCall, ToolCallSummary, ToolExecRecord, ToolRoundState,
+    emit_activity_flow, emit_activity_flow_clear, emit_progress, ensure_chat_not_cancelled,
+    finalize_tool_args, format_flow_tool_done, format_flow_tool_start, format_tool_args_short,
+    is_flow_activity_tool, is_mutating_tool, race_chat_cancel, tool_output_indicates_failure,
+    ChatProgress, PreparedToolCall, ToolCallSummary, ToolExecRecord, ToolRoundState,
 };
 
 #[derive(Debug, Clone)]

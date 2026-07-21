@@ -62,10 +62,7 @@ fn parse_limit_arg(args: &Value, key: &str, default: usize, max: usize) -> usize
 
 fn format_approval_line(a: &Approval) -> String {
     use crate::store::ApprovalKind;
-    let pr = a
-        .pr_number
-        .map(|n| format!(" #{n}"))
-        .unwrap_or_default();
+    let pr = a.pr_number.map(|n| format!(" #{n}")).unwrap_or_default();
     match a.kind {
         ApprovalKind::McpTool => format!("MCP {:?}{pr}: {}", a.kind, a.description),
         _ => format!("{:?}{pr}: {}", a.kind, a.description),

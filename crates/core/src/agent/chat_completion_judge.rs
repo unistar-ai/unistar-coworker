@@ -64,14 +64,15 @@ pub fn parse_completion_judge_response(content: &str) -> Option<TurnCompletionVe
 }
 
 fn looks_like_verdict_object(slice: &str) -> bool {
-    slice.contains("\"complete\"")
-        || slice.contains("'complete'")
-        || slice.contains("complete:")
+    slice.contains("\"complete\"") || slice.contains("'complete'") || slice.contains("complete:")
 }
 
 fn parse_completion_verdict_heuristic(text: &str) -> Option<TurnCompletionVerdict> {
     let lower = text.to_ascii_lowercase();
-    if let Some(idx) = lower.find("\"complete\"").or_else(|| lower.find("complete")) {
+    if let Some(idx) = lower
+        .find("\"complete\"")
+        .or_else(|| lower.find("complete"))
+    {
         let tail = &lower[idx..];
         if tail.contains("true") && !tail.contains("false") {
             return Some(TurnCompletionVerdict {
@@ -81,7 +82,10 @@ fn parse_completion_verdict_heuristic(text: &str) -> Option<TurnCompletionVerdic
         }
         if tail.contains("false") {
             let reason = extract_reason_heuristic(text).unwrap_or_default();
-            return Some(TurnCompletionVerdict { complete: false, reason });
+            return Some(TurnCompletionVerdict {
+                complete: false,
+                reason,
+            });
         }
     }
     None
@@ -257,7 +261,10 @@ fn format_transcript_line(msg: &LlmTurnMessage) -> String {
     }
     if msg.role == "user" && msg.content.contains("[Harness]") {
         let first = msg.content.lines().next().unwrap_or("[harness]");
-        return format!("[{role}] {}", sanitize_judge_snippet(first, JUDGE_LINE_MAX_CHARS));
+        return format!(
+            "[{role}] {}",
+            sanitize_judge_snippet(first, JUDGE_LINE_MAX_CHARS)
+        );
     }
     format!(
         "[{role}] {}",
@@ -281,10 +288,7 @@ fn sanitize_judge_snippet(text: &str, max_chars: usize) -> String {
     if t.chars().count() <= max_chars {
         return t.to_string();
     }
-    format!(
-        "{}…",
-        t.chars().take(max_chars).collect::<String>()
-    )
+    format!("{}…", t.chars().take(max_chars).collect::<String>())
 }
 
 fn strip_json_fence(text: &str) -> String {

@@ -78,6 +78,9 @@ function LiveExtraPreview({
             <span className="chat-process-preview-title">
               {live.activityFlow.kind === "Skill" ? "技能" : "活动"}
             </span>
+            <span className="chat-process-preview-sep" aria-hidden="true">
+              ·
+            </span>
             <span className="chat-process-preview-subtitle">{live.activityFlow.text}</span>
           </span>
         </div>
@@ -87,7 +90,9 @@ function LiveExtraPreview({
           <span className="chat-process-preview-icon" aria-hidden="true">
             <Wrench size={15} strokeWidth={2} />
           </span>
-          <span className="chat-process-preview-title">压缩上下文</span>
+          <span className="chat-process-preview-text">
+            <span className="chat-process-preview-title">压缩上下文</span>
+          </span>
           <span className="tool-spinner" aria-hidden="true" />
         </div>
       )}

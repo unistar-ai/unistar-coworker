@@ -1448,8 +1448,7 @@ fn example_native_tool_args(
         "pr_get_status_batch" => format!(r#"{{"repo":"{repo}","pr_numbers":"{pr}"}}"#),
         "pr_get_overview_batch" => format!(r#"{{"repo":"{repo}","pr_numbers":"{pr},99"}}"#),
         "issue_get" => format!(r#"{{"repo":"{repo}","issue_number":42}}"#),
-        "store_list_pending_approvals"
-        | "tool_list" => "{}".to_string(),
+        "store_list_pending_approvals" | "tool_list" => "{}".to_string(),
         "tool_describe" => r#"{"name":"pr_get_overview"}"#.to_string(),
         "tool_call" => format!(r#"{{"name":"pr_list_open","args":{{"repo":"{repo}"}}}}"#),
         "ci_rerun_workflow" => format!("{{\"repo\":\"{repo}\",\"run_id\":{run}}}"),
@@ -1575,11 +1574,7 @@ mod tests {
         });
         let err = "tool error: failed to fetch failed logs: repository, PR, or run not found \
 (check the owner/repo and IDs). Details: log not found: 81595615138";
-        let msg = ToolCatalog::new().format_tool_failure_nudge(
-            "ci_get_failed_logs",
-            &args,
-            err,
-        );
+        let msg = ToolCatalog::new().format_tool_failure_nudge("ci_get_failed_logs", &args, err);
         assert!(msg.contains("not a missing-parameter error") || msg.contains("[Harness]"));
         assert!(!msg.contains("is missing required `repo`"));
         assert!(msg.contains("gh auth status"));
@@ -1593,11 +1588,7 @@ mod tests {
             "run_id": 26_156_246_609_i64
         });
         let err = "repository, PR, or run not found (check the owner/repo and IDs)";
-        let msg = ToolCatalog::new().format_tool_failure_nudge(
-            "ci_get_failed_logs",
-            &args,
-            err,
-        );
+        let msg = ToolCatalog::new().format_tool_failure_nudge("ci_get_failed_logs", &args, err);
         assert!(msg.contains("acme/other"));
         assert!(!msg.contains("is missing required"));
     }

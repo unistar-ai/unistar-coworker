@@ -145,9 +145,7 @@ pub async fn run_checks_with_extras(
                 status: "warn",
                 detail: first,
                 latency_ms: None,
-                hint: Some(
-                    "run `gh auth login` when using GitHub harness or PR/CI tools".into(),
-                ),
+                hint: Some("run `gh auth login` when using GitHub harness or PR/CI tools".into()),
             });
         }
         Err(e) => {
@@ -511,7 +509,9 @@ mod tests {
     fn yaml_has_legacy_repos_key_detects_top_level() {
         assert!(yaml_has_legacy_repos_key("repos:\n  - acme/widget\n"));
         assert!(yaml_has_legacy_repos_key("repos: [acme/widget]\n"));
-        assert!(!yaml_has_legacy_repos_key("# repos:\nllm:\n  default: {}\n"));
+        assert!(!yaml_has_legacy_repos_key(
+            "# repos:\nllm:\n  default: {}\n"
+        ));
         assert!(!yaml_has_legacy_repos_key("llm:\n  default: {}\n"));
     }
 

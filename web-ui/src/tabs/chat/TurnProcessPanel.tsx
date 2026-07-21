@@ -223,7 +223,12 @@ export default function TurnProcessPanel({
                 <span className="chat-process-preview-text">
                   <span className="chat-process-preview-title">{step.title}</span>
                   {step.subtitle && (
-                    <span className="chat-process-preview-subtitle">{step.subtitle}</span>
+                    <>
+                      <span className="chat-process-preview-sep" aria-hidden="true">
+                        ·
+                      </span>
+                      <span className="chat-process-preview-subtitle">{step.subtitle}</span>
+                    </>
                   )}
                 </span>
                 {step.status && (

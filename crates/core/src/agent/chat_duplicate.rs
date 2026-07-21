@@ -11,9 +11,8 @@ use uuid::Uuid;
 
 use crate::agent::chat_loop::{
     append_message, append_tool_result_message, canonical_tool_args, emit_progress,
-    format_tool_args_short, is_mutating_tool,
-    push_native_assistant_tool_calls, ChatProgress, PreparedToolCall, ToolCallSummary,
-    ToolExecRecord, ToolRoundState,
+    format_tool_args_short, push_native_assistant_tool_calls, ChatProgress, PreparedToolCall,
+    ToolCallSummary, ToolExecRecord, ToolRoundState,
 };
 use crate::agent::context::{format_tool_context_message, harness_nudge_base};
 use crate::agent::tool_catalog;
@@ -239,17 +238,24 @@ async fn persist_harness_nudge(
     llm_messages: &mut Vec<LlmTurnMessage>,
     nudge: &str,
 ) -> Result<()> {
+    let before_len = llm_messages.len();
     let body = push_harness_nudge(llm_messages, nudge.to_string());
-    append_message(
-        store,
-        session_id,
-        ChatRole::Harness,
-        &body,
-        None,
-        None,
-        None,
-    )
-    .await
+    // `push_harness_nudge` replaces an existing identical nudge in place. Only
+    // append to the store when a *new* message was added — otherwise every
+    // harness retry would spam the session transcript (and the chat UI).
+    if llm_messages.len() > before_len {
+        append_message(
+            store,
+            session_id,
+            ChatRole::Harness,
+            &body,
+            None,
+            None,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn harness_retry_or_stop(
@@ -289,9 +295,9 @@ pub(crate) async fn fulfill_duplicate_readonly_tool(
     call: &PreparedToolCall,
     all_calls: &[PreparedToolCall],
 ) -> Result<bool> {
-    if is_mutating_tool(&call.name) {
-        return Ok(false);
-    }
+    // Replay cached successful transcripts for any tool (including mutating /
+    // review-gated ones). Re-running the same bash_run / write_file would
+    // re-queue approval and loop; returning the prior result is correct.
     let cached = match cached_duplicate_readonly_body(round, call).await {
         Some(cached) => cached,
         None => return Ok(false),
@@ -394,12 +400,36 @@ pub(crate) async fn maybe_block_duplicate_tool_call(
     call: &PreparedToolCall,
     block: DuplicateToolBlock,
 ) -> Result<bool> {
+    // Already told the model once to reply with existing results — stop the
+    // turn instead of burning more LLM rounds on the same duplicate call.
+    if *round.duplicate_forced_reply_nudged {
+        let nudge = forced_reply_after_duplicate_tools_nudge(round.user_task, round.tool_calls);
+        persist_harness_nudge(round.store, round.session_id, round.llm_messages, &nudge).await?;
+        emit_progress(
+            round.progress,
+            ChatProgress::DuplicateToolBlocked {
+                tool_name: call.name.clone(),
+                args_short: format_tool_args_short(&call.args),
+                attempt: round
+                    .duplicate_tool_nudges
+                    .get(&call.fingerprint)
+                    .copied()
+                    .unwrap_or(2)
+                    .saturating_add(1),
+            },
+        );
+        tracing::warn!(
+            "duplicate {}({}) — stopping turn after forced-reply nudge ignored",
+            call.name,
+            format_tool_args_short(&call.args)
+        );
+        return Ok(true);
+    }
+
     if block == DuplicateToolBlock::AlreadySucceeded
         && crate::agent::review_gate::is_review_gated_tool(&call.name)
     {
-        if !*round.duplicate_forced_reply_nudged {
-            *round.duplicate_forced_reply_nudged = true;
-        }
+        *round.duplicate_forced_reply_nudged = true;
         let nudge = forced_reply_after_duplicate_tools_nudge(round.user_task, round.tool_calls);
         return harness_retry_or_stop(
             round.harness_corrections,
@@ -427,10 +457,8 @@ pub(crate) async fn maybe_block_duplicate_tool_call(
         );
     }
     if *nudge_count >= 2 {
-        if !*round.duplicate_forced_reply_nudged {
-            *round.duplicate_forced_reply_nudged = true;
-            round.duplicate_tool_nudges.remove(&call.fingerprint);
-        }
+        *round.duplicate_forced_reply_nudged = true;
+        round.duplicate_tool_nudges.remove(&call.fingerprint);
         let nudge = forced_reply_after_duplicate_tools_nudge(round.user_task, round.tool_calls);
         return harness_retry_or_stop(
             round.harness_corrections,

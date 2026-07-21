@@ -401,9 +401,7 @@ impl ChatProgress {
                 let preview = truncate_chars(question, 80);
                 format!("  ❓ ask_user: {preview}")
             }
-            Self::UserAnswerResolved {
-                answer_preview, ..
-            } => {
+            Self::UserAnswerResolved { answer_preview, .. } => {
                 format!("  ✓ user answered: {answer_preview}")
             }
             Self::ReasoningCompressing => "  … summarizing reasoning".into(),
@@ -988,9 +986,7 @@ pub async fn run_chat_turn(
         } else {
             Uuid::nil()
         };
-        let history = store
-            .list_chat_messages(&session.id, usize::MAX)
-            .await?;
+        let history = store.list_chat_messages(&session.id, usize::MAX).await?;
         let fork_parent = if user_msg_id != Uuid::nil() {
             user_msg_id
         } else {
@@ -1147,6 +1143,10 @@ pub async fn run_chat_turn(
     );
     prune_stale_missing_arg_nudges(&mut llm_messages);
 
+    let approved_resume_seed = resume.as_ref().and_then(|r| {
+        r.approved
+            .then(|| (r.tool_name.clone(), r.tool_args.clone()))
+    });
     if let Some(resume) = resume {
         apply_approval_resolution(
             store.as_ref(),
@@ -1176,7 +1176,18 @@ pub async fn run_chat_turn(
     let mut tools_used = 0u32;
     // Duplicate guard is scoped to this user-message turn only. Do not rehydrate from
     // session history — PR/CI snapshots go stale after pushes and users re-fetch.
+    // Exception: after human approval resume, seed the just-approved call so the model
+    // cannot immediately re-queue the same mutating tool (infinite approval / harness loop).
     let mut tool_exec_records: HashMap<String, ToolExecRecord> = HashMap::new();
+    if let Some((tool_name, tool_args)) = approved_resume_seed {
+        tool_exec_records.insert(
+            tool_call_fingerprint(&tool_name, &tool_args),
+            ToolExecRecord {
+                succeeded: true,
+                fail_count: 0,
+            },
+        );
+    }
     let mut duplicate_tool_nudges: HashMap<String, u32> = HashMap::new();
     let mut duplicate_ui_shown: HashSet<String> = HashSet::new();
     let mut duplicate_forced_reply_nudged = false;
@@ -1653,7 +1664,9 @@ from tool results already in context.";
                         discovery: discovery.clone(),
                     };
                     let auto_fulfill = block == DuplicateToolBlock::AlreadySucceeded
-                        && (call.name == "skill_load" || prepared.len() == 1);
+                        && (call.name == "skill_load"
+                            || prepared.len() == 1
+                            || crate::agent::review_gate::is_review_gated_tool(&call.name));
                     if auto_fulfill
                         && fulfill_duplicate_readonly_tool(&mut round, &step, &call, &prepared)
                             .await?
@@ -1668,15 +1681,13 @@ from tool results already in context.";
 
                 push_native_assistant_tool_calls(&mut llm_messages, &step);
 
-                let (mut readonly, mut mutating, mut ask_user_calls): (
-                    Vec<_>,
-                    Vec<_>,
-                    Vec<_>,
-                ) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut readonly, mut mutating, mut ask_user_calls): (Vec<_>, Vec<_>, Vec<_>) =
+                    (Vec::new(), Vec::new(), Vec::new());
                 for call in prepared {
                     if is_ask_user_tool(&call.name) {
                         ask_user_calls.push(call);
-                    } else if is_mutating_tool(&call.name) || mcp.is_mcp_mutating(&call.name).await {
+                    } else if is_mutating_tool(&call.name) || mcp.is_mcp_mutating(&call.name).await
+                    {
                         mutating.push(call);
                     } else {
                         readonly.push(call);
@@ -1684,10 +1695,7 @@ from tool results already in context.";
                 }
 
                 if let Some(ask_call) = ask_user_calls.first().cloned() {
-                    if ask_user_calls.len() > 1
-                        || !readonly.is_empty()
-                        || !mutating.is_empty()
-                    {
+                    if ask_user_calls.len() > 1 || !readonly.is_empty() || !mutating.is_empty() {
                         tracing::warn!(
                             "ask_user must run alone; ignoring {} other tool_call(s) in the same round",
                             ask_user_calls.len().saturating_sub(1)
@@ -1697,10 +1705,7 @@ from tool results already in context.";
                     }
                     // Providers require every tool_calls[].id to get a tool result.
                     // Keep only ask_user on the assistant message we just pushed.
-                    retain_only_tool_call_on_last_assistant(
-                        &mut llm_messages,
-                        &ask_call.id,
-                    );
+                    retain_only_tool_call_on_last_assistant(&mut llm_messages, &ask_call.id);
                     let ask_step = ChatAgentStep {
                         action: step.action,
                         message: step.message.clone(),
@@ -2116,9 +2121,7 @@ pub(crate) async fn append_message_parented(
     let mut session = store
         .get_chat_session(session_id)
         .await?
-        .ok_or_else(|| {
-            CoworkerError::Store(format!("unknown chat session {session_id}"))
-        })?;
+        .ok_or_else(|| CoworkerError::Store(format!("unknown chat session {session_id}")))?;
     let parent = parent_message_id.or(session.active_leaf_message_id);
     let id = Uuid::new_v4();
     store
@@ -2252,7 +2255,11 @@ async fn apply_approval_resolution(
         msg.content = ctx.clone();
     } else {
         let call_id = llm_messages.iter().rev().find_map(|m| {
-            m.tool_calls.as_ref()?.iter().find(|c| c.name == *tool_name).map(|c| c.id.clone())
+            m.tool_calls
+                .as_ref()?
+                .iter()
+                .find(|c| c.name == *tool_name)
+                .map(|c| c.id.clone())
         });
         llm_messages.push(LlmTurnMessage::tool_result_with_id(call_id, tool_name, ctx));
     }
@@ -2498,11 +2505,7 @@ fn autofill_pr_from_task(user_task: &str, tool_name: &str, tool_args: &mut Value
 }
 
 /// Normalize/coerce business tool args (direct call or nested under `tool_call`).
-pub(crate) fn finalize_tool_args(
-    tool_name: &str,
-    tool_args: &mut Value,
-    user_task: &str,
-) {
+pub(crate) fn finalize_tool_args(tool_name: &str, tool_args: &mut Value, user_task: &str) {
     if tool_name == "tool_call" {
         if let Some(inner) = tool_args
             .get("name")

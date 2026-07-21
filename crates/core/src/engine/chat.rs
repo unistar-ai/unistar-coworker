@@ -297,9 +297,11 @@ async fn pending_ask_user_resume(
     answer: &str,
 ) -> Result<Option<ResumeChatAfterUserAnswer>> {
     let history = store.list_chat_messages(&session_id, 10_000).await?;
-    let Some(pending) = history.iter().rev().find(|m| {
-        m.role == ChatRole::Tool && is_tool_user_question_pending_transcript(&m.content)
-    }) else {
+    let Some(pending) = history
+        .iter()
+        .rev()
+        .find(|m| m.role == ChatRole::Tool && is_tool_user_question_pending_transcript(&m.content))
+    else {
         return Ok(None);
     };
     // Only resume if nothing newer than the pending question (no later user/assistant).
