@@ -3,13 +3,14 @@ import { useStore } from "../../store/wsStore";
 import { apiPost } from "../../lib/api";
 import EmptyState from "../../components/EmptyState";
 import ChatHistory from "./ChatHistory";
-import LiveZone, { useLiveZoneActive } from "./LiveZone";
-import LiveDivider from "./LiveDivider";
 import ContextPanel from "./ContextPanel";
 import SessionPicker from "./SessionPicker";
-import { PanelRightOpen, Search, Download, Trash2, ChevronUp, ChevronDown, ArrowDown, MessageSquareOff } from "lucide-react";
+import { useChatUiStore } from "../../store/chatUiStore";
+import { PanelRightOpen, Search, Download, Trash2, ChevronUp, ChevronDown, ArrowDown, MessageSquareOff, MessageSquare, MessageCircleQuestion, FileCode2 } from "lucide-react";
 import {
   buildChatBlocks,
+  groupIntoTurns,
+  trimInFlightHistoryItems,
   messageStatsFromBlocks,
   formatMessageCount,
 } from "./parser";
@@ -36,14 +37,48 @@ export default function ChatTab() {
   const chatLines = useStore((s) => s.chat_lines);
   const outputs = useStore((s) => s.chat_tool_outputs);
   const reasoningOriginals = useStore((s) => s.chat_reasoning_originals);
+  const chatOlderAvailable = useStore((s) => s.chat_older_available);
   const autoApprove = useStore((s) => s.auto_approve_mutations);
-  const chatTurnPhase = useStore((s) => s.chat_turn_phase);
   const awaitingUserAnswer = useStore((s) => !!s.chat_pending_user_question);
 
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const loadOlderMessages = async () => {
+    if (loadingOlder || chatBusy) return;
+    const el = scrollRef.current;
+    const anchorKey =
+      el?.querySelector<HTMLElement>("[data-block-key]")?.getAttribute("data-block-key") || "";
+    const prevHeight = el?.scrollHeight ?? 0;
+    const prevTop = el?.scrollTop ?? 0;
+    setLoadingOlder(true);
+    try {
+      await apiPost("/api/chat/load-older");
+      requestAnimationFrame(() => {
+        const scroller = scrollRef.current;
+        if (!scroller) return;
+        const delta = scroller.scrollHeight - prevHeight;
+        if (delta > 0) {
+          scroller.scrollTop = prevTop + delta;
+          return;
+        }
+        if (anchorKey) {
+          const node = scroller.querySelector<HTMLElement>(
+            `[data-block-key="${CSS.escape(anchorKey)}"]`,
+          );
+          node?.scrollIntoView({ block: "start" });
+        }
+      });
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
   const [stickBottom, setStickBottom] = useState(true);
-  const liveActive = useLiveZoneActive();
   const isMobile = useIsMobile();
+  const userMessageStyle = useChatUiStore((s) => s.userMessageStyle);
+  const toggleUserMessageStyle = useChatUiStore((s) => s.toggleUserMessageStyle);
+  const toolMarkdown = useChatUiStore((s) => s.toolMarkdown);
+  const toggleToolMarkdown = useChatUiStore((s) => s.toggleToolMarkdown);
 
   // Esc cancels generation when busy.
   useEffect(() => {
@@ -91,19 +126,52 @@ export default function ChatTab() {
       }
     }
     return built;
-  }, [chatLines, outputs]);
+  }, [chatLines, outputs, reasoningOriginals]);
+  const items = useMemo(() => {
+    const grouped = groupIntoTurns(blocks);
+    return trimInFlightHistoryItems(grouped, chatBusy);
+  }, [blocks, chatBusy]);
   const stats = useMemo(() => messageStatsFromBlocks(blocks), [blocks]);
   const countLabel = formatMessageCount(stats);
 
-  // Ordered list of block keys that match the search query.
+  const itemKey = (item: (typeof items)[number]) =>
+    item.type === "block" ? item.block.key : item.turn.key;
+
+  const searchTextForItem = (item: (typeof items)[number]): string => {
+    if (item.type === "block") {
+      const b = item.block;
+      const parts = [b.message?.body || b.reasoningText || ""];
+      if (b.type === "tool-group" && b.group) {
+        parts.push(b.group.toolName, b.group.args || "");
+        for (const s of b.group.steps) {
+          if (s.output) parts.push(s.output);
+        }
+      }
+      return parts.join("\n");
+    }
+    const parts: string[] = [];
+    if (item.turn.user?.message?.body) parts.push(item.turn.user.message.body);
+    for (const b of item.turn.process) {
+      parts.push(b.message?.body || b.reasoningText || "");
+      if (b.type === "tool-group" && b.group) {
+        parts.push(b.group.toolName, b.group.args || "");
+        for (const s of b.group.steps) {
+          if (s.output) parts.push(s.output);
+        }
+      }
+    }
+    if (item.turn.answer?.message?.body) parts.push(item.turn.answer.message.body);
+    return parts.join("\n");
+  };
+
+  // Ordered list of item keys that match the search query.
   const searchMatchKeys = useMemo(() => {
     if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase();
-    return blocks.filter((b) => {
-      const text = b.message?.body || b.reasoningText || "";
-      return text.toLowerCase().includes(q);
-    }).map((b) => b.key);
-  }, [blocks, searchQuery]);
+    return items
+      .filter((item) => searchTextForItem(item).toLowerCase().includes(q))
+      .map(itemKey);
+  }, [items, searchQuery]);
 
   const activeMatchKey = searchMatchKeys[activeMatchIdx] || "";
 
@@ -127,7 +195,6 @@ export default function ChatTab() {
     );
   }
 
-  const phaseLabel = PHASE_LABELS[chatTurnPhase || ""] || (chatBusy ? "Working" : "");
   const hasHistory = chatLines.length > 0;
 
   const scrollToBottom = () => {
@@ -157,13 +224,13 @@ export default function ChatTab() {
       <div className={`chat-layout ${showContextPanel ? "" : "no-context"}`}>
         <div className="messages-pane">
           <div className="messages-header">
-            <span className="messages-title">Messages</span>
+            <span className="messages-title">消息</span>
             {autoApprove && (
               <span
                 className="auto-approve-badge"
-                title="Mutating GitHub and MCP tools run without confirmation"
+                title="变更类 GitHub / MCP 工具将跳过确认直接执行"
               >
-                Auto-approve ON — mutating tools run without confirmation
+                自动批准
               </span>
             )}
             <SessionPicker />
@@ -173,30 +240,62 @@ export default function ChatTab() {
             <div className="messages-header-actions">
               <button
                 type="button"
+                className={`btn-header-action btn-header-layout${userMessageStyle === "bubble" ? " is-active" : ""}`}
+                onClick={toggleUserMessageStyle}
+                title={
+                  userMessageStyle === "bubble"
+                    ? "用户消息：气泡模式（点击切换为平铺）"
+                    : "用户消息：平铺模式（点击切换为气泡）"
+                }
+                aria-pressed={userMessageStyle === "bubble"}
+              >
+                <MessageSquare size={14} className="btn-header-icon" />
+                <span className="btn-header-label">
+                  {userMessageStyle === "bubble" ? "气泡" : "平铺"}
+                </span>
+              </button>
+              <button
+                type="button"
+                className={`btn-header-action btn-header-tool-md${toolMarkdown ? " is-active" : ""}`}
+                onClick={toggleToolMarkdown}
+                title={
+                  toolMarkdown
+                    ? "工具结果：Markdown 渲染（点击切换为原文）"
+                    : "工具结果：原文（点击切换为 Markdown 渲染）"
+                }
+                aria-pressed={toolMarkdown}
+              >
+                <FileCode2 size={14} className="btn-header-icon" />
+                <span className="btn-header-label">
+                  {toolMarkdown ? "MD" : "原文"}
+                </span>
+              </button>
+              <button
+                type="button"
                 className="btn-header-action btn-header-search"
                 onClick={() => setSearchOpen((v) => !v)}
-                title="Search in chat (Ctrl/Cmd+F)"
+                title="搜索对话（Ctrl/Cmd+F）"
               >
                 <Search size={14} className="btn-header-icon" />
-                <span className="btn-header-label">Search</span>
+                <span className="btn-header-label">搜索</span>
               </button>
               <button
                 type="button"
                 className={`btn-header-action btn-header-export${hasHistory ? "" : " hidden"}`}
                 onClick={() => void apiFetchDownload("/api/chat/export")}
-                title="Export transcript"
+                title="导出记录"
               >
                 <Download size={14} className="btn-header-icon" />
-                <span className="btn-header-label">Export</span>
+                <span className="btn-header-label">导出</span>
               </button>
               <button
                 type="button"
                 className={`btn-header-action btn-header-clear${!hasHistory || chatBusy ? " hidden" : ""}`}
                 onClick={() => void apiPost("/api/chat/clear")}
-                title="Clear session"
+                title="清空会话"
               >
                 <Trash2 size={14} className="btn-header-icon" />
-                <span className="btn-header-label">Clear</span>
+                <span className="btn-header-label">清空</span>
               </button>
               {!contextVisible && (
                 <button
@@ -205,18 +304,10 @@ export default function ChatTab() {
                   onClick={() =>
                     void apiPost("/api/chat/context", { visible: true })
                   }
-                  title="Show context panel"
+                  title="显示上下文面板"
                 >
-                  Context
+                  上下文
                 </button>
-              )}
-              {chatBusy && phaseLabel && (
-                <span
-                  className={`messages-live phase-${chatTurnPhase || "model"}`}
-                >
-                  <span className="live-dot" aria-hidden="true" />
-                  {phaseLabel}
-                </span>
               )}
             </div>
           </div>
@@ -225,7 +316,7 @@ export default function ChatTab() {
               <input
                 type="text"
                 className="chat-search-input"
-                placeholder="Search in chat…"
+                placeholder="搜索对话…"
                 value={searchQuery}
                 autoFocus
                 onChange={(e) => {
@@ -252,8 +343,8 @@ export default function ChatTab() {
                     type="button"
                     className="chat-search-nav"
                     onClick={prevMatch}
-                    aria-label="Previous match"
-                    title="Previous (Shift+Enter)"
+                    aria-label="上一个匹配"
+                    title="上一个（Shift+Enter）"
                   >
                     <ChevronUp size={14} />
                   </button>
@@ -261,15 +352,15 @@ export default function ChatTab() {
                     type="button"
                     className="chat-search-nav"
                     onClick={nextMatch}
-                    aria-label="Next match"
-                    title="Next (Enter)"
+                    aria-label="下一个匹配"
+                    title="下一个（Enter）"
                   >
                     <ChevronDown size={14} />
                   </button>
                 </>
               )}
               {searchQuery && searchMatchKeys.length === 0 && (
-                <span className="chat-search-count">No matches</span>
+                <span className="chat-search-count">无匹配</span>
               )}
               <button
                 type="button"
@@ -285,8 +376,21 @@ export default function ChatTab() {
           )}
           <div ref={scrollRef} className="messages">
             <div className="msg-history">
+              {chatOlderAvailable && !chatBusy && (
+                <div className="chat-load-older-banner">
+                  <span>较早的消息未显示</span>
+                  <button
+                    type="button"
+                    className="chat-load-older-btn"
+                    disabled={loadingOlder}
+                    onClick={() => void loadOlderMessages()}
+                  >
+                    {loadingOlder ? "加载中…" : "加载更早消息"}
+                  </button>
+                </div>
+              )}
               <ChatHistory
-                blocks={blocks}
+                items={items}
                 scrollRef={scrollRef}
                 stickBottom={stickBottom}
                 onStickBottomChange={setStickBottom}
@@ -294,15 +398,13 @@ export default function ChatTab() {
                 activeMatchKey={activeMatchKey}
               />
             </div>
-            <LiveDivider visible={liveActive} />
-            <LiveZone />
           </div>
           <button
             type="button"
             onClick={scrollToBottom}
             className={`scroll-fab${stickBottom ? " hidden" : ""}`}
-            aria-label="Scroll to bottom"
-            title="Scroll to bottom"
+            aria-label="回到底部"
+            title="回到底部"
           >
             <ArrowDown size={16} />
           </button>
@@ -313,11 +415,11 @@ export default function ChatTab() {
             type="button"
             onClick={openMobileCtx}
             className={`ctx-fab${isMobile && !mobileDrawerOpen ? "" : " hidden"}`}
-            aria-label="Open context panel"
-            title="Open context panel"
+            aria-label="打开上下文面板"
+            title="打开上下文面板"
           >
             <PanelRightOpen size={14} aria-hidden="true" />
-            Context
+            上下文
           </button>
         </div>
         {showContextPanel && (
@@ -335,12 +437,13 @@ function AskUserBanner() {
   const pending = useStore((s) => s.chat_pending_user_question);
   const chatBusy = useStore((s) => s.chat_busy);
   const [custom, setCustom] = useState("");
+  const [sending, setSending] = useState(false);
   const customRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setCustom("");
+    setSending(false);
     if (pending) {
-      // Focus custom field so users can type immediately.
       requestAnimationFrame(() => customRef.current?.focus());
     }
   }, [pending?.id]);
@@ -349,77 +452,81 @@ function AskUserBanner() {
 
   const submit = (answer: string) => {
     const msg = answer.trim();
-    if (!msg) return;
-    void apiPost("/api/chat", { message: msg });
+    if (!msg || sending) return;
+    setSending(true);
+    void apiPost("/api/chat", { message: msg }).finally(() => setSending(false));
     setCustom("");
   };
 
+  const hasOptions = pending.options.length > 0;
+
   return (
-    <div className="ask-user-banner" role="status">
-      <div className="ask-user-banner-label">Agent is asking</div>
-      <div className="ask-user-banner-question">{pending.question}</div>
-      {pending.context ? (
-        <div className="ask-user-banner-context">{pending.context}</div>
-      ) : null}
-      {pending.options.length > 0 ? (
-        <div className="ask-user-banner-options" role="group" aria-label="Suggested answers">
-          {pending.options.map((opt) => (
+    <div className="ask-user-banner" role="region" aria-label="助手提问">
+      <div className="ask-user-banner-inner">
+        <div className="ask-user-card">
+          <div className="ask-user-card-head">
+            <span className="ask-user-card-icon" aria-hidden="true">
+              <MessageCircleQuestion size={18} strokeWidth={2} />
+            </span>
+            <div className="ask-user-card-head-text">
+              <div className="ask-user-banner-label">需要你的回答</div>
+              <div className="ask-user-banner-question">{pending.question}</div>
+            </div>
+          </div>
+
+          {pending.context ? (
+            <div className="ask-user-banner-context">{pending.context}</div>
+          ) : null}
+
+          {hasOptions ? (
+            <div className="ask-user-banner-options" role="group" aria-label="建议回答">
+              {pending.options.map((opt, i) => (
+                <button
+                  key={opt}
+                  type="button"
+                  className="ask-user-option"
+                  disabled={sending}
+                  onClick={() => submit(opt)}
+                >
+                  <span className="ask-user-option-idx" aria-hidden="true">
+                    {i + 1}
+                  </span>
+                  <span className="ask-user-option-text">{opt}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <form
+            className="ask-user-custom"
+            onSubmit={(e) => {
+              e.preventDefault();
+              submit(custom);
+            }}
+          >
+            <input
+              ref={customRef}
+              type="text"
+              className="ask-user-custom-input"
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+              disabled={sending}
+              placeholder={hasOptions ? "或输入自定义回答…" : "输入你的回答…"}
+              aria-label="自定义回答"
+            />
             <button
-              key={opt}
-              type="button"
-              className="ask-user-option"
-              onClick={() => submit(opt)}
+              type="submit"
+              className="btn btn-primary ask-user-custom-send"
+              disabled={sending || !custom.trim()}
             >
-              {opt}
+              发送
             </button>
-          ))}
+          </form>
         </div>
-      ) : null}
-      <form
-        className="ask-user-custom"
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit(custom);
-        }}
-      >
-        <input
-          ref={customRef}
-          type="text"
-          className="ask-user-custom-input"
-          value={custom}
-          onChange={(e) => setCustom(e.target.value)}
-          placeholder={
-            pending.options.length > 0
-              ? "Or type a custom answer…"
-              : "Type your answer…"
-          }
-          aria-label="Custom answer"
-        />
-        <button
-          type="submit"
-          className="btn btn-primary ask-user-custom-send"
-          disabled={!custom.trim()}
-        >
-          Send
-        </button>
-      </form>
-      {pending.options.length > 0 ? (
-        <div className="ask-user-banner-hint">
-          Pick an option above, or enter a custom answer.
-        </div>
-      ) : null}
+      </div>
     </div>
   );
 }
-
-const PHASE_LABELS: Record<string, string> = {
-  model: "Thinking",
-  tool: "Running tool",
-  streaming: "Writing reply",
-  reasoning: "Reasoning",
-  summarizing: "Summarizing context",
-  activity: "Loading skills",
-};
 
 async function apiFetchDownload(url: string) {
   try {
@@ -500,36 +607,39 @@ function ChatInput({ busy }: { busy: boolean }) {
 
   return (
     <div className="chat-input">
-      <textarea
-        ref={taRef}
-        data-chat-input
-        value={draft}
-        onChange={onInput}
-        onKeyDown={onKeyDown}
-        disabled={busy}
-        placeholder={
-          busy
-            ? "Waiting for model…"
-            : "Message… (Enter newline · Shift+Enter send · /help)"
-        }
-        rows={1}
-      />
-      <button
-        type="button"
-        className="btn btn-primary"
-        onClick={send}
-        disabled={busy || !draft.trim()}
-      >
-        Send
-      </button>
-      <button
-        type="button"
-        className="btn btn-ghost btn-cancel"
-        onClick={() => void apiPost("/api/chat/cancel")}
-        disabled={!busy}
-      >
-        Cancel
-      </button>
+      <div className="chat-input-inner">
+        <textarea
+          ref={taRef}
+          data-chat-input
+          value={draft}
+          onChange={onInput}
+          onKeyDown={onKeyDown}
+          disabled={busy}
+          placeholder={
+            busy
+              ? "等待模型回复…"
+              : "输入消息…（Enter 换行 · Shift+Enter 发送 · /help）"
+          }
+          rows={1}
+        />
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={send}
+          disabled={busy || !draft.trim()}
+        >
+          发送
+        </button>
+        {busy && (
+          <button
+            type="button"
+            className="btn btn-ghost btn-cancel"
+            onClick={() => void apiPost("/api/chat/cancel")}
+          >
+            取消
+          </button>
+        )}
+      </div>
     </div>
   );
 }

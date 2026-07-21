@@ -36,10 +36,13 @@ RUN apt-get update \
 COPY --from=builder /build/target/release/unistar-coworker /usr/local/bin/unistar-coworker
 
 WORKDIR /app
-COPY skills ./skills
-COPY packaging/workdir-template ./template
-COPY docs ./docs
-COPY README.md README_CN.md QUICKSTART.md QUICKSTART_CN.md coworker.example.yaml coworker.minimal.yaml ./
+COPY skills ./.coworker/skills
+COPY packaging/workdir-template ./.coworker/template
+COPY packaging/workdir-template/coworker.yaml ./.coworker/coworker.yaml
+COPY packaging/workdir-template/AGENTS.md ./.coworker/AGENTS.md
+COPY docs ./.coworker/docs
+COPY README.md README_CN.md QUICKSTART.md QUICKSTART_CN.md \
+     coworker.example.yaml coworker.minimal.yaml ./.coworker/
 
 EXPOSE 8787
 ENTRYPOINT ["/usr/local/bin/unistar-coworker"]

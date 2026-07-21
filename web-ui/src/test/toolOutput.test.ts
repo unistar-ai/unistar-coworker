@@ -7,7 +7,10 @@ import {
   tryPrettyJson,
   looksLikeBashOutput,
   collapseLongOutput,
+  ToolStepOutput,
 } from "../tabs/chat/toolOutput";
+import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
 
 describe("collapseLongOutput", () => {
   it("keeps head and tail with an omission marker", () => {
@@ -100,5 +103,92 @@ describe("tryPrettyJson", () => {
   });
   it("returns the original text on invalid JSON", () => {
     expect(tryPrettyJson("{not json")).toBe("{not json");
+  });
+});
+
+describe("ToolStepOutput", () => {
+  it("strips tool_result envelope and renders skill markdown body", () => {
+    const content = `tool_result(skill_load):
+args: {
+  "name": "gh-cli"
+}
+
+### gh-cli
+# GitHub CLI (gh)`;
+    const html = renderToStaticMarkup(
+      createElement(ToolStepOutput, {
+        output: content,
+        outputKey: "t1",
+        toolName: "skill_load",
+        inline: true,
+        preferMarkdown: true,
+      }),
+    );
+    expect(html).not.toContain("tool_result(skill_load)");
+    expect(html).not.toContain('"name": "gh-cli"');
+    expect(html).toContain("GitHub CLI (gh)");
+    expect(html).toContain("tool-output-markdown");
+  });
+
+  it("renders markdown tool body as plain pre when toolMarkdown is off", () => {
+    const content = `tool_result(skill_load):
+args: {"name":"gh-cli"}
+
+### gh-cli
+# GitHub CLI (gh)`;
+    const html = renderToStaticMarkup(
+      createElement(ToolStepOutput, {
+        output: content,
+        outputKey: "t1b",
+        toolName: "skill_load",
+        inline: true,
+        preferMarkdown: false,
+      }),
+    );
+    expect(html).not.toContain("tool-output-markdown");
+    expect(html).toContain("tool-output");
+    expect(html).toContain("GitHub CLI (gh)");
+  });
+
+  it("renders bash stdout without review/cwd noise", () => {
+    const content = `tool_result(bash_run):
+args: {"command":"ls"}
+
+review: APPROVE (AUTO)
+cwd: /tmp
+exit: 0 (5ms)
+
+stdout:
+README.md`;
+    const html = renderToStaticMarkup(
+      createElement(ToolStepOutput, {
+        output: content,
+        outputKey: "t2",
+        toolName: "bash_run",
+        inline: true,
+      }),
+    );
+    expect(html).not.toContain("tool_result");
+    expect(html).not.toContain("review:");
+    expect(html).toContain("README.md");
+    expect(html).toContain("exit 0");
+  });
+
+  it("renders read_file with line numbers", () => {
+    const content = `tool_result(read_file):
+args: {"path":"a.ts"}
+
+1|const x = 1
+2|const y = 2`;
+    const html = renderToStaticMarkup(
+      createElement(ToolStepOutput, {
+        output: content,
+        outputKey: "t3",
+        toolName: "read_file",
+        inline: true,
+      }),
+    );
+    expect(html).toContain("tool-read-file-ln");
+    expect(html).toContain("const x = 1");
   });
 });

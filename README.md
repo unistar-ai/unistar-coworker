@@ -328,7 +328,7 @@ Implemented in [`crates/core/src/github/harness.rs`](./crates/core/src/github/ha
 
 ## Configuration
 
-`coworker.yaml` loads from the current directory or `~/.config/unistar-coworker/coworker.yaml` (both gitignored). Start from [coworker.example.yaml](./coworker.example.yaml).
+`coworker.yaml` loads from `.coworker/coworker.yaml` (preferred) or the current directory (both gitignored). Start from [coworker.example.yaml](./coworker.example.yaml).
 
 ```yaml
 # Named LLM presets — switch at runtime (Web Config / RPC / sidecar coworker.llm-profile)
@@ -397,7 +397,7 @@ The default backend is JSON under `./data` (gitignored). For long-running `serve
 ```yaml
 storage:
   backend: sqlite
-  path: ./data/coworker.db
+  path: .coworker/data/coworker.db
 ```
 
 Migrate an existing JSON store:
@@ -635,7 +635,7 @@ unistar-coworker/
 ├── docs/RPC.md              # JSONL rpc mode protocol
 ├── packaging/
 │   ├── README.md            # packaging overview
-│   └── workdir-template/    # deploy seed (coworker.yaml) copied to runtime workdir
+│   └── workdir-template/    # deploy seed (coworker.yaml) copied to runtime .coworker/
 ├── scripts/
 │   └── package.sh           # build web-ui + binary, refresh workdir (packaging)
 ├── skills/                  # Technique skills (SKILL.md) + _base/TOOLS.md SSOT

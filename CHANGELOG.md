@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deploy / runtime layout mirrors `.claude`: config, skills, data, and docs live under `.coworker/`; binary stays at the workdir root. `Config::discover` prefers `.coworker/coworker.yaml`; `init` defaults there. Packaging (`scripts/package.sh`) and Docker image follow the same layout; legacy flat `coworker.yaml` / `skills/` / `data/` still resolve.
 - Missing GitHub `repo` / `pr_number`: harness nudges and `prompts/chat.md` tell the model to **ask the user** instead of inventing values or retrying empty calls.
 - Empty states / QUICKSTART: prefer “agent will ask” over requiring the user to pre-supply `owner/repo`.
 

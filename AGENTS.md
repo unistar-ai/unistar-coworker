@@ -105,7 +105,7 @@ Default store backend is JSON under `./data` (gitignored). SQLite backend and `s
 ## Configuration
 
 - Example: [`coworker.example.yaml`](./coworker.example.yaml).
-- Loaded from cwd or `~/.config/unistar-coworker/coworker.yaml` (see [`crates/core/src/config.rs`](./crates/core/src/config.rs)).
+- Loaded from `.coworker/coworker.yaml` (preferred) or cwd `coworker.yaml` (see [`crates/core/src/config.rs`](./crates/core/src/config.rs)).
 - Key knobs: `llm.context_limit` (64K), `chat.tool_mode` (`auto` for 25B+), `chat.max_turns`, `chat.max_tool_calls`, `policy.auto_rerun_flaky`, `github:`, `mcp.servers[]`. See [docs/local-models.md](./docs/local-models.md).
 
 ---

@@ -25,6 +25,7 @@ describe("Markdown", () => {
   it("renders a GFM table", () => {
     const md = "| a | b |\n| --- | --- |\n| 1 | 2 |";
     const { container } = render(<Markdown>{md}</Markdown>);
+    expect(container.querySelector(".md-table-wrap")).not.toBeNull();
     expect(container.querySelector("table")).not.toBeNull();
     expect(container.querySelectorAll("th").length).toBe(2);
   });

@@ -1,30 +1,55 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Copy, Check, RefreshCw, MessageSquare, ChevronRight } from "lucide-react";
+import { MessageSquare, ChevronRight } from "lucide-react";
 import Markdown from "../../components/Markdown";
 import ReasoningCard from "../../components/ReasoningCard";
 import EmptyState from "../../components/EmptyState";
 import { useStore } from "../../store/wsStore";
-import { apiPost } from "../../lib/api";
-import { toolMeta, parseToolArgsString, formatToolArgValue, normalizeReasoningText, reasoningHasDistinctOriginal } from "./parser";
-import { ToolOutputView } from "./toolOutput";
+import { toolMeta, normalizeReasoningText, reasoningHasDistinctOriginal, isInFlightUserTurn } from "./parser";
+import { ToolStepOutput } from "./toolOutput";
+import ToolDetailBody from "./ToolDetailBody";
 import type {
   ChatBlock,
   ChatMessage,
+  ChatHistoryItem,
   ToolStep,
   ToolGroup,
   ToolStepKind,
 } from "./parser";
+import AgentTurnCard, {
+  type BlockRendererProps,
+  TurnMessageBody,
+  UserTurnView,
+  ChatSearchQueryContext,
+  AgentMessageActions,
+} from "./AgentTurnCard";
+import MessageTurnFrame from "./MessageTurnFrame";
+import LiveZone from "./LiveZone";
+import {
+  pickToolRowSubtitle,
+  toolCollapsedSummary,
+  toolRowTitle,
+} from "./toolDisplay";
+import ErrorMessageBody from "./ErrorMessageBody";
+import {
+  estimateItemSize,
+  isNewUserTurn,
+  itemKey,
+  scrollItemIntoView,
+  VIRTUAL_OVERSCAN,
+  VIRTUAL_THRESHOLD,
+} from "./chatScroll";
+import { useChatScrollOrchestrator } from "./useChatScrollOrchestrator";
 
 export default function ChatHistory({
-  blocks,
+  items,
   scrollRef,
   stickBottom,
   onStickBottomChange,
   searchQuery = "",
   activeMatchKey = "",
 }: {
-  blocks: ChatBlock[];
+  items: ChatHistoryItem[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
   stickBottom: boolean;
   onStickBottomChange?: (stick: boolean) => void;
@@ -33,8 +58,18 @@ export default function ChatHistory({
 }) {
   const chatBusy = useStore((s) => s.chat_busy);
   const chatStreaming = useStore((s) => s.chat_streaming);
+  const chatTurnParts = useStore((s) => s.chat_turn_parts);
   const mcpServers = useStore((s) => s.mcp_servers);
   const prevCountRef = useRef(0);
+  const {
+    spacerPx,
+    pinTo,
+    releasePin,
+    pinnedKeyRef,
+    userScrollRef,
+    notifyContentChange,
+    scrollToBottom,
+  } = useChatScrollOrchestrator({ scrollRef, stickBottom, onStickBottomChange });
 
   const mcpPrefixes = useMemo(
     () => mcpServers.map((s) => ({ id: s.id, prefix: s.prefix || `${s.id}_` })),
@@ -44,86 +79,141 @@ export default function ChatHistory({
   // Track which block keys existed on the previous render so we can flag newly
   // appended blocks with an entrance animation. Only newly-appended (not
   // historically replayed) blocks get the .is-new class.
+  const renderBlock = (props: BlockRendererProps) => (
+    <BlockRenderer {...props} />
+  );
+
   const prevKeysRef = useRef<Set<string>>(new Set());
   const newKeys = useMemo(() => {
     const prev = prevKeysRef.current;
-    const next = new Set(blocks.map((b) => b.key));
+    const next = new Set(items.map(itemKey));
     const added = new Set<string>();
     for (const k of next) {
       if (!prev.has(k)) added.add(k);
     }
     prevKeysRef.current = next;
     return added;
-  }, [blocks]);
+  }, [items]);
 
-  // Blocks matching the search query (substring on message body or reasoning text).
+  const searchTextForItem = (item: ChatHistoryItem): string => {
+    if (item.type === "block") {
+      const b = item.block;
+      const parts = [b.message?.body || b.reasoningText || ""];
+      if (b.type === "tool-group" && b.group) {
+        parts.push(b.group.toolName, b.group.args || "");
+        for (const s of b.group.steps) {
+          if (s.output) parts.push(s.output);
+        }
+      }
+      return parts.join("\n");
+    }
+    const parts: string[] = [];
+    if (item.turn.user?.message?.body) parts.push(item.turn.user.message.body);
+    for (const b of item.turn.process) {
+      parts.push(b.message?.body || b.reasoningText || "");
+      if (b.type === "tool-group" && b.group) {
+        parts.push(b.group.toolName, b.group.args || "");
+        for (const s of b.group.steps) {
+          if (s.output) parts.push(s.output);
+        }
+      }
+    }
+    if (item.turn.answer?.message?.body) parts.push(item.turn.answer.message.body);
+    return parts.join("\n");
+  };
+
   const searchMatches = useMemo(() => {
     if (!searchQuery.trim()) return new Set<string>();
     const q = searchQuery.toLowerCase();
     const matches = new Set<string>();
-    for (const b of blocks) {
-      const text = b.message?.body || b.reasoningText || "";
-      if (text.toLowerCase().includes(q)) matches.add(b.key);
+    for (const item of items) {
+      if (searchTextForItem(item).toLowerCase().includes(q)) {
+        matches.add(itemKey(item));
+      }
     }
     return matches;
-  }, [blocks, searchQuery]);
+  }, [items, searchQuery]);
 
   const virtualizer = useVirtualizer({
-    count: blocks.length,
+    count: items.length,
     getScrollElement: () => scrollRef.current,
-    getItemKey: (i) => blocks[i].key,
-    estimateSize: () => 120,
-    overscan: 8,
+    getItemKey: (i) => itemKey(items[i]),
+    estimateSize: (i) => estimateItemSize(items[i]),
+    overscan: VIRTUAL_OVERSCAN,
   });
 
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const handler = () => {
-      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      onStickBottomChange?.(gap < 80);
-    };
-    el.addEventListener("scroll", handler, { passive: true });
-    return () => el.removeEventListener("scroll", handler);
-  }, [scrollRef, onStickBottomChange]);
+    if (!chatBusy) releasePin();
+  }, [chatBusy, releasePin]);
 
-  const count = blocks.length;
+  const count = items.length;
   useEffect(() => {
-    if (count > prevCountRef.current && stickBottom) {
-      virtualizer.scrollToIndex(count - 1, { align: "end" });
+    if (count <= prevCountRef.current) {
+      prevCountRef.current = count;
+      return;
+    }
+    const lastItem = items[count - 1];
+    const lastKey = itemKey(lastItem);
+    if (isNewUserTurn(lastItem, newKeys.has(lastKey))) {
+      userScrollRef.current = false;
+      onStickBottomChange?.(false);
+      const scrollVirtual = (key: string) => {
+        const idx = items.findIndex((item) => itemKey(item) === key);
+        if (idx >= 0) virtualizer.scrollToIndex(idx, { align: "start" });
+      };
+      pinTo(lastKey, items.length >= VIRTUAL_THRESHOLD ? scrollVirtual : undefined);
+    } else if (stickBottom && !pinnedKeyRef.current) {
+      if (items.length >= VIRTUAL_THRESHOLD) {
+        virtualizer.scrollToIndex(count - 1, { align: "end" });
+      } else {
+        scrollItemIntoView(lastKey, "end");
+      }
+      scrollToBottom("instant");
     }
     prevCountRef.current = count;
-  }, [count, virtualizer, stickBottom]);
+  }, [count, items, stickBottom, newKeys, virtualizer, onStickBottomChange, pinTo, pinnedKeyRef, scrollToBottom]);
 
   useEffect(() => {
-    if (chatBusy && stickBottom && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [chatBusy, stickBottom, scrollRef]);
-
-  // Follow streaming text growth when stuck to bottom.
-  useEffect(() => {
-    if (chatStreaming && stickBottom && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [chatStreaming, stickBottom, scrollRef]);
+    if (pinnedKeyRef.current) return;
+    if (!stickBottom) return;
+    notifyContentChange();
+  }, [
+    chatBusy,
+    chatStreaming,
+    chatTurnParts,
+    stickBottom,
+    notifyContentChange,
+    pinnedKeyRef,
+    items.length,
+  ]);
 
   // Scroll to the active search match when it changes.
   useEffect(() => {
     if (!activeMatchKey) return;
-    const idx = blocks.findIndex((b) => b.key === activeMatchKey);
+    const idx = items.findIndex((item) => itemKey(item) === activeMatchKey);
     if (idx < 0) return;
-    if (blocks.length >= VIRTUAL_THRESHOLD) {
-      virtualizer.scrollToIndex(idx, { align: "center", behavior: "smooth" });
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const behavior: ScrollBehavior = reduceMotion ? "auto" : "smooth";
+    if (items.length >= VIRTUAL_THRESHOLD) {
+      virtualizer.scrollToIndex(idx, { align: "center", behavior });
     } else {
       const el = document.querySelector(`[data-block-key="${activeMatchKey}"]`);
-      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      el?.scrollIntoView({ behavior, block: "center" });
     }
   }, [activeMatchKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const VIRTUAL_THRESHOLD = 80;
-
-  if (blocks.length === 0) {
+  if (items.length === 0) {
+    if (chatBusy) {
+      return (
+        <div className="chat-block-list">
+          <div className="chat-turn">
+            <LiveZone />
+          </div>
+        </div>
+      );
+    }
     return (
       <EmptyState
         icon={MessageSquare}
@@ -133,6 +223,8 @@ export default function ChatHistory({
     );
   }
 
+  const liveNestedInLast = chatBusy && isInFlightUserTurn(items[items.length - 1]);
+
   // Short sessions: render all blocks directly (no virtualizer). This avoids
   // the estimate/measure cycle that causes blank gaps and scroll jumps when
   // markdown blocks have variable height. Virtualization only kicks in for
@@ -140,24 +232,43 @@ export default function ChatHistory({
   // NOTE: use .chat-block-list (not .messages) so we don't create a second
   // scrolling/padding container — the outer .messages in ChatTab already is
   // the scroll container with padding.
-  if (blocks.length < VIRTUAL_THRESHOLD) {
+  if (items.length < VIRTUAL_THRESHOLD) {
     return (
-      <div className="chat-block-list">
-        {blocks.map((block) => (
-          <div
-            key={block.key}
-            data-block-key={block.key}
-            className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}${searchMatches.has(block.key) ? " is-search-match" : ""}${activeMatchKey === block.key ? " is-search-active" : ""}`}
-          >
-            <BlockRenderer block={block} mcpPrefixes={mcpPrefixes} />
-          </div>
-        ))}
-      </div>
+      <ChatSearchQueryContext.Provider value={searchQuery}>
+        <div className="chat-block-list">
+          {items.map((item, index) => {
+            const key = itemKey(item);
+            const liveTail = liveNestedInLast && index === items.length - 1;
+            return (
+              <div
+                key={key}
+                data-block-key={key}
+                className={`${itemWrapClass(item)}${newKeys.has(key) ? " is-new" : ""}${searchMatches.has(key) ? " is-search-match" : ""}${activeMatchKey === key ? " is-search-active" : ""}`}
+              >
+                <HistoryItemView
+                  item={item}
+                  mcpPrefixes={mcpPrefixes}
+                  renderBlock={renderBlock}
+                  liveTail={liveTail}
+                />
+              </div>
+            );
+          })}
+          {chatBusy && !liveNestedInLast && (
+            <div className="chat-turn">
+              <LiveZone />
+            </div>
+          )}
+        </div>
+        {spacerPx > 0 && (
+          <div className="chat-scroll-pin-spacer" style={{ height: spacerPx }} aria-hidden="true" />
+        )}
+      </ChatSearchQueryContext.Provider>
     );
   }
 
   return (
-    <>
+    <ChatSearchQueryContext.Provider value={searchQuery}>
       <div
         style={{
           height: `${virtualizer.getTotalSize()}px`,
@@ -166,10 +277,12 @@ export default function ChatHistory({
         }}
       >
           {virtualizer.getVirtualItems().map((vi) => {
-            const block = blocks[vi.index];
+            const item = items[vi.index];
+            const key = itemKey(item);
+            const liveTail = liveNestedInLast && vi.index === items.length - 1;
             return (
               <div
-                key={block.key}
+                key={key}
                 data-index={vi.index}
                 ref={virtualizer.measureElement}
                 style={{
@@ -182,14 +295,57 @@ export default function ChatHistory({
                   transform: `translateY(${vi.start}px)`,
                 }}
               >
-                <div data-block-key={block.key} className={`${blockWrapClass(block)}${newKeys.has(block.key) ? " is-new" : ""}${searchMatches.has(block.key) ? " is-search-match" : ""}${activeMatchKey === block.key ? " is-search-active" : ""}`}>
-                  <BlockRenderer block={block} mcpPrefixes={mcpPrefixes} />
+                <div data-block-key={key} className={`${itemWrapClass(item)}${newKeys.has(key) ? " is-new" : ""}${searchMatches.has(key) ? " is-search-match" : ""}${activeMatchKey === key ? " is-search-active" : ""}`}>
+                  <HistoryItemView
+                    item={item}
+                    mcpPrefixes={mcpPrefixes}
+                    renderBlock={renderBlock}
+                    liveTail={liveTail}
+                  />
                 </div>
               </div>
             );
           })}
       </div>
-    </>
+      {chatBusy && !liveNestedInLast && (
+        <div className="chat-turn">
+          <LiveZone />
+        </div>
+      )}
+      {spacerPx > 0 && (
+        <div className="chat-scroll-pin-spacer" style={{ height: spacerPx }} aria-hidden="true" />
+      )}
+    </ChatSearchQueryContext.Provider>
+  );
+}
+
+function itemWrapClass(item: ChatHistoryItem): string {
+  if (item.type === "block") return blockWrapClass(item.block);
+  return "msg-block msg-block-turn";
+}
+
+function HistoryItemView({
+  item,
+  mcpPrefixes,
+  renderBlock,
+  liveTail = false,
+}: {
+  item: ChatHistoryItem;
+  mcpPrefixes: { id: string; prefix: string }[];
+  renderBlock: (props: BlockRendererProps) => React.ReactNode;
+  /** Nest LiveZone in this turn so in-flight stream continues the same chat-turn. */
+  liveTail?: boolean;
+}) {
+  if (item.type === "block") {
+    return <BlockRenderer block={item.block} mcpPrefixes={mcpPrefixes} />;
+  }
+  const { turn } = item;
+  return (
+    <div className="chat-turn">
+      {turn.user?.message && <UserTurnView msg={turn.user.message} />}
+      <AgentTurnCard turn={turn} mcpPrefixes={mcpPrefixes} renderBlock={renderBlock} />
+      {liveTail && <LiveZone />}
+    </div>
   );
 }
 
@@ -208,32 +364,71 @@ function blockWrapClass(block: ChatBlock): string {
   return "msg-block";
 }
 
-function BlockRenderer({
+export function BlockRenderer({
   block,
   mcpPrefixes,
-}: {
-  block: ChatBlock;
-  mcpPrefixes: { id: string; prefix: string }[];
-}) {
+  compact: _compact = false,
+  hideLabel = false,
+  inline = false,
+}: BlockRendererProps) {
   if (block.type === "message" && block.message) {
-    return <MessageView msg={block.message} isLastAssistant={block.isLastAssistant} />;
+    if (inline) {
+      return <TurnMessageBody msg={block.message} nested />;
+    }
+    return (
+      <MessageView
+        msg={block.message}
+        isLastAssistant={block.isLastAssistant}
+        hideLabel={hideLabel}
+      />
+    );
   }
   if (block.type === "tool-batch") {
     return <ToolBatchView block={block} mcpPrefixes={mcpPrefixes} />;
   }
   if (block.type === "tool-group" && block.group) {
-    return <ToolGroupBlockView group={block.group} mcpPrefixes={mcpPrefixes} />;
+    if (inline) {
+      return (
+        <ToolDetailBody
+          group={block.group}
+          mcpPrefixes={mcpPrefixes}
+          variant={inline ? "process" : "card"}
+        />
+      );
+    }
+    return (
+      <ToolGroupBlockView
+        group={block.group}
+        mcpPrefixes={mcpPrefixes}
+        defaultExpanded={false}
+      />
+    );
   }
   if (block.type === "reasoning") {
+    if (inline) {
+      const body = normalizeReasoningText(block.reasoningText || "");
+      if (!body) return null;
+      return (
+        <div className="chat-process-inline-body">
+          <Markdown variant="turn">{body}</Markdown>
+        </div>
+      );
+    }
     return <ReasoningBlockView text={block.reasoningText || ""} original={block.reasoningOriginal} />;
   }
   return null;
 }
 
-function MessageView({ msg, isLastAssistant }: { msg: ChatMessage; isLastAssistant?: boolean }) {
-  const [copied, setCopied] = useState(false);
-  const chatBusy = useStore((s) => s.chat_busy);
-  const assistantId = useStore((s) => s.chat_assistant_ids[String(msg.lineIndex)]);
+function MessageView({
+  msg,
+  isLastAssistant,
+  hideLabel = false,
+}: {
+  msg: ChatMessage;
+  isLastAssistant?: boolean;
+  hideLabel?: boolean;
+}) {
+  const timeIso = useStore((s) => s.chat_line_times[String(msg.lineIndex)]) || undefined;
 
   // System/meta messages get a centered pill style.
   if (msg.role === "system" || msg.role === "meta") {
@@ -245,70 +440,37 @@ function MessageView({ msg, isLastAssistant }: { msg: ChatMessage; isLastAssista
     return <div className={cls}>{msg.body}</div>;
   }
 
-  const roleClass =
-    msg.role === "you"
-      ? "role-you"
-      : msg.role === "assistant"
-        ? "role-assistant"
-        : msg.role === "error"
-          ? "role-error"
-          : "role-assistant";
-  const label =
-    msg.role === "you" ? "You" : msg.role === "assistant" ? "Assistant" : msg.role === "error" ? "Error" : msg.badge;
+  // Inline embeds (process detail) — body only.
+  if (hideLabel) {
+    return <TurnMessageBody msg={msg} nested />;
+  }
 
-  const onCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(msg.body);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch {
-      /* clipboard unavailable */
-    }
-  };
+  if (msg.role === "you") {
+    return <UserTurnView msg={msg} />;
+  }
+
+  if (msg.role === "error") {
+    return (
+      <article className="chat-agent-turn chat-error-turn">
+        <MessageTurnFrame role="error" name="错误" timeIso={timeIso}>
+          <ErrorMessageBody body={msg.body} framed />
+        </MessageTurnFrame>
+      </article>
+    );
+  }
 
   return (
-    <div className={`msg-row ${roleClass}`}>
-      <div className="msg-label">{label}</div>
-      <div className="msg-bubble">
-        {msg.md ? (
-          <Markdown>{msg.body}</Markdown>
-        ) : (
-          <div className="whitespace-pre-wrap">{msg.body}</div>
-        )}
-        <div className="msg-actions">
-          <button
-            type="button"
-            className="msg-copy"
-            onClick={onCopy}
-            aria-label="Copy message"
-            title="Copy message"
-          >
-            {copied ? <Check size={14} /> : <Copy size={14} />}
-          </button>
-          {msg.role === "assistant" && assistantId && !chatBusy && (
-            <button
-              type="button"
-              className="msg-regenerate"
-              onClick={() =>
-                void apiPost("/api/chat/regenerate", { message_id: assistantId })
-              }
-              aria-label={
-                isLastAssistant
-                  ? "Regenerate response"
-                  : "Branch from this response"
-              }
-              title={
-                isLastAssistant
-                  ? "Regenerate response"
-                  : "Branch from this response"
-              }
-            >
-              <RefreshCw size={14} />
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
+    <article className="chat-agent-turn">
+      <MessageTurnFrame
+        role="agent"
+        name="助手"
+        timeIso={timeIso}
+        footer={<AgentMessageActions msg={msg} isLastAssistant={isLastAssistant} />}
+        footerPinned={!!isLastAssistant}
+      >
+        <TurnMessageBody msg={msg} framed />
+      </MessageTurnFrame>
+    </article>
   );
 }
 
@@ -337,39 +499,17 @@ const STEP_ICON: Record<ToolStepKind, string> = {
 };
 
 const STATUS_PILL: Record<string, string> = {
-  ok: "OK",
-  err: "Failed",
-  pending: "Pending",
-  running: "Running",
-  warn: "Warning",
+  ok: "完成",
+  err: "失败",
+  pending: "等待中",
+  running: "执行中",
+  warn: "警告",
 };
 
 function ToolStatusPill({ status }: { status: string }) {
   const label = STATUS_PILL[status];
   if (!label) return null;
   return <span className={`tool-status-pill status-${status}`}>{label}</span>;
-}
-
-function primaryArgLine(args: string | null | undefined): string | null {
-  const pairs = parseToolArgsString(args);
-  if (!pairs.length) return null;
-  const { key, value } = pairs[0];
-  if (!value) return key;
-  const v = formatToolArgValue(key, value);
-  const text = `${key}=${v}`;
-  return text.length > 52 ? `${text.slice(0, 51)}…` : text;
-}
-
-/** Unified output preview for a collapsed tool group. */
-function outputPreview(group: ToolGroup): string | null {
-  const step = group.steps.find((s) => s.output);
-  if (!step?.output) return null;
-  const lines = step.output.split("\n").length;
-  if (lines > 1) return `${lines} lines`;
-  if (step.output.length > 80) return `${step.output.length} chars`;
-  const oneLine = step.output.replace(/\s+/g, " ").trim();
-  if (!oneLine) return null;
-  return oneLine.length > 64 ? `${oneLine.slice(0, 63)}…` : oneLine;
 }
 
 function ToolBatchView({
@@ -446,13 +586,16 @@ function ToolGroupBlockView({
   group,
   mcpPrefixes,
   inBatch = false,
+  defaultExpanded = false,
 }: {
   group: ToolGroup;
   mcpPrefixes: { id: string; prefix: string }[];
   inBatch?: boolean;
+  defaultExpanded?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const compact =
+    !defaultExpanded &&
     group.status !== "running" &&
     group.status !== "pending" &&
     !expanded;
@@ -470,7 +613,7 @@ function ToolGroupBlockView({
   return (
     <ToolGroupView
       group={group}
-      expanded={expanded}
+      expanded={expanded || defaultExpanded}
       onToggle={() => setExpanded((e) => !e)}
       mcpPrefixes={mcpPrefixes}
       inBatch={inBatch}
@@ -488,14 +631,14 @@ function ToolCompactChip({
   onExpand: () => void;
 }) {
   const meta = toolMeta(group.toolName, mcpPrefixes);
-  const outHint = outputPreview(group);
-  const argLine = primaryArgLine(group.args);
+  const summary = toolCollapsedSummary(group);
+  const subtitle = pickToolRowSubtitle(group);
 
   return (
     <div
       className={`tool-chip status-${group.status} clickable`}
       onClick={onExpand}
-      title={[group.toolName, group.args, outHint].filter(Boolean).join("\n")}
+      title={[group.toolName, group.args, summary].filter(Boolean).join("\n")}
       role="button"
       tabIndex={0}
       aria-expanded={false}
@@ -510,15 +653,15 @@ function ToolCompactChip({
         {meta.icon}
       </span>
       <span className="tool-chip-main">
-        <span className="tool-chip-name">{meta.label}</span>
-        {(argLine || meta.source) && (
-          <span className="tool-chip-detail">
-            {argLine || meta.source?.source}
-          </span>
-        )}
+        <span className="tool-chip-name">
+          {toolRowTitle(group.toolName, meta.label, group.status)}
+        </span>
+        {subtitle && <span className="tool-chip-detail">{subtitle}</span>}
       </span>
       <span className="tool-chip-trail">
-        {outHint && <span className="tool-chip-out">{outHint}</span>}
+        {summary && summary !== subtitle && (
+          <span className="tool-chip-out">{summary}</span>
+        )}
         {group.ms != null && <span className="tool-chip-ms">{group.ms}ms</span>}
         <ToolStatusPill status={group.status} />
         <ChevronRight size={12} className="tool-chip-chevron" aria-hidden="true" />
@@ -541,14 +684,14 @@ function ToolGroupView({
   inBatch?: boolean;
 }) {
   const meta = toolMeta(group.toolName, mcpPrefixes);
+  const subtitle = pickToolRowSubtitle(group);
+  const summary = toolCollapsedSummary(group);
   const hasOutput = group.steps.some((s) => s.output);
-  const outputSummary = outputPreview(group);
-  const argPairs = parseToolArgsString(group.args);
-  const argLine = primaryArgLine(group.args);
+  const nonTrivialSteps = group.steps.filter(
+    (s) => s.kind !== "start" && !(s.kind === "done" && s.output),
+  );
+  const simpleBody = nonTrivialSteps.length === 0 && hasOutput;
 
-  // Inside an expanded batch, render without the outer .tool-card border to
-  // avoid a "card-in-card" double border; a left status bar carries the
-  // status color instead.
   const rootCls = inBatch
     ? `tool-run-item-inner status-${group.status} ${expanded ? "is-expanded-view" : "is-collapsed"}`
     : `tool-card status-${group.status} ${expanded ? "is-expanded-view" : "is-collapsed"}`;
@@ -573,37 +716,24 @@ function ToolGroupView({
         </span>
         <div className="tool-card-title-wrap">
           <div className="tool-card-title-row">
-            <span className="tool-card-title">{meta.label}</span>
-            {meta.label !== group.toolName && (
-              <span className="tool-card-fn">{group.toolName}</span>
-            )}
+            <span className="tool-card-title">
+              {toolRowTitle(group.toolName, meta.label, group.status)}
+            </span>
             {meta.source && (
               <span className="tool-source-chip" title={`Tool backend: ${meta.source.source}`}>
                 {meta.source.source}
               </span>
             )}
           </div>
-          {!expanded && argLine && (
-            <span className="tool-card-arg-line">{argLine}</span>
-          )}
-          {expanded && argPairs.length > 0 && (
-            <div className="tool-arg-chips">
-              {argPairs.map((p, i) => (
-                <span key={i} className="tool-arg-chip">
-                  <span className="tool-arg-k">{p.key}</span>
-                  {p.value && (
-                    <span className="tool-arg-v">{formatToolArgValue(p.key, p.value)}</span>
-                  )}
-                </span>
-              ))}
-            </div>
+          {!expanded && subtitle && (
+            <span className="tool-card-arg-line">{subtitle}</span>
           )}
         </div>
         <div className="tool-card-trail">
           {group.ms != null && <span className="tool-card-ms">{group.ms}ms</span>}
-          {hasOutput && !expanded && outputSummary && (
-            <span className="tool-card-out" title={outputSummary}>
-              {outputSummary}
+          {hasOutput && !expanded && summary && summary !== subtitle && (
+            <span className="tool-card-out" title={summary}>
+              {summary}
             </span>
           )}
           <ToolStatusPill status={group.status} />
@@ -611,28 +741,39 @@ function ToolGroupView({
         </div>
       </div>
 
-      {expanded && (
-        <div className="tool-timeline">
-          {group.steps.map((s, i) => (
-            <div
-              key={i}
-              className={`tool-timeline-node kind-${s.kind}${
-                s.kind === "done" ? (s.ok ? " is-ok" : " is-err") : ""
-              }`}
-            >
-              <span className="tool-timeline-dot" />
-              <div className="tool-timeline-content">
-                <ToolStepView step={s} />
+      {expanded &&
+        (simpleBody ? (
+          <ToolDetailBody group={group} mcpPrefixes={mcpPrefixes} variant="card" />
+        ) : (
+          <div className="tool-timeline">
+            {group.steps.map((s, i) => (
+              <div
+                key={i}
+                className={`tool-timeline-node kind-${s.kind}${
+                  s.kind === "done" ? (s.ok ? " is-ok" : " is-err") : ""
+                }`}
+              >
+                <span className="tool-timeline-dot" />
+                <div className="tool-timeline-content">
+                  <ToolStepView step={s} toolName={group.toolName} />
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>
+        ))}
     </div>
   );
 }
 
-function ToolStepView({ step }: { step: ToolStep }) {
+function ToolStepView({
+  step,
+  toolName,
+  inline = false,
+}: {
+  step: ToolStep;
+  toolName?: string;
+  inline?: boolean;
+}) {
   const icon =
     step.kind === "done" ? (step.ok ? "✓" : "✗") : STEP_ICON[step.kind] || "·";
 
@@ -665,7 +806,12 @@ function ToolStepView({ step }: { step: ToolStep }) {
   // Tool output step (done with output).
   if (step.kind === "done" && step.output) {
     return (
-      <ToolOutputView output={step.output} outputKey={`step-${step.index}`} />
+      <ToolStepOutput
+        output={step.output}
+        outputKey={`step-${step.index}`}
+        toolName={toolName ?? step.name ?? undefined}
+        inline={inline}
+      />
     );
   }
 
@@ -711,9 +857,9 @@ function ToolReasoningNote({
       key={stepKey}
     >
       <div className="tool-reasoning-head">
-        <span className="tool-reasoning-label">Reasoning</span>
+        <span className="tool-reasoning-label">思考过程</span>
         <span className="tool-reasoning-meta">
-          {lineCount} lines · {normalized.length.toLocaleString()} chars
+          {lineCount} 行 · {normalized.length.toLocaleString()} 字符
         </span>
         <button
           type="button"
@@ -723,7 +869,7 @@ function ToolReasoningNote({
             setExpanded((v) => !v);
           }}
         >
-          {expanded ? "Collapse" : "Show reasoning"}
+          {expanded ? "收起" : "展开思考"}
         </button>
       </div>
       {expanded && (
@@ -738,7 +884,7 @@ function ToolReasoningNote({
                   setViewMode("summary");
                 }}
               >
-                Summary
+                摘要
               </button>
               <button
                 type="button"
@@ -748,7 +894,7 @@ function ToolReasoningNote({
                   setViewMode("original");
                 }}
               >
-                Original
+                原文
               </button>
             </div>
           )}

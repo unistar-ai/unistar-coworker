@@ -411,6 +411,7 @@ mod tests {
                 ts: Utc::now(),
                 tool_name: None,
                 tool_calls_json: None,
+                tool_call_id: None,
                 reasoning_original: None,
                 parent_message_id: None,
                 branch_index: None,

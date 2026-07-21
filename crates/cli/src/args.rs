@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
     after_help = "EXAMPLES:\n    unistar-coworker tui                                  Terminal UI (default)\n    unistar-coworker serve                            Web UI server\n    unistar-coworker chat                             interactive chat REPL\n    unistar-coworker chat --once \"summarize PR 123\" --json\n    unistar-coworker report ci --repo owner/name\n    unistar-coworker store compact --dry-run --audit-days 30\n\nGlobal flags (--config / -v / -q) go before the subcommand."
 )]
 pub(crate) struct Cli {
-    /// Override config file path (skips discover in cwd / .coworker/)
+    /// Override config file path (skips discover in .coworker/ / cwd)
     #[arg(long, global = true)]
     pub(crate) config: Option<PathBuf>,
     /// Increase log verbosity (-v = debug, -vv = trace)

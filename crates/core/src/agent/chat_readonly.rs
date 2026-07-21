@@ -35,7 +35,8 @@ use crate::agent::chat_duplicate::{
     remove_satisfied_missing_arg_nudges,
 };
 use crate::agent::chat_loop::{
-    activity_flow_kind_for_tool, append_message, ci_analyze_lacks_runs, emit_activity_flow,
+    activity_flow_kind_for_tool, append_message, append_tool_result_message, ci_analyze_lacks_runs,
+    emit_activity_flow,
     emit_activity_flow_clear, emit_progress, ensure_chat_not_cancelled, finalize_tool_args,
     format_flow_tool_done, format_flow_tool_start, format_tool_args_short, is_flow_activity_tool,
     is_mutating_tool, race_chat_cancel, tool_output_indicates_failure, ChatProgress,
@@ -241,14 +242,13 @@ pub(crate) async fn record_tool_outcome(
     } else {
         record.fail_count += 1;
     }
-    append_message(
+    append_tool_result_message(
         round.store,
         round.session_id,
-        ChatRole::Tool,
         &ctx,
-        Some(&name),
-        Some(args.to_string()),
-        None,
+        &name,
+        args.to_string(),
+        Some(id.as_str()),
     )
     .await?;
     round.llm_messages.push(LlmTurnMessage::tool_result_with_id(

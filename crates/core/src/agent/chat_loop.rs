@@ -27,9 +27,10 @@ use crate::agent::chat_stream::persist_interim_assistant_message;
 use crate::agent::context::{
     estimate_message_tokens, estimate_tools_tokens, format_tool_approval_pending_message,
     format_tool_context_message, format_tool_user_question_pending_message,
-    format_tools_for_context_panel, history_token_budget, message_budget_for_tools,
-    pack_session_history_with_llm, skill_body_for_context_panel, tool_names_from_definitions,
-    trim_llm_messages_with_llm, trim_system_content, truncate_chars,
+    format_tools_for_context_panel, history_token_budget, is_tool_user_question_pending_transcript,
+    message_budget_for_tools, pack_session_history_with_llm, repair_native_tool_call_pairs,
+    skill_body_for_context_panel, tool_names_from_definitions, trim_llm_messages_with_llm,
+    trim_system_content, truncate_chars,
 };
 use crate::agent::file_tools;
 use crate::agent::hooks::{HookRunner, TurnContext};
@@ -619,6 +620,7 @@ pub fn context_display_role(api_role: &str, content: &str) -> String {
     if trimmed.starts_with("tool_result(")
         || trimmed.starts_with("tool_error(")
         || trimmed.starts_with("tool_approval_pending(")
+        || trimmed.starts_with("tool_user_question_pending(")
         || trimmed.starts_with("[tool_result ")
         || trimmed.starts_with("[summarized tool_result ")
     {
@@ -943,18 +945,16 @@ pub async fn run_chat_turn(
                 CoworkerError::Workflow("cannot regenerate: no parent user message".into())
             })?;
         let path = crate::store::branch_path_to_root(&all, parent_id);
-        let mut trimmed = path;
-        let limit = config.chat.history_messages as usize;
-        if trimmed.len() > limit {
-            trimmed = trimmed.split_off(trimmed.len() - limit);
-        }
-        (trimmed, parent_id)
+        // Keep the full branch path; pack_session_history trims with tool-pair alignment.
+        (path, parent_id)
     } else {
         let prior = store.list_chat_messages(&session.id, usize::MAX).await?;
-        let branch_leaf = prior.last().map(|m| m.id);
+        let branch_leaf = session
+            .active_leaf_message_id
+            .or_else(|| prior.last().map(|m| m.id));
         let user_msg_id = if let Some(ref answer_resume) = resume_user_answer {
             // Persist the human answer as a normal user message, then continue the turn.
-            append_message_parented(
+            let id = append_message_parented(
                 store.as_ref(),
                 &session.id,
                 ChatRole::User,
@@ -962,12 +962,15 @@ pub async fn run_chat_turn(
                 None,
                 None,
                 None,
+                None,
                 branch_leaf,
                 Some(0),
             )
-            .await?
+            .await?;
+            session.active_leaf_message_id = Some(id);
+            id
         } else if !is_resume {
-            append_message_parented(
+            let id = append_message_parented(
                 store.as_ref(),
                 &session.id,
                 ChatRole::User,
@@ -975,15 +978,18 @@ pub async fn run_chat_turn(
                 None,
                 None,
                 None,
+                None,
                 branch_leaf,
                 Some(0),
             )
-            .await?
+            .await?;
+            session.active_leaf_message_id = Some(id);
+            id
         } else {
             Uuid::nil()
         };
         let history = store
-            .list_chat_messages(&session.id, config.chat.history_messages as usize)
+            .list_chat_messages(&session.id, usize::MAX)
             .await?;
         let fork_parent = if user_msg_id != Uuid::nil() {
             user_msg_id
@@ -1449,11 +1455,24 @@ native tool_calls. Do not end with assistant text alone.";
                     }
                     continue;
                 }
-                let message = if step.message.trim().is_empty() {
-                    "Done.".into()
-                } else {
-                    step.message.clone()
-                };
+                if step.message.trim().is_empty() {
+                    let nudge = "Your reply was empty — write a natural-language answer for the \
+user, or call tools if more work remains.";
+                    if harness_retry_or_stop(
+                        &mut harness_corrections,
+                        &progress,
+                        store.as_ref(),
+                        &session.id,
+                        nudge,
+                        &mut llm_messages,
+                    )
+                    .await?
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let message = step.message.clone();
                 let tools_for_judge: Vec<ToolUseSummary> = tool_calls
                     .iter()
                     .map(|tc| ToolUseSummary {
@@ -1488,24 +1507,10 @@ native tool_calls. Do not end with assistant text alone.";
                         continue;
                     }
                     Err(e) => {
-                        tracing::warn!("completion judge failed ({e}) — nudging agent to continue");
-                        let nudge = format!(
-                            "Completion check failed ({e}). Continue with tools or reply with a \
-complete answer when the task is truly done."
+                        tracing::warn!(
+                            "completion judge transport error ({e}) — accepting reply (fail-open)"
                         );
-                        if harness_retry_or_stop(
-                            &mut harness_corrections,
-                            &progress,
-                            store.as_ref(),
-                            &session.id,
-                            &nudge,
-                            &mut llm_messages,
-                        )
-                        .await?
-                        {
-                            break;
-                        }
-                        continue;
+                        true
                     }
                 };
                 if accept_reply {
@@ -1519,12 +1524,12 @@ complete answer when the task is truly done."
                         None,
                         None,
                         None,
+                        None,
                         Some(fork_parent),
                         Some(branch_index),
                     )
                     .await?;
                     session.active_leaf_message_id = Some(id);
-                    store.update_chat_session(&session).await?;
                     append_assistant_to_llm_context(&mut llm_messages, &message);
                     emit_context_snapshot(
                         &progress,
@@ -1690,6 +1695,21 @@ from tool results already in context.";
                                 + mutating.len()
                         );
                     }
+                    // Providers require every tool_calls[].id to get a tool result.
+                    // Keep only ask_user on the assistant message we just pushed.
+                    retain_only_tool_call_on_last_assistant(
+                        &mut llm_messages,
+                        &ask_call.id,
+                    );
+                    let ask_step = ChatAgentStep {
+                        action: step.action,
+                        message: step.message.clone(),
+                        tool_calls: vec![ResolvedToolCall {
+                            id: ask_call.id.clone(),
+                            name: ask_call.name.clone(),
+                            args: ask_call.args.clone(),
+                        }],
+                    };
                     tools_used += 1;
                     let pause = match ask_user_tool::parse_ask_user_args(&ask_call.args) {
                         Ok(request) => AskUserPause {
@@ -1732,7 +1752,7 @@ from tool results already in context.";
                     queue_ask_user_pause(
                         store.as_ref(),
                         &session_id,
-                        &step,
+                        &ask_step,
                         &progress,
                         &mut llm_messages,
                         &mut tool_calls,
@@ -1999,12 +2019,12 @@ from tool results already in context.";
         None,
         None,
         None,
+        None,
         Some(fork_parent),
         Some(branch_index),
     )
     .await?;
     session.active_leaf_message_id = Some(id);
-    store.update_chat_session(&session).await?;
     append_assistant_to_llm_context(&mut llm_messages, &fallback);
     emit_context_snapshot(
         &progress,
@@ -2046,6 +2066,33 @@ pub(crate) async fn append_message(
         reasoning_original,
         None,
         None,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Persist a native tool result with its `tool_call_id` so history reload keeps
+/// OpenAI-compatible tool_calls pairing.
+pub(crate) async fn append_tool_result_message(
+    store: &dyn Store,
+    session_id: &Uuid,
+    content: &str,
+    tool_name: &str,
+    tool_args_json: String,
+    tool_call_id: Option<&str>,
+) -> Result<()> {
+    append_message_parented(
+        store,
+        session_id,
+        ChatRole::Tool,
+        content,
+        Some(tool_name),
+        Some(tool_args_json),
+        None,
+        tool_call_id,
+        None,
+        None,
     )
     .await?;
     Ok(())
@@ -2062,9 +2109,17 @@ pub(crate) async fn append_message_parented(
     tool_name: Option<&str>,
     tool_calls_json: Option<String>,
     reasoning_original: Option<&str>,
+    tool_call_id: Option<&str>,
     parent_message_id: Option<Uuid>,
     branch_index: Option<u32>,
 ) -> Result<Uuid> {
+    let mut session = store
+        .get_chat_session(session_id)
+        .await?
+        .ok_or_else(|| {
+            CoworkerError::Store(format!("unknown chat session {session_id}"))
+        })?;
+    let parent = parent_message_id.or(session.active_leaf_message_id);
     let id = Uuid::new_v4();
     store
         .append_chat_message(&ChatMessage {
@@ -2075,11 +2130,14 @@ pub(crate) async fn append_message_parented(
             ts: Utc::now(),
             tool_name: tool_name.map(str::to_string),
             tool_calls_json,
+            tool_call_id: tool_call_id.map(str::to_string),
             reasoning_original: reasoning_original.map(str::to_string),
-            parent_message_id,
+            parent_message_id: parent,
             branch_index,
         })
         .await?;
+    session.active_leaf_message_id = Some(id);
+    store.update_chat_session(&session).await?;
     Ok(id)
 }
 
@@ -2111,6 +2169,7 @@ pub(crate) async fn persist_native_assistant_tool_call_parented(
         &step.message,
         None,
         Some(tool_calls_json),
+        None,
         None,
         parent_message_id,
         branch_index,
@@ -2192,7 +2251,10 @@ async fn apply_approval_resolution(
     {
         msg.content = ctx.clone();
     } else {
-        llm_messages.push(LlmTurnMessage::tool_result(tool_name, ctx));
+        let call_id = llm_messages.iter().rev().find_map(|m| {
+            m.tool_calls.as_ref()?.iter().find(|c| c.name == *tool_name).map(|c| c.id.clone())
+        });
+        llm_messages.push(LlmTurnMessage::tool_result_with_id(call_id, tool_name, ctx));
     }
 
     emit_progress(
@@ -2241,23 +2303,41 @@ async fn apply_user_answer_resolution(
     {
         let mut updated = msg.clone();
         updated.content = ctx.clone();
+        if updated.tool_call_id.is_none() && !tool_call_id.is_empty() {
+            updated.tool_call_id = Some(tool_call_id.clone());
+        }
         updated.ts = Utc::now();
         store.update_chat_message(&updated).await?;
     }
 
-    if let Some(msg) = llm_messages
-        .iter_mut()
-        .rev()
-        .find(|m| m.role == "tool" && m.content.contains(&marker))
-    {
+    let existing = llm_messages.iter_mut().rev().find(|m| {
+        m.role == "tool"
+            && (m.content.contains(&marker)
+                || (!tool_call_id.is_empty()
+                    && m.tool_call_id.as_deref() == Some(tool_call_id.as_str()))
+                || (m.tool_name.as_deref() == Some("ask_user")
+                    && is_tool_user_question_pending_transcript(&m.content)))
+    });
+    if let Some(msg) = existing {
         msg.content = ctx.clone();
+        if msg.tool_call_id.is_none() && !tool_call_id.is_empty() {
+            msg.tool_call_id = Some(tool_call_id.clone());
+        }
+        msg.tool_name = Some("ask_user".into());
     } else {
-        llm_messages.push(LlmTurnMessage::tool_result_with_id(
-            Some(tool_call_id.clone()),
-            "ask_user",
-            ctx,
-        ));
+        // Insert after the owning assistant tool_calls — never after a later user
+        // message, which would create an orphan tool turn the provider rejects.
+        let insert_at = tool_result_insert_index(llm_messages, tool_call_id);
+        llm_messages.insert(
+            insert_at,
+            LlmTurnMessage::tool_result_with_id(
+                (!tool_call_id.is_empty()).then(|| tool_call_id.clone()),
+                "ask_user",
+                ctx,
+            ),
+        );
     }
+    repair_native_tool_call_pairs(llm_messages);
 
     emit_progress(
         progress,
@@ -2267,6 +2347,43 @@ async fn apply_user_answer_resolution(
         },
     );
     Ok(())
+}
+
+/// Index immediately after the assistant `tool_calls` block that owns `tool_call_id`
+/// (or after its existing tool results). Falls back to end-of-list only when no
+/// carrier exists (repair will demote an orphan if needed).
+fn tool_result_insert_index(messages: &[LlmTurnMessage], tool_call_id: &str) -> usize {
+    let mut carrier = None;
+    for (i, m) in messages.iter().enumerate().rev() {
+        if m.role != "assistant" {
+            continue;
+        }
+        let Some(calls) = &m.tool_calls else {
+            continue;
+        };
+        if calls.is_empty() {
+            continue;
+        }
+        if !tool_call_id.is_empty() {
+            if calls.iter().any(|c| c.id == tool_call_id) {
+                carrier = Some(i);
+                break;
+            }
+            continue;
+        }
+        if calls.iter().any(|c| c.name == "ask_user") {
+            carrier = Some(i);
+            break;
+        }
+    }
+    let Some(start) = carrier else {
+        return messages.len();
+    };
+    let mut end = start + 1;
+    while end < messages.len() && messages[end].role == "tool" {
+        end += 1;
+    }
+    end
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2312,14 +2429,13 @@ async fn queue_ask_user_pause(
         tool_name: "ask_user".into(),
         output: pending_body.clone(),
     });
-    append_message(
+    append_tool_result_message(
         store,
         session_id,
-        ChatRole::Tool,
         &body,
-        Some("ask_user"),
-        Some(pause.tool_args.to_string()),
-        None,
+        "ask_user",
+        pause.tool_args.to_string(),
+        Some(pause.tool_call_id.as_str()),
     )
     .await?;
     llm_messages.push(LlmTurnMessage::tool_result_with_id(
@@ -3002,6 +3118,23 @@ pub(crate) fn push_native_assistant_tool_calls(
     ));
 }
 
+/// Drop sibling tool_calls from the last assistant message, keeping only `keep_id`.
+/// Used when `ask_user` must run alone but the model batched other tools.
+pub(crate) fn retain_only_tool_call_on_last_assistant(
+    messages: &mut [LlmTurnMessage],
+    keep_id: &str,
+) {
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    if last.role != "assistant" {
+        return;
+    }
+    if let Some(calls) = &mut last.tool_calls {
+        calls.retain(|c| c.id == keep_id);
+    }
+}
+
 pub(crate) fn record_session_file_edit(
     session: &mut crate::store::ChatSession,
     tool_name: &str,
@@ -3088,14 +3221,13 @@ async fn handle_llm_review_rejection(
             tool_name,
             body.clone(),
         ));
-        append_message(
+        append_tool_result_message(
             store,
             session_id,
-            ChatRole::Tool,
             &body,
-            Some(tool_name),
-            Some(tool_args.to_string()),
-            None,
+            tool_name,
+            tool_args.to_string(),
+            Some(call_id),
         )
         .await?;
         push_harness_nudge(
@@ -3127,14 +3259,13 @@ async fn handle_llm_review_rejection(
         queued.summary
     );
     let body = format_tool_approval_pending_message(tool_name, tool_args, queued.id, &pending_body);
-    append_message(
+    append_tool_result_message(
         store,
         session_id,
-        ChatRole::Tool,
         &body,
-        Some(tool_name),
-        Some(tool_args.to_string()),
-        None,
+        tool_name,
+        tool_args.to_string(),
+        Some(call_id),
     )
     .await?;
     llm_messages.push(LlmTurnMessage::tool_result_with_id(
@@ -3808,6 +3939,7 @@ mod tests {
             ts: Utc::now(),
             tool_name: Some("python_run".into()),
             tool_calls_json: Some(args.to_string()),
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,
@@ -3834,6 +3966,7 @@ mod tests {
             ts: Utc::now(),
             tool_name: Some("python_run".into()),
             tool_calls_json: Some(args.to_string()),
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,

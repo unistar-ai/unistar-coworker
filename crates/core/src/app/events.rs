@@ -184,7 +184,8 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                     s.set_chat_reasoning(None);
                     s.set_chat_reasoning_compressing(false);
                     s.set_chat_tool_running(None);
-                    s.push_chat_line(p.display_line());
+                    // Update the pending ask_user line in place — do not also
+                    // push a second "user answered" row (process peek duplicates).
                     s.resolve_chat_user_question(*question_id, answer_preview);
                 }
                 ChatProgress::ReasoningSummary { body, original, .. } => {

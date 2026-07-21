@@ -872,12 +872,254 @@ fn fit_history_to_budget(
     let mut dropped = Vec::new();
     while estimate_messages_tokens(messages) > token_budget && messages.len() > TAIL_KEEP {
         let compress_end = messages.len().saturating_sub(TAIL_KEEP);
-        if compress_oldest_tool_in_slice(messages, 0, compress_end, CompactionStrategy::Generic) {
+        if compress_end > 0
+            && compress_oldest_tool_in_slice(messages, 0, compress_end, CompactionStrategy::Generic)
+        {
             continue;
         }
-        dropped.push(messages.remove(0));
+        let tail_start = messages.len().saturating_sub(TAIL_KEEP);
+        if let Some(idx) = first_removable_llm_index(messages, 0, tail_start) {
+            let end = removable_llm_span_end(messages, idx);
+            dropped.extend(messages.drain(idx..end));
+            continue;
+        }
+        break;
     }
     dropped
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryPackSegmentKind {
+    Plain,
+    NativeToolGroup,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HistoryPackSegment {
+    start: usize,
+    end: usize,
+    kind: HistoryPackSegmentKind,
+    message_count: usize,
+}
+
+fn assistant_has_native_tool_calls(msg: &ChatMessage) -> bool {
+    msg.role == ChatRole::Assistant
+        && msg
+            .tool_calls_json
+            .as_ref()
+            .and_then(|json| {
+                serde_json::from_str::<Vec<crate::llm::chat::LlmToolCall>>(json)
+                    .ok()
+                    .filter(|calls| !calls.is_empty())
+            })
+            .is_some()
+}
+
+/// Partition store history into plain runs and atomic native tool-call groups
+/// (`assistant(tool_calls)` + following tool/harness/reasoning rows).
+fn history_pack_segments(history: &[ChatMessage]) -> Vec<HistoryPackSegment> {
+    let mut segments = Vec::new();
+    let mut i = 0;
+    while i < history.len() {
+        if assistant_has_native_tool_calls(&history[i]) {
+            let start = i;
+            i += 1;
+            while i < history.len() {
+                match history[i].role {
+                    ChatRole::Tool | ChatRole::Harness | ChatRole::Reasoning => i += 1,
+                    _ => break,
+                }
+            }
+            segments.push(HistoryPackSegment {
+                start,
+                end: i,
+                kind: HistoryPackSegmentKind::NativeToolGroup,
+                message_count: i - start,
+            });
+        } else {
+            let start = i;
+            i += 1;
+            while i < history.len() && !assistant_has_native_tool_calls(&history[i]) {
+                i += 1;
+            }
+            segments.push(HistoryPackSegment {
+                start,
+                end: i,
+                kind: HistoryPackSegmentKind::Plain,
+                message_count: i - start,
+            });
+        }
+    }
+    segments
+}
+
+/// Keep the newest segments whose combined message count fits `max_messages`.
+/// Segments are never split — a tool-call group is always kept whole.
+fn select_history_segment_range(
+    history: &[ChatMessage],
+    segments: &[HistoryPackSegment],
+    max_messages: usize,
+) -> (std::ops::Range<usize>, usize) {
+    let take = max_messages.max(2);
+    if segments.is_empty() {
+        return (0..0, 0);
+    }
+    let mut seg_start = segments.len();
+    let mut count = 0usize;
+    while seg_start > 0 {
+        let seg = &segments[seg_start - 1];
+        if count > 0 && count + seg.message_count > take {
+            if count == 1
+                && segments
+                    .get(seg_start)
+                    .is_some_and(|s| s.kind == HistoryPackSegmentKind::Plain && s.message_count == 1)
+                && seg.kind == HistoryPackSegmentKind::NativeToolGroup
+            {
+                seg_start -= 1;
+            }
+            break;
+        }
+        count += seg.message_count;
+        seg_start -= 1;
+    }
+    if seg_start < segments.len() {
+        let seg = &segments[seg_start];
+        if segment_is_ask_user_echo_only(history, seg) {
+            if seg_start > 0 && segments[seg_start - 1].kind == HistoryPackSegmentKind::NativeToolGroup
+            {
+                seg_start -= 1;
+            } else {
+                seg_start += 1;
+            }
+        }
+    }
+    let dropped: usize = segments[..seg_start].iter().map(|s| s.message_count).sum();
+    (seg_start..segments.len(), dropped)
+}
+
+fn segment_is_ask_user_echo_only(history: &[ChatMessage], seg: &HistoryPackSegment) -> bool {
+    seg.kind == HistoryPackSegmentKind::Plain
+        && seg.message_count == 1
+        && should_skip_for_llm_pack(history, seg.start)
+}
+
+fn is_ask_user_answer_echo(tool: &ChatMessage, user: &ChatMessage) -> bool {
+    if user.role != ChatRole::User || tool.role != ChatRole::Tool {
+        return false;
+    }
+    if tool.tool_name.as_deref() != Some("ask_user") {
+        return false;
+    }
+    if is_tool_user_question_pending_transcript(&tool.content) {
+        return false;
+    }
+    let answer = user.content.trim();
+    !answer.is_empty() && tool.content.contains(answer)
+}
+
+fn should_skip_for_llm_pack(history: &[ChatMessage], idx: usize) -> bool {
+    if history[idx].role != ChatRole::User {
+        return false;
+    }
+    let Some(prev) = history.get(idx.wrapping_sub(1)) else {
+        return false;
+    };
+    is_ask_user_answer_echo(prev, &history[idx])
+}
+
+fn history_tool_group_to_llm(group: &[ChatMessage]) -> Vec<LlmTurnMessage> {
+    let Some(assistant) = group.first() else {
+        return Vec::new();
+    };
+    let mut out = vec![chat_message_to_llm(assistant)];
+    let mut aftermath = Vec::new();
+    for msg in &group[1..] {
+        match msg.role {
+            ChatRole::Tool => out.push(chat_message_to_llm(msg)),
+            ChatRole::Harness | ChatRole::Reasoning => aftermath.push(chat_message_to_llm(msg)),
+            _ => {}
+        }
+    }
+    out.extend(aftermath);
+    out
+}
+
+fn history_segment_to_llm(history: &[ChatMessage], seg: &HistoryPackSegment) -> Vec<LlmTurnMessage> {
+    match seg.kind {
+        HistoryPackSegmentKind::Plain => history[seg.start..seg.end]
+            .iter()
+            .enumerate()
+            .filter_map(|(off, msg)| {
+                let idx = seg.start + off;
+                if should_skip_for_llm_pack(history, idx) {
+                    return None;
+                }
+                Some(chat_message_to_llm(msg))
+            })
+            .collect(),
+        HistoryPackSegmentKind::NativeToolGroup => history_tool_group_to_llm(&history[seg.start..seg.end]),
+    }
+}
+
+fn pack_history_to_llm_messages(history: &[ChatMessage], max_messages: usize) -> (Vec<LlmTurnMessage>, usize) {
+    let segments = history_pack_segments(history);
+    let (range, dropped_count) = select_history_segment_range(history, &segments, max_messages);
+    let mut out = Vec::new();
+    for seg in &segments[range] {
+        out.extend(history_segment_to_llm(history, seg));
+    }
+    (out, dropped_count)
+}
+
+/// End index (exclusive) of the removable span starting at `idx`.
+/// Native tool-call groups are removed as a single unit.
+fn removable_llm_span_end(messages: &[LlmTurnMessage], idx: usize) -> usize {
+    if messages[idx].role == "assistant"
+        && messages[idx]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+    {
+        let mut end = idx + 1;
+        while end < messages.len() && messages[end].role == "tool" {
+            end += 1;
+        }
+        return end;
+    }
+    idx + 1
+}
+
+/// Index of the oldest removable message in `[start, end)`, never splitting a
+/// native tool-call group and never removing a bare `role:tool` row.
+fn first_removable_llm_index(
+    messages: &[LlmTurnMessage],
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    let mut i = start;
+    while i < end {
+        if is_context_protected_content(&messages[i].content) {
+            i += 1;
+            continue;
+        }
+        if messages[i].role == "tool" {
+            i += 1;
+            continue;
+        }
+        if messages[i].role == "assistant"
+            && messages[i]
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            return Some(i);
+        }
+        if messages[i].role != "tool" {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Build history turns for the LLM, bounded by message count and token budget (sync / no LLM summary).
@@ -886,32 +1128,22 @@ pub fn pack_session_history(
     max_messages: usize,
     token_budget: u32,
 ) -> Vec<LlmTurnMessage> {
-    let take = max_messages.max(2);
-    let (dropped_slice, slice) = if history.len() > take {
-        let split = history.len() - take;
-        (&history[..split], &history[split..])
-    } else {
-        (&[] as &[ChatMessage], history)
-    };
-
-    let mut dropped: Vec<LlmTurnMessage> = dropped_slice.iter().map(chat_message_to_llm).collect();
-    let mut out: Vec<LlmTurnMessage> = slice.iter().map(chat_message_to_llm).collect();
-
-    dropped.extend(fit_history_to_budget(&mut out, token_budget));
-
-    if !dropped.is_empty() {
+    let (mut out, segment_dropped) = pack_history_to_llm_messages(history, max_messages);
+    let token_dropped = fit_history_to_budget(&mut out, token_budget);
+    let omitted = segment_dropped + token_dropped.len();
+    if omitted > 0 {
         out.insert(
             0,
             LlmTurnMessage::new(
                 "user",
                 format!(
-                    "[{} earlier message(s) omitted from context — full transcript is in the session store]",
-                    dropped.len()
+                    "[{omitted} earlier message(s) omitted from context — full transcript is in the session store]"
                 ),
             ),
         );
     }
 
+    repair_native_tool_call_pairs(&mut out);
     out
 }
 
@@ -929,20 +1161,17 @@ pub async fn pack_session_history_with_llm(
         return Ok(pack_session_history(history, max_messages, token_budget));
     }
 
-    let take = max_messages.max(2);
-    let (dropped_slice, slice) = if history.len() > take {
-        let split = history.len() - take;
-        (&history[..split], &history[split..])
-    } else {
-        (&[] as &[ChatMessage], history)
-    };
-
-    let mut dropped: Vec<LlmTurnMessage> = dropped_slice.iter().map(chat_message_to_llm).collect();
-    let mut out: Vec<LlmTurnMessage> = slice.iter().map(chat_message_to_llm).collect();
-
+    let (mut out, _segment_dropped) = pack_history_to_llm_messages(history, max_messages);
+    let segments = history_pack_segments(history);
+    let (range, _) = select_history_segment_range(history, &segments, max_messages);
+    let mut dropped: Vec<LlmTurnMessage> = segments[..range.start]
+        .iter()
+        .flat_map(|seg| history_segment_to_llm(history, seg))
+        .collect();
     dropped.extend(fit_history_to_budget(&mut out, token_budget));
 
     if dropped.is_empty() {
+        repair_native_tool_call_pairs(&mut out);
         return Ok(out);
     }
 
@@ -955,20 +1184,22 @@ pub async fn pack_session_history_with_llm(
                 0,
                 LlmTurnMessage::new("user", format!("[session history summary]\n{summary}")),
             );
+            repair_native_tool_call_pairs(&mut out);
             return Ok(out);
         }
     }
 
+    let omitted = dropped.len();
     out.insert(
         0,
         LlmTurnMessage::new(
             "user",
             format!(
-                "[{} earlier message(s) omitted from context — full transcript is in the session store]",
-                dropped.len()
+                "[{omitted} earlier message(s) omitted from context — full transcript is in the session store]"
             ),
         ),
     );
+    repair_native_tool_call_pairs(&mut out);
     Ok(out)
 }
 
@@ -1003,7 +1234,7 @@ pub fn chat_message_to_llm(msg: &ChatMessage) -> LlmTurnMessage {
             } else {
                 msg.content.clone()
             };
-            LlmTurnMessage::tool_result(name, content)
+            LlmTurnMessage::tool_result_with_id(msg.tool_call_id.clone(), name, content)
         }
         ChatRole::User | ChatRole::Harness | ChatRole::Reasoning => {
             LlmTurnMessage::new("user", msg.content.clone())
@@ -1104,7 +1335,7 @@ fn first_removable_message_index(
     start: usize,
     end: usize,
 ) -> Option<usize> {
-    (start..end).find(|&i| !is_context_protected_content(&messages[i].content))
+    first_removable_llm_index(messages, start, end)
 }
 
 /// Chars kept when summarizing an older tool turn during trim (live turn stays full).
@@ -1344,8 +1575,9 @@ pub fn trim_llm_messages(
         }
         if messages.len() > 1 + TAIL_PROTECT {
             let end = messages.len().saturating_sub(TAIL_PROTECT);
-            if let Some(idx) = first_removable_message_index(messages, 1, end) {
-                messages.remove(idx);
+            if let Some(idx) = first_removable_llm_index(messages, 1, end) {
+                let span_end = removable_llm_span_end(messages, idx);
+                messages.drain(idx..span_end);
                 continue;
             }
         }
@@ -1365,22 +1597,158 @@ pub fn trim_llm_messages(
         if len > 1 && estimate_messages_tokens(messages) > token_budget {
             let last = messages.len() - 1;
             if llm_message_is_tool_result(&messages[last]) {
-                let tool = llm_message_tool_label(&messages[last]);
-                let body = if messages[last].role == "tool" {
-                    messages[last].content.clone()
-                } else {
-                    tool_result_body(&messages[last].content)
-                };
-                messages[last].content = format!(
-                    "tool_result({tool}):\n{}",
-                    prepare_tool_result_for_context(&tool, &body)
-                );
-                messages[last].role = "user";
-                messages[last].tool_name = None;
+                shrink_tool_result_message(&mut messages[last], compaction);
             }
         }
         break;
     }
+    repair_native_tool_call_pairs(messages);
+}
+
+/// Ensure every assistant `tool_calls[].id` has a following `role:tool` message
+/// with a matching `tool_call_id`. Providers reject unpaired tool_calls (HTTP 400).
+/// Also demotes orphan `role:tool` messages that lack a preceding `tool_calls`
+/// carrier (the inverse 400: tool without tool_calls).
+pub fn repair_native_tool_call_pairs(messages: &mut Vec<LlmTurnMessage>) {
+    let mut i = 0;
+    while i < messages.len() {
+        let calls = if messages[i].role == "assistant" {
+            match &messages[i].tool_calls {
+                Some(calls) if !calls.is_empty() => calls.clone(),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            i += 1;
+            continue;
+        };
+
+        let mut j = i + 1;
+        while j < messages.len() {
+            let msg = &messages[j];
+            if msg.role == "tool" {
+                j += 1;
+                continue;
+            }
+            // Legacy compaction rewrote tool results as user transcripts; treat
+            // those as belonging to this tool_calls block so we can restore them.
+            if msg.role == "user" && is_tool_result_transcript(&msg.content) {
+                j += 1;
+                continue;
+            }
+            break;
+        }
+
+        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unassigned_call_idx = 0usize;
+        for msg in &mut messages[(i + 1)..j] {
+            if msg.role == "tool" {
+                if let Some(id) = msg.tool_call_id.clone() {
+                    covered.insert(id);
+                    continue;
+                }
+                while unassigned_call_idx < calls.len()
+                    && covered.contains(&calls[unassigned_call_idx].id)
+                {
+                    unassigned_call_idx += 1;
+                }
+                if unassigned_call_idx < calls.len() {
+                    let id = calls[unassigned_call_idx].id.clone();
+                    if msg.tool_name.is_none() {
+                        msg.tool_name = Some(calls[unassigned_call_idx].name.clone());
+                    }
+                    msg.tool_call_id = Some(id.clone());
+                    covered.insert(id);
+                    unassigned_call_idx += 1;
+                }
+                continue;
+            }
+            // Restore compacted user-role tool transcripts to role:tool.
+            if msg.role == "user" && is_tool_result_transcript(&msg.content) {
+                while unassigned_call_idx < calls.len()
+                    && covered.contains(&calls[unassigned_call_idx].id)
+                {
+                    unassigned_call_idx += 1;
+                }
+                if unassigned_call_idx < calls.len() {
+                    let call = &calls[unassigned_call_idx];
+                    msg.role = "tool";
+                    msg.tool_name = Some(call.name.clone());
+                    msg.tool_call_id = Some(call.id.clone());
+                    covered.insert(call.id.clone());
+                    unassigned_call_idx += 1;
+                }
+            }
+        }
+
+        let mut insert_at = j;
+        for call in &calls {
+            if covered.contains(&call.id) {
+                continue;
+            }
+            messages.insert(
+                insert_at,
+                LlmTurnMessage::tool_result_with_id(
+                    Some(call.id.clone()),
+                    call.name.clone(),
+                    format!(
+                        "tool_result({}):\n[harness] tool result omitted during context compaction",
+                        call.name
+                    ),
+                ),
+            );
+            insert_at += 1;
+            covered.insert(call.id.clone());
+        }
+        i = insert_at;
+    }
+
+    demote_orphan_tool_messages(messages);
+}
+
+/// Convert `role:tool` messages that are not in a tool_calls response block into
+/// `role:user` transcripts so OpenAI-compatible APIs accept the payload.
+fn demote_orphan_tool_messages(messages: &mut [LlmTurnMessage]) {
+    let mut expecting_tools = false;
+    for msg in messages.iter_mut() {
+        if msg.role == "assistant" {
+            expecting_tools = msg.tool_calls.as_ref().is_some_and(|c| !c.is_empty());
+            continue;
+        }
+        if msg.role == "tool" {
+            if expecting_tools {
+                continue;
+            }
+            let label = msg
+                .tool_name
+                .clone()
+                .unwrap_or_else(|| "tool".to_string());
+            if !is_tool_result_transcript(&msg.content) {
+                msg.content = format!("tool_result({label}):\n{}", msg.content);
+            }
+            msg.role = "user";
+            msg.tool_name = None;
+            msg.tool_call_id = None;
+            continue;
+        }
+        expecting_tools = false;
+    }
+}
+
+fn shrink_tool_result_message(msg: &mut LlmTurnMessage, compaction: CompactionStrategy) {
+    let tool = llm_message_tool_label(msg);
+    if msg.role == "tool" {
+        // Keep role:tool + tool_call_id — only shrink content.
+        msg.content = summarize_tool_result_for_compaction(compaction, &tool, &msg.content);
+        return;
+    }
+    // Legacy user-role tool transcripts: shrink in place; repair may restore role.
+    msg.content = match compaction {
+        CompactionStrategy::Ops => summarize_ops_tool_content("tool", &msg.content),
+        _ => summarize_tool_content(&msg.content),
+    };
 }
 
 fn tool_result_body(content: &str) -> String {
@@ -1399,20 +1767,7 @@ fn compress_oldest_tool_in_slice(
             && !is_already_summarized(&messages[i].content)
             && !is_rolling_summary_content(&messages[i].content)
         {
-            let summary = if messages[i].role == "tool" {
-                let tool = llm_message_tool_label(&messages[i]);
-                summarize_tool_result_for_compaction(compaction, &tool, &messages[i].content)
-            } else {
-                match compaction {
-                    CompactionStrategy::Ops => {
-                        summarize_ops_tool_content("tool", &messages[i].content)
-                    }
-                    _ => summarize_tool_content(&messages[i].content),
-                }
-            };
-            messages[i].content = summary;
-            messages[i].role = "user";
-            messages[i].tool_name = None;
+            shrink_tool_result_message(&mut messages[i], compaction);
             return true;
         }
     }
@@ -1432,20 +1787,7 @@ fn summarize_message_at(
     }
     let role = messages[idx].role;
     if llm_message_is_tool_result(&messages[idx]) {
-        if messages[idx].role == "tool" {
-            let tool = llm_message_tool_label(&messages[idx]);
-            messages[idx].content =
-                summarize_tool_result_for_compaction(compaction, &tool, &messages[idx].content);
-        } else {
-            messages[idx].content = match compaction {
-                CompactionStrategy::Ops => {
-                    summarize_ops_tool_content("tool", &messages[idx].content)
-                }
-                _ => summarize_tool_content(&messages[idx].content),
-            };
-        }
-        messages[idx].role = "user";
-        messages[idx].tool_name = None;
+        shrink_tool_result_message(&mut messages[idx], compaction);
         return;
     }
     let preview: String = messages[idx].content.chars().take(500).collect();
@@ -1667,6 +2009,7 @@ mod tests {
                 content: format!("message {i} {}", "x".repeat(200)),
                 tool_name: None,
                 tool_calls_json: None,
+                tool_call_id: None,
                 reasoning_original: None,
                 parent_message_id: None,
                 branch_index: None,
@@ -1828,6 +2171,7 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
             ts: Utc::now(),
             tool_name: None,
             tool_calls_json: None,
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,
@@ -1971,6 +2315,7 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
             ts: Utc::now(),
             tool_name: Some("skill_load".into()),
             tool_calls_json: None,
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,
@@ -1994,6 +2339,7 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
                 ts: Utc::now(),
                 tool_name: None,
                 tool_calls_json: None,
+                tool_call_id: None,
                 reasoning_original: None,
                 parent_message_id: None,
                 branch_index: None,
@@ -2006,6 +2352,7 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
                 ts: Utc::now(),
                 tool_name: None,
                 tool_calls_json: None,
+                tool_call_id: None,
                 reasoning_original: None,
                 parent_message_id: None,
                 branch_index: None,
@@ -2308,5 +2655,338 @@ diff --git a/src/lib.rs b/src/lib.rs\n\
         let body = "line\n".repeat(30) + "exit: 1\nfailed tests";
         let out = summarize_coding_tool_content("bash_run", &body);
         assert!(out.contains("exit: 1"));
+    }
+
+    #[test]
+    fn trim_keeps_native_tool_role_and_call_id() {
+        use crate::llm::chat::LlmToolCall;
+        use crate::llm::LlmTurnMessage;
+
+        let mut messages = vec![
+            LlmTurnMessage::new("system", "sys".repeat(2000)),
+            LlmTurnMessage::new("user", "please dig ".to_string() + &"x".repeat(2000)),
+            LlmTurnMessage::assistant_tool_call(
+                "",
+                vec![
+                    LlmToolCall {
+                        id: "call_a".into(),
+                        name: "skill_load".into(),
+                        arguments: serde_json::json!({"name": "pr-review"}),
+                    },
+                    LlmToolCall {
+                        id: "call_b".into(),
+                        name: "bash_run".into(),
+                        arguments: serde_json::json!({"command": "ls"}),
+                    },
+                ],
+            ),
+            LlmTurnMessage::tool_result_with_id(
+                Some("call_a".into()),
+                "skill_load",
+                format_tool_context_message(
+                    "skill_load",
+                    &serde_json::json!({"name": "pr-review"}),
+                    true,
+                    &("skill body ".to_string() + &"y".repeat(1500)),
+                ),
+            ),
+            LlmTurnMessage::tool_result_with_id(
+                Some("call_b".into()),
+                "bash_run",
+                format_tool_context_message(
+                    "bash_run",
+                    &serde_json::json!({"command": "ls"}),
+                    true,
+                    &("exit: 0\n".to_string() + &"z".repeat(1500)),
+                ),
+            ),
+        ];
+        trim_llm_messages(&mut messages, 800, CompactionStrategy::Code);
+
+        let assistant_idx = messages
+            .iter()
+            .position(|m| m.role == "assistant" && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()))
+            .expect("assistant tool_calls kept");
+        let expected: std::collections::HashSet<_> = messages[assistant_idx]
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        let mut covered = std::collections::HashSet::new();
+        for m in messages.iter().skip(assistant_idx + 1) {
+            if m.role != "tool" {
+                break;
+            }
+            let id = m
+                .tool_call_id
+                .as_ref()
+                .expect("compacted tool result must keep tool_call_id");
+            covered.insert(id.clone());
+        }
+        assert_eq!(
+            covered, expected,
+            "every tool_calls id must have a role:tool follow-up after trim"
+        );
+    }
+
+    #[test]
+    fn repair_fills_missing_tool_results_after_tool_calls() {
+        use crate::llm::chat::LlmToolCall;
+        use crate::llm::LlmTurnMessage;
+
+        let mut messages = vec![
+            LlmTurnMessage::new("system", "sys"),
+            LlmTurnMessage::assistant_tool_call(
+                "",
+                vec![
+                    LlmToolCall {
+                        id: "c1".into(),
+                        name: "bash_run".into(),
+                        arguments: serde_json::json!({"command": "a"}),
+                    },
+                    LlmToolCall {
+                        id: "c2".into(),
+                        name: "bash_run".into(),
+                        arguments: serde_json::json!({"command": "b"}),
+                    },
+                ],
+            ),
+            LlmTurnMessage::tool_result_with_id(
+                Some("c1".into()),
+                "bash_run",
+                "tool_result(bash_run):\nok",
+            ),
+            // c2 intentionally missing
+            LlmTurnMessage::new("assistant", "done"),
+        ];
+        repair_native_tool_call_pairs(&mut messages);
+        let tool_ids: Vec<_> = messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        assert_eq!(tool_ids, vec!["c1", "c2"]);
+    }
+
+    #[test]
+    fn chat_message_to_llm_preserves_tool_call_id() {
+        let msg = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            role: ChatRole::Tool,
+            content: "tool_result(bash_run):\nexit: 0".into(),
+            ts: Utc::now(),
+            tool_name: Some("bash_run".into()),
+            tool_calls_json: Some(r#"{"command":"ls"}"#.into()),
+            tool_call_id: Some("call_42".into()),
+            reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
+        };
+        let llm = chat_message_to_llm(&msg);
+        assert_eq!(llm.role, "tool");
+        assert_eq!(llm.tool_call_id.as_deref(), Some("call_42"));
+    }
+
+    #[test]
+    fn pack_history_does_not_start_on_orphan_tool() {
+        let session = Uuid::new_v4();
+        let mut history = sample_history(6);
+        for m in &mut history {
+            m.session_id = session;
+        }
+        // Replace the last three with a tool_calls group + trailing user answer.
+        let assistant_id = Uuid::new_v4();
+        history.push(ChatMessage {
+            id: assistant_id,
+            session_id: session,
+            role: ChatRole::Assistant,
+            content: String::new(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: Some(
+                r#"[{"id":"ask1","name":"ask_user","arguments":{"question":"repo?"}}]"#.into(),
+            ),
+            tool_call_id: None,
+            reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
+        });
+        history.push(ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: session,
+            role: ChatRole::Tool,
+            content: "tool_user_question_pending(ask_user, question_id=00000000-0000-0000-0000-000000000001):\nargs: {}\n\nAwaiting".into(),
+            ts: Utc::now(),
+            tool_name: Some("ask_user".into()),
+            tool_calls_json: Some("{}".into()),
+            tool_call_id: Some("ask1".into()),
+            reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
+        });
+        history.push(ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: session,
+            role: ChatRole::User,
+            content: "Look unistar/unistar-coworker".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+            tool_call_id: None,
+            reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
+        });
+
+        // Window of 2 would naively start on the tool message.
+        let packed = pack_session_history(&history, 2, 100_000);
+        assert!(
+            packed.iter().any(|m| {
+                m.role == "assistant"
+                    && m.tool_calls
+                        .as_ref()
+                        .is_some_and(|c| c.iter().any(|tc| tc.id == "ask1"))
+            }),
+            "assistant tool_calls carrier must be kept when window would start on tool"
+        );
+        for (i, m) in packed.iter().enumerate() {
+            if m.role == "tool" {
+                assert!(
+                    packed[..i].iter().rev().any(|prev| {
+                        prev.role == "assistant"
+                            && prev.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+                    }),
+                    "orphan tool at index {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pack_history_skips_ask_user_answer_echo_user_row() {
+        let session = Uuid::new_v4();
+        let answer = "Look unistar/unistar-coworker";
+        let history = vec![
+            ChatMessage {
+                id: Uuid::new_v4(),
+                session_id: session,
+                role: ChatRole::Assistant,
+                content: String::new(),
+                ts: Utc::now(),
+                tool_name: None,
+                tool_calls_json: Some(
+                    r#"[{"id":"ask1","name":"ask_user","arguments":{"question":"repo?"}}]"#.into(),
+                ),
+                tool_call_id: None,
+                reasoning_original: None,
+                parent_message_id: None,
+                branch_index: None,
+            },
+            ChatMessage {
+                id: Uuid::new_v4(),
+                session_id: session,
+                role: ChatRole::Tool,
+                content: format!(
+                    "tool_result(ask_user):\nargs: {{}}\n\nUser answered:\n{answer}"
+                ),
+                ts: Utc::now(),
+                tool_name: Some("ask_user".into()),
+                tool_calls_json: Some("{}".into()),
+                tool_call_id: Some("ask1".into()),
+                reasoning_original: None,
+                parent_message_id: None,
+                branch_index: None,
+            },
+            ChatMessage {
+                id: Uuid::new_v4(),
+                session_id: session,
+                role: ChatRole::User,
+                content: answer.into(),
+                ts: Utc::now(),
+                tool_name: None,
+                tool_calls_json: None,
+                tool_call_id: None,
+                reasoning_original: None,
+                parent_message_id: None,
+                branch_index: None,
+            },
+        ];
+        let packed = pack_session_history(&history, 20, 100_000);
+        assert_eq!(
+            packed.iter().filter(|m| m.role == "user").count(),
+            0,
+            "echo user row should not be packed into LLM context"
+        );
+        assert!(
+            packed
+                .iter()
+                .any(|m| m.role == "tool" && m.content.contains(answer)),
+            "tool result should retain the answer"
+        );
+    }
+
+    #[test]
+    fn fit_history_drops_whole_tool_group_not_carrier_alone() {
+        use crate::llm::chat::LlmToolCall;
+        use crate::llm::LlmTurnMessage;
+
+        let mut messages = vec![
+            LlmTurnMessage::new("system", "sys"),
+            LlmTurnMessage::new("user", "old".repeat(2000)),
+            LlmTurnMessage::assistant_tool_call(
+                "",
+                vec![LlmToolCall {
+                    id: "c1".into(),
+                    name: "bash_run".into(),
+                    arguments: serde_json::json!({"command": "ls"}),
+                }],
+            ),
+            LlmTurnMessage::tool_result_with_id(
+                Some("c1".into()),
+                "bash_run",
+                format_tool_context_message(
+                    "bash_run",
+                    &serde_json::json!({"command": "ls"}),
+                    true,
+                    &"ok".repeat(2000),
+                ),
+            ),
+            LlmTurnMessage::new("user", "recent"),
+        ];
+        let dropped = fit_history_to_budget(&mut messages, 500);
+        assert!(!dropped.is_empty());
+        for (i, m) in messages.iter().enumerate() {
+            if m.role == "tool" {
+                assert!(
+                    messages[..i].iter().rev().any(|prev| {
+                        prev.role == "assistant"
+                            && prev.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+                    }),
+                    "no orphan tool after token fit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repair_demotes_orphan_tool_without_preceding_tool_calls() {
+        use crate::llm::LlmTurnMessage;
+
+        let mut messages = vec![
+            LlmTurnMessage::new("system", "sys"),
+            LlmTurnMessage::tool_result_with_id(
+                Some("orphan".into()),
+                "ask_user",
+                "tool_result(ask_user):\nUser answered:\nLook repo",
+            ),
+            LlmTurnMessage::new("user", "Look repo"),
+        ];
+        repair_native_tool_call_pairs(&mut messages);
+        assert_eq!(messages[1].role, "user");
+        assert!(messages[1].tool_call_id.is_none());
+        assert!(messages.iter().all(|m| m.role != "tool"));
     }
 }

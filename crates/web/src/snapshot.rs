@@ -5,6 +5,8 @@ use coworker_core::agent::budget::TokenBudget;
 use coworker_core::agent::context::truncate_chars;
 use coworker_core::app::{AppState, Tab};
 
+use crate::turn_parts::{build_chat_turn_parts, build_history_turn_parts};
+
 const WEB_CONTEXT_MSG_CHARS: usize = 4_000;
 /// Tool output bodies in WS chat patches (full snapshot may still be large on first load).
 const WEB_CHAT_PATCH_TOOL_OUTPUT_CHARS: usize = 8_000;
@@ -32,9 +34,18 @@ pub struct WebSnapshot {
     /// Raw (uncompressed) reasoning traces keyed by line index in `chat_lines`.
     /// Present only when LLM reasoning compression was applied for that line.
     pub chat_reasoning_originals: std::collections::HashMap<String, String>,
+    /// ISO-8601 timestamps keyed by line index in `chat_lines`.
+    #[serde(default)]
+    pub chat_line_times: std::collections::HashMap<String, String>,
     /// Assistant message ids keyed by line index (branch regenerate).
     pub chat_assistant_ids: std::collections::HashMap<String, String>,
     pub chat_history_revision: u64,
+    /// Structured process parts for the in-flight agent turn (`null` when idle).
+    pub chat_turn_parts: Option<Vec<Value>>,
+    /// Completed-turn process parts keyed by `you>` line index (string).
+    pub chat_history_turn_parts: serde_json::Map<String, Value>,
+    /// True when older transcript lines were dropped from memory or store has more history.
+    pub chat_older_available: bool,
     pub chat_context_revision: u64,
     pub chat_streaming: Option<String>,
     pub chat_reasoning: Option<String>,
@@ -101,8 +112,16 @@ pub struct WebChatPatch {
     pub chat_lines: Vec<String>,
     pub chat_tool_outputs: std::collections::HashMap<String, String>,
     pub chat_reasoning_originals: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub chat_line_times: std::collections::HashMap<String, String>,
     pub chat_assistant_ids: std::collections::HashMap<String, String>,
     pub chat_history_revision: u64,
+    /// Structured process parts for the in-flight agent turn (`null` when idle).
+    pub chat_turn_parts: Option<Vec<Value>>,
+    /// Completed-turn process parts keyed by `you>` line index (string).
+    pub chat_history_turn_parts: serde_json::Map<String, Value>,
+    /// True when older transcript lines were dropped from memory or store has more history.
+    pub chat_older_available: bool,
     pub chat_context_revision: u64,
     pub chat_streaming: Option<String>,
     pub chat_reasoning: Option<String>,
@@ -126,6 +145,10 @@ fn tab_name(tab: Tab) -> &'static str {
         Tab::Logs => "logs",
         Tab::Config => "config",
     }
+}
+
+fn chat_older_available(s: &AppState) -> bool {
+    s.chat_lines_truncated || s.chat_older_messages_available
 }
 
 pub async fn build_snapshot(state: &coworker_core::app::SharedState) -> WebSnapshot {
@@ -200,12 +223,20 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect(),
+        chat_line_times: s
+            .chat_line_times
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_rfc3339()))
+            .collect(),
         chat_assistant_ids: s
             .chat_assistant_ids
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         chat_history_revision: s.chat_history_revision,
+        chat_turn_parts: build_chat_turn_parts(s),
+        chat_history_turn_parts: build_history_turn_parts(s),
+        chat_older_available: chat_older_available(s),
         chat_context_revision: s.chat_context_revision,
         chat_streaming: live.chat_streaming,
         chat_reasoning: live.chat_reasoning,
@@ -479,12 +510,20 @@ pub fn build_chat_patch_from(s: &AppState) -> WebChatPatch {
                 )
             })
             .collect(),
+        chat_line_times: s
+            .chat_line_times
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_rfc3339()))
+            .collect(),
         chat_assistant_ids: s
             .chat_assistant_ids
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         chat_history_revision: s.chat_history_revision,
+        chat_turn_parts: build_chat_turn_parts(s),
+        chat_history_turn_parts: build_history_turn_parts(s),
+        chat_older_available: chat_older_available(s),
         chat_context_revision: s.chat_context_revision,
         chat_streaming: live.chat_streaming,
         chat_reasoning: live.chat_reasoning,
@@ -601,8 +640,12 @@ storage: {{ backend: json, path: ./data }}
         "chat_lines",
         "chat_tool_outputs",
         "chat_reasoning_originals",
+        "chat_line_times",
         "chat_assistant_ids",
         "chat_history_revision",
+        "chat_turn_parts",
+        "chat_history_turn_parts",
+        "chat_older_available",
         "chat_context_revision",
         "chat_streaming",
         "chat_reasoning",
@@ -754,8 +797,12 @@ storage: {{ backend: json, path: ./data }}
             "chat_lines",
             "chat_tool_outputs",
             "chat_reasoning_originals",
+            "chat_line_times",
             "chat_assistant_ids",
             "chat_history_revision",
+            "chat_turn_parts",
+            "chat_history_turn_parts",
+            "chat_older_available",
             "chat_context_revision",
             "chat_streaming",
             "chat_reasoning",

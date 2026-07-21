@@ -141,6 +141,11 @@ pub struct ChatMessage {
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_calls_json: Option<String>,
+    /// Native API `tool_call_id` for `ChatRole::Tool` messages (matches
+    /// assistant `tool_calls[].id`). Required when reloading history into
+    /// OpenAI-compatible chat completions.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
     /// For `Reasoning` messages: the raw (uncompressed) thinking trace, when
     /// it differs from `content` (which holds the LLM-compressed summary).
     /// `None` for non-reasoning messages or when no compression occurred.

@@ -2,6 +2,8 @@
 // Authoritative source: src/web/snapshot.rs (WebSnapshot / WebLivePatch / WebChatPatch).
 // Contract tests in src/web/snapshot.rs::tests lock the field sets.
 
+import type { ChatMessagePart } from "../tabs/chat/messageParts";
+
 export interface ActivityFlow {
   kind: string;
   text: string;
@@ -128,8 +130,16 @@ export interface WebSnapshot {
   chat_lines: string[];
   chat_tool_outputs: Record<string, string>;
   chat_reasoning_originals: Record<string, string>;
+  /** ISO-8601 timestamps keyed by chat_lines index. */
+  chat_line_times: Record<string, string>;
   chat_assistant_ids: Record<string, string>;
   chat_history_revision: number;
+  /** In-flight turn process parts from backend (`null` when idle). */
+  chat_turn_parts: ChatMessagePart[] | null;
+  /** Completed-turn process parts keyed by `you>` line index. */
+  chat_history_turn_parts: Record<string, ChatMessagePart[]>;
+  /** Older messages exist in store or were dropped from the in-memory window. */
+  chat_older_available: boolean;
   chat_context_revision: number;
   chat_streaming: string | null;
   chat_reasoning: string | null;
@@ -186,8 +196,16 @@ export interface WebChatPatch {
   chat_lines: string[];
   chat_tool_outputs: Record<string, string>;
   chat_reasoning_originals: Record<string, string>;
+  /** ISO-8601 timestamps keyed by chat_lines index. */
+  chat_line_times: Record<string, string>;
   chat_assistant_ids: Record<string, string>;
   chat_history_revision: number;
+  /** In-flight turn process parts from backend (`null` when idle). */
+  chat_turn_parts: ChatMessagePart[] | null;
+  /** Completed-turn process parts keyed by `you>` line index. */
+  chat_history_turn_parts: Record<string, ChatMessagePart[]>;
+  /** Older messages exist in store or were dropped from the in-memory window. */
+  chat_older_available: boolean;
   chat_context_revision: number;
   chat_streaming: string | null;
   chat_reasoning: string | null;

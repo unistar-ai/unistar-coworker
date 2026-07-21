@@ -44,6 +44,44 @@ GitHub CLI body`;
     expect(p.body).toContain("ERROR");
   });
 
+  it("parses tool_user_question_pending (ask_user)", () => {
+    const content = `tool_user_question_pending(ask_user, question_id=00000000-0000-0000-0000-000000000000):
+args: {
+  "question": "Which repo?",
+  "options": ["acme/widget", "acme/api"]
+}
+
+Awaiting user answer.
+
+Question: Which repo?
+
+Options:
+  1. acme/widget
+  2. acme/api`;
+    const p = parseContextToolTranscript(content);
+    expect(p.kind).toBe("ask_user");
+    expect(p.toolName).toBe("ask_user");
+    expect(p.ok).toBe(true);
+    expect(p.args).toEqual({
+      question: "Which repo?",
+      options: ["acme/widget", "acme/api"],
+    });
+    expect(p.body).toContain("Question: Which repo?");
+  });
+
+  it("parses answered ask_user tool_result", () => {
+    const content = `tool_result(ask_user):
+args: {"question":"Which repo?"}
+
+User answered:
+acme/widget`;
+    const p = parseContextToolTranscript(content);
+    expect(p.kind).toBe("result");
+    expect(p.toolName).toBe("ask_user");
+    expect(p.body).toContain("User answered:");
+    expect(p.body).toContain("acme/widget");
+  });
+
   it("parses summarized tool_result", () => {
     const p = parseContextToolTranscript("[summarized tool_result skill_load]\npreview…");
     expect(p.kind).toBe("summarized");
@@ -61,19 +99,20 @@ GitHub CLI body`;
 });
 
 describe("contextToolPreview", () => {
-  it("includes tool name and body snippet", () => {
+  it("includes localized title and arg/body snippet", () => {
     const preview = contextToolPreview(
       'tool_result(web_fetch):\nargs: {"url":"https://x"}\n\nOK: 200',
       80,
     );
-    expect(preview).toContain("web_fetch");
-    expect(preview).toContain("OK");
+    expect(preview).toContain("获取网页");
+    expect(preview).toMatch(/https:\/\/x|OK/);
   });
 
-  it("shows line count for multiline bodies", () => {
-    const body = "tool_result(bash_run):\nargs: {}\n\n" + "line\n".repeat(10);
+  it("prefers command subtitle for shell tools", () => {
+    const body =
+      'tool_result(bash_run):\nargs: {"command":"ls -la"}\n\n' + "line\n".repeat(10);
     const preview = contextToolPreview(body);
-    expect(preview).toContain("bash_run");
-    expect(preview).toContain("lines");
+    expect(preview).toContain("执行命令");
+    expect(preview).toContain("ls -la");
   });
 });

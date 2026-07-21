@@ -3,13 +3,19 @@ import {
   parseMessage,
   parseToolStep,
   buildChatBlocks,
+  groupIntoTurns,
   summarizeToolGroup,
   splitToolStepGroups,
   toolSourceLabel,
   toolMeta,
   parseToolArgsString,
   formatToolArgValue,
+  formatTurnProcessSummary,
+  formatDurationMs,
+  turnProcessDurationMs,
   normalizeReasoningText,
+  trimInFlightHistoryItems,
+  isInFlightUserTurn,
 } from "../tabs/chat/parser";
 
 describe("parseMessage", () => {
@@ -203,6 +209,21 @@ describe("parseToolArgsString", () => {
     expect(parseToolArgsString("")).toEqual([]);
     expect(parseToolArgsString("  ")).toEqual([]);
   });
+
+  it("keeps commas inside command= values", () => {
+    const cmd =
+      "gh api repos/x/y/commits -q '.[0:2][] | {sha: .sha, message: .msg}'";
+    const pairs = parseToolArgsString(`command=${cmd}`);
+    expect(pairs).toEqual([{ key: "command", value: cmd }]);
+  });
+
+  it("still splits following short keys after a long value", () => {
+    const pairs = parseToolArgsString("command=echo a,b,c, timeout=5");
+    expect(pairs).toEqual([
+      { key: "command", value: "echo a,b,c" },
+      { key: "timeout", value: "5" },
+    ]);
+  });
 });
 
 describe("formatToolArgValue", () => {
@@ -330,5 +351,122 @@ describe("buildChatBlocks", () => {
     expect(blocks[0].type).toBe("tool-group");
     expect(blocks[1].type).toBe("message");
     expect(blocks[1].message?.role).toBe("assistant");
+  });
+});
+
+describe("groupIntoTurns", () => {
+  it("groups user, tools, and final assistant into one turn", () => {
+    const lines = [
+      "you> list dir",
+      "  → bash_run(ls)",
+      "  ✓ bash_run(ls)(12ms)",
+      "assistant> Directory is empty.",
+    ];
+    const items = groupIntoTurns(buildChatBlocks(lines, {}));
+    expect(items.length).toBe(1);
+    expect(items[0].type).toBe("turn");
+    if (items[0].type !== "turn") return;
+    expect(items[0].turn.user?.message?.body).toBe("list dir");
+    expect(items[0].turn.process.length).toBe(1);
+    expect(items[0].turn.process[0].type).toBe("tool-group");
+    expect(items[0].turn.answer?.message?.body).toBe("Directory is empty.");
+  });
+
+  it("treats interim assistant as process before tools", () => {
+    const lines = [
+      "you> summarize",
+      "assistant> Let me check.",
+      "  → pr_list_open()",
+      "  ✓ pr_list_open(50ms)",
+      "assistant> Found 3 PRs.",
+    ];
+    const blocks = buildChatBlocks(lines, {});
+    const items = groupIntoTurns(blocks);
+    expect(items.length).toBe(1);
+    if (items[0].type !== "turn") return;
+    expect(items[0].turn.process.length).toBe(2);
+    expect(items[0].turn.process[0].type).toBe("message");
+    expect(items[0].turn.process[1].type).toBe("tool-group");
+    expect(items[0].turn.answer?.message?.body).toBe("Found 3 PRs.");
+  });
+
+  it("leaves system messages as standalone blocks", () => {
+    const lines = ["system> session cleared", "you> hi", "assistant> hello"];
+    const items = groupIntoTurns(buildChatBlocks(lines, {}));
+    expect(items.length).toBe(2);
+    expect(items[0].type).toBe("block");
+    expect(items[1].type).toBe("turn");
+  });
+});
+
+describe("trimInFlightHistoryItems", () => {
+  it("keeps user and clears process while busy", () => {
+    const items = groupIntoTurns(
+      buildChatBlocks(
+        ["you> hi", "  → bash_run(ls)", "  ✓ bash_run(ls)(1ms)"],
+        {},
+      ),
+    );
+    const trimmed = trimInFlightHistoryItems(items, true);
+    expect(trimmed).toHaveLength(1);
+    if (trimmed[0].type !== "turn") return;
+    expect(trimmed[0].turn.user?.message?.body).toBe("hi");
+    expect(trimmed[0].turn.process).toEqual([]);
+    expect(trimmed[0].turn.answer).toBeUndefined();
+    expect(isInFlightUserTurn(trimmed[0])).toBe(true);
+  });
+
+  it("drops trailing agent-only fragment while busy", () => {
+    const items = groupIntoTurns(
+      buildChatBlocks(["  → bash_run(ls)", "  ✓ bash_run(ls)(1ms)"], {}),
+    );
+    const trimmed = trimInFlightHistoryItems(items, true);
+    expect(trimmed).toEqual([]);
+  });
+
+  it("is a no-op when idle", () => {
+    const items = groupIntoTurns(
+      buildChatBlocks(
+        ["you> hi", "  → bash_run(ls)", "  ✓ bash_run(ls)(1ms)", "assistant> ok"],
+        {},
+      ),
+    );
+    expect(trimInFlightHistoryItems(items, false)).toEqual(items);
+    expect(isInFlightUserTurn(items[0])).toBe(false);
+  });
+});
+
+describe("turn process summary", () => {
+  it("formatDurationMs formats sub-second and seconds", () => {
+    expect(formatDurationMs(450)).toBe("450ms");
+    expect(formatDurationMs(2300)).toBe("2.3s");
+    expect(formatDurationMs(125000)).toBe("2m 5s");
+  });
+
+  it("formatTurnProcessSummary includes duration when provided", () => {
+    expect(
+      formatTurnProcessSummary({ tools: 2, thoughts: 1 }, 3200),
+    ).toBe("2 次工具调用 · 1 次思考 · 3.2s");
+  });
+
+  it("formatTurnProcessSummary shows failed tool count", () => {
+    expect(formatTurnProcessSummary({ tools: 3, thoughts: 0 }, null, 1)).toBe(
+      "3 次工具调用 · 1 失败",
+    );
+  });
+
+  it("turnProcessDurationMs sums tool group ms", () => {
+    const lines = [
+      "you> go",
+      "  → bash_run(ls)",
+      "  ✓ bash_run(ls)(120ms)",
+      "assistant> done",
+    ];
+    const blocks = buildChatBlocks(lines, {});
+    const turn = groupIntoTurns(blocks).find((i) => i.type === "turn");
+    expect(turn?.type).toBe("turn");
+    if (turn?.type !== "turn") return;
+    const ms = turnProcessDurationMs(turn.turn.process);
+    expect(ms).toBe(120);
   });
 });

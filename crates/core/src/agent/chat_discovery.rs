@@ -443,6 +443,7 @@ mod tests {
             ts: Utc::now(),
             tool_name: Some("skill_load".into()),
             tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,

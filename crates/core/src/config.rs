@@ -1117,9 +1117,11 @@ impl Config {
     }
 
     pub fn discover() -> Result<(Self, PathBuf)> {
+        // Canonical: `.coworker/coworker.yaml` (Claude-style project dir).
+        // Legacy flat `coworker.yaml` in cwd still works.
         let candidates = [
-            PathBuf::from("coworker.yaml"),
             PathBuf::from(".coworker/coworker.yaml"),
+            PathBuf::from("coworker.yaml"),
         ];
         for path in candidates {
             if path.exists() {
@@ -1127,7 +1129,7 @@ impl Config {
             }
         }
         Err(CoworkerError::Config(
-            "coworker.yaml not found (cwd or .coworker/) — run `unistar-coworker init --interactive` to create one".into(),
+            "coworker.yaml not found (.coworker/ or cwd) — run `unistar-coworker init --interactive` to create one".into(),
         ))
     }
 

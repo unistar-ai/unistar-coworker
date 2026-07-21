@@ -5,25 +5,30 @@
 | Path | Role |
 |------|------|
 | [`scripts/package.sh`](../scripts/package.sh) | Full package: web-ui, binary, skills, template, docs |
-| [`QUICKSTART.md`](../QUICKSTART.md) / [`QUICKSTART_CN.md`](../QUICKSTART_CN.md) | First-run guide (tar.gz + Docker); copied into release tree |
-| `workdir-template/` | Seed config copied into the tree (`template/` + root `coworker.yaml`) |
+| [`QUICKSTART.md`](../QUICKSTART.md) / [`QUICKSTART_CN.md`](../QUICKSTART_CN.md) | First-run guide (tar.gz + Docker); copied into `.coworker/` |
+| `workdir-template/` | Seed config copied into `.coworker/` (`template/` + `coworker.yaml`) |
 
 ### Output layout
 
+Claude-style project agent directory — binary at the deploy root, everything else under `.coworker/`:
+
 ```
 <output>/
-├── unistar-coworker       # binary (embed-web-ui, release)
-├── skills/
-├── template/              # pristine workdir-template/
-├── coworker.yaml          # active config (from template)
-├── AGENTS.md
-├── coworker.example.yaml
-├── coworker.minimal.yaml
-├── README.md
-├── QUICKSTART.md
-├── QUICKSTART_CN.md
-└── data/                  # preserved across rebuilds (local runtime only)
+├── unistar-coworker           # binary (embed-web-ui, release)
+└── .coworker/                 # agent home (config / skills / data / docs)
+    ├── skills/
+    ├── template/              # pristine workdir-template/
+    ├── coworker.yaml          # active config (from template or preserved)
+    ├── AGENTS.md
+    ├── coworker.example.yaml
+    ├── coworker.minimal.yaml
+    ├── README.md
+    ├── QUICKSTART.md
+    ├── QUICKSTART_CN.md
+    └── data/                  # preserved across rebuilds (local runtime only)
 ```
+
+Process **cwd** stays at `<output>/` so `chat.workspace: .` is the project root. Config discovery prefers `.coworker/coworker.yaml` (legacy flat `coworker.yaml` still works).
 
 **Local** (default `../workdir` next to repo):
 

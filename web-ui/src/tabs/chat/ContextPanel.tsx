@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { useStore } from "../../store/wsStore";
+import { useChatUiStore } from "../../store/chatUiStore";
 import { apiPost } from "../../lib/api";
 import Markdown from "../../components/Markdown";
 import DetailModal from "../../components/DetailModal";
@@ -10,6 +11,8 @@ import {
   contextToolPreview,
   parseContextToolTranscript,
 } from "./contextToolResult";
+import { findContextToolMessageIndex, toolNamesMatch } from "./contextFocus";
+import { toolRowTitle } from "./toolDisplay";
 import type { ChatContext, SkillBlock } from "../../store/protocol";
 
 function ctxInlineSummary(items: string[], max = 3): string {
@@ -383,15 +386,90 @@ export function SkillFrontmatter({ sk }: { sk: SkillBlock }) {
   );
 }
 
+function scrollBlockIntoContextScroller(el: HTMLElement) {
+  const scroller =
+    (el.closest(".context-messages") as HTMLElement | null) ||
+    (el.closest(".context-pane-inner") as HTMLElement | null);
+  if (!scroller) {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
+  const elRect = el.getBoundingClientRect();
+  const scRect = scroller.getBoundingClientRect();
+  const delta = elRect.top - scRect.top - scRect.height / 2 + elRect.height / 2;
+  scroller.scrollBy({ top: delta, behavior: "smooth" });
+}
+
 function ContextMessages({ ctx }: { ctx: ChatContext }) {
   const messages = ctx.messages || [];
+  const focus = useChatUiStore((s) => s.contextFocus);
+  const focusSeq = useChatUiStore((s) => s.contextFocusSeq);
+  const clearContextFocus = useChatUiStore((s) => s.clearContextFocus);
+  const listRef = useRef<HTMLDivElement>(null);
+  const blockRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  const focusIndex = useMemo(() => {
+    if (!focus) return -1;
+    const exact = findContextToolMessageIndex(messages, focus);
+    if (exact >= 0) return exact;
+    // Soft fallback: last tool row with the same name so the button still
+    // opens/scrolls somewhere useful when fingerprints are incomplete.
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const role = (messages[i].role || "").toLowerCase();
+      if (!role.includes("tool")) continue;
+      const parsed = parseContextToolTranscript(messages[i].content || "");
+      if (parsed.toolName && toolNamesMatch(focus.toolName, parsed.toolName)) {
+        return i;
+      }
+    }
+    return -1;
+  }, [focus, messages, focusSeq]);
+
+  useEffect(() => {
+    if (!focus) return;
+    if (focusIndex < 0) {
+      // Opened panel but no confident match — don't jump to a wrong row.
+      const t = window.setTimeout(() => clearContextFocus(), 0);
+      return () => window.clearTimeout(t);
+    }
+    let cancelled = false;
+    const run = () => {
+      if (cancelled) return;
+      const el = blockRefs.current.get(focusIndex);
+      if (!el) return;
+      el.classList.add("ctx-block-focus-flash");
+      scrollBlockIntoContextScroller(el);
+      window.setTimeout(() => {
+        el.classList.remove("ctx-block-focus-flash");
+        clearContextFocus();
+      }, 1400);
+    };
+    // Wait for panel open + expand layout.
+    const t = window.setTimeout(() => {
+      requestAnimationFrame(() => requestAnimationFrame(run));
+    }, 50);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [focusIndex, focusSeq, focus, clearContextFocus]);
 
   return (
-    <div className="context-messages">
+    <div className="context-messages" ref={listRef}>
       {messages.length === 0 ? (
         <div className="ctx-empty">No context messages yet</div>
       ) : (
-        messages.map((m, i) => <ContextMessageBlock key={i} message={m} />)
+        messages.map((m, i) => (
+          <ContextMessageBlock
+            key={i}
+            message={m}
+            forceExpanded={i === focusIndex}
+            blockRef={(node) => {
+              if (node) blockRefs.current.set(i, node);
+              else blockRefs.current.delete(i);
+            }}
+          />
+        ))
       )}
     </div>
   );
@@ -453,7 +531,7 @@ function ContextReasoningToggle({
           onChange("summary");
         }}
       >
-        Summary
+        摘要
       </button>
       <button
         type="button"
@@ -463,13 +541,21 @@ function ContextReasoningToggle({
           onChange("original");
         }}
       >
-        Original
+        原文
       </button>
     </div>
   );
 }
 
-function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
+function ContextMessageBlock({
+  message,
+  forceExpanded = false,
+  blockRef,
+}: {
+  message: CollapsibleMessage;
+  forceExpanded?: boolean;
+  blockRef?: (node: HTMLDivElement | null) => void;
+}) {
   const mcpServers = useStore((s) => s.mcp_servers);
   const mcpPrefixes = useMemo(
     () => mcpServers.map((s) => ({ id: s.id, prefix: s.prefix || `${s.id}_` })),
@@ -477,7 +563,7 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
   );
 
   const { collapsible, previewChars } = ctxCollapsePolicy(message);
-  const [expanded, setExpanded] = useState(!collapsible);
+  const [expanded, setExpanded] = useState(!collapsible || forceExpanded);
   const [viewMode, setViewMode] = useState<"summary" | "original">("summary");
   const cls = roleClass(message.role);
   const isTool = (message.role || "").toLowerCase().includes("tool");
@@ -489,10 +575,19 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
       ? message.reasoning_original!
       : message.content;
 
+  useEffect(() => {
+    if (forceExpanded) setExpanded(true);
+  }, [forceExpanded]);
+
   const roleLabel = (() => {
     if (!isTool || !toolParsed?.toolName) return message.role;
     const meta = toolMeta(toolParsed.toolName, mcpPrefixes);
-    return `tool · ${meta.label}`;
+    const title = toolRowTitle(
+      toolParsed.toolName,
+      meta.label,
+      toolParsed.ok ? "ok" : "err",
+    );
+    return title;
   })();
 
   const contentEl = isTool ? (
@@ -508,7 +603,11 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
 
   if (!collapsible) {
     return (
-      <div className={`ctx-block ${cls}${isTool ? " has-tool-result" : ""}`}>
+      <div
+        ref={blockRef}
+        className={`ctx-block ${cls}${isTool ? " has-tool-result" : ""}`}
+        data-tool-name={toolParsed?.toolName ?? undefined}
+      >
         <div className="ctx-block-head">
           <span className={`ctx-role ${cls}`}>{roleLabel}</span>
           <span className="ctx-tokens">{message.tokens} tok</span>
@@ -522,11 +621,15 @@ function ContextMessageBlock({ message }: { message: CollapsibleMessage }) {
   }
 
   const preview = isTool
-    ? contextToolPreview(activeContent, previewChars)
+    ? contextToolPreview(activeContent, previewChars, mcpPrefixes)
     : truncateMiddle(activeContent.replace(/\s+/g, " ").trim(), previewChars);
 
   return (
-    <div className={`ctx-block collapsible ${cls}${isTool ? " has-tool-result" : ""} ${expanded ? "" : "collapsed"}`}>
+    <div
+      ref={blockRef}
+      className={`ctx-block collapsible ${cls}${isTool ? " has-tool-result" : ""} ${expanded ? "" : "collapsed"}`}
+      data-tool-name={toolParsed?.toolName ?? undefined}
+    >
       <div
         className="ctx-block-head clickable"
         role="button"

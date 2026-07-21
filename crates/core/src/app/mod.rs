@@ -209,6 +209,9 @@ pub struct AppState {
     /// Populated when LLM reasoning compression was applied; the summary is
     /// in `chat_tool_outputs` at the same index. Absent when no compression.
     pub chat_reasoning_originals: std::collections::HashMap<usize, String>,
+    /// Wall-clock time when each `chat_lines` row was appended (session reload
+    /// uses the stored message `ts`).
+    pub chat_line_times: std::collections::HashMap<usize, chrono::DateTime<chrono::Utc>>,
     /// Assistant message UUIDs keyed by `chat_lines` index (branch regenerate).
     pub chat_assistant_ids: std::collections::HashMap<usize, uuid::Uuid>,
     pub chat_expanded_tool_lines: std::collections::HashSet<usize>,
@@ -231,6 +234,10 @@ pub struct AppState {
     pub chat_render_revision: u64,
     /// Bumped when transcript lines / tool outputs change (not live streaming fields).
     pub chat_history_revision: u64,
+    /// True when in-memory transcript dropped lines from the front (MAX_CHAT_LINES).
+    pub chat_lines_truncated: bool,
+    /// Session has older messages in store than currently loaded in the UI.
+    pub chat_older_messages_available: bool,
     /// Lines to keep visible above the bottom; 0 = pinned to latest.
     pub chat_scroll_from_bottom: u16,
     pub chat_session_id: Option<uuid::Uuid>,
@@ -292,6 +299,7 @@ impl AppState {
             chat_lines: vec![],
             chat_tool_outputs: std::collections::HashMap::new(),
             chat_reasoning_originals: std::collections::HashMap::new(),
+            chat_line_times: std::collections::HashMap::new(),
             chat_assistant_ids: std::collections::HashMap::new(),
             chat_expanded_tool_lines: std::collections::HashSet::new(),
             chat_busy: false,
@@ -304,6 +312,8 @@ impl AppState {
             chat_reasoning_compressing: false,
             chat_render_revision: 0,
             chat_history_revision: 0,
+            chat_lines_truncated: false,
+            chat_older_messages_available: false,
             chat_scroll_from_bottom: 0,
             chat_session_id: None,
             chat_pending_approval: None,
@@ -351,12 +361,23 @@ impl AppState {
     }
 
     pub fn push_chat_line(&mut self, line: impl Into<String>) {
+        self.push_chat_line_at(line, chrono::Utc::now());
+    }
+
+    pub fn push_chat_line_at(
+        &mut self,
+        line: impl Into<String>,
+        at: chrono::DateTime<chrono::Utc>,
+    ) {
         const MAX_CHAT_LINES: usize = 300;
         self.chat_lines.push(line.into());
+        let idx = self.chat_lines.len() - 1;
+        self.chat_line_times.insert(idx, at);
         if self.chat_lines.len() > MAX_CHAT_LINES {
             let drain = self.chat_lines.len() - MAX_CHAT_LINES;
             self.chat_lines.drain(0..drain);
             self.reindex_chat_indices(drain);
+            self.chat_lines_truncated = true;
         }
         self.bump_chat_render();
         self.bump_chat_history();
@@ -672,6 +693,28 @@ impl AppState {
             .iter()
             .filter_map(|idx| idx.checked_sub(drained))
             .collect();
+        self.chat_line_times = self
+            .chat_line_times
+            .drain()
+            .filter_map(|(idx, ts)| {
+                if idx >= drained {
+                    Some((idx - drained, ts))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.chat_assistant_ids = self
+            .chat_assistant_ids
+            .drain()
+            .filter_map(|(idx, id)| {
+                if idx >= drained {
+                    Some((idx - drained, id))
+                } else {
+                    None
+                }
+            })
+            .collect();
     }
 
     pub fn set_chat_streaming(&mut self, text: Option<String>) {
@@ -869,6 +912,7 @@ impl AppState {
         self.chat_lines.clear();
         self.chat_tool_outputs.clear();
         self.chat_reasoning_originals.clear();
+        self.chat_line_times.clear();
         self.chat_assistant_ids.clear();
         self.chat_expanded_tool_lines.clear();
         self.chat_pending_approval = None;
@@ -880,6 +924,8 @@ impl AppState {
         self.set_chat_activity_flow(None);
         self.chat_reasoning_compressing = false;
         self.chat_scroll_from_bottom = 0;
+        self.chat_lines_truncated = false;
+        self.chat_older_messages_available = false;
         self.chat_context = None;
         self.chat_context_scroll_from_bottom = 0;
         self.chat_context_revision = self.chat_context_revision.wrapping_add(1);
@@ -988,10 +1034,34 @@ pub async fn load_chat_session_ui(
     store: &dyn Store,
     session_id: uuid::Uuid,
 ) -> crate::error::Result<()> {
+    load_chat_session_ui_with_limit(state, store, session_id, 300).await
+}
+
+pub async fn load_chat_session_ui_with_limit(
+    state: &mut AppState,
+    store: &dyn Store,
+    session_id: uuid::Uuid,
+    limit: usize,
+) -> crate::error::Result<()> {
     let session = store.get_chat_session(&session_id).await?.ok_or_else(|| {
         crate::error::CoworkerError::Store(format!("unknown chat session {session_id}"))
     })?;
-    let messages = store.list_active_branch_messages(&session, 300).await?;
+    // Compare against the *active branch* only — using all session messages
+    // (including inactive regenerate branches) falsely sets older-available.
+    let branch_all = store
+        .list_active_branch_messages(&session, usize::MAX)
+        .await?;
+    let older_available = limit != usize::MAX && branch_all.len() > limit;
+    let branch: Vec<_> = if older_available {
+        branch_all[branch_all.len() - limit..].to_vec()
+    } else {
+        branch_all
+    };
+    // Active-leaf spine is user ↔ final assistants only (process rows are
+    // siblings under the user for regenerate). Expand so the UI transcript
+    // keeps tool/reasoning/harness history.
+    let all_messages = store.list_chat_messages(&session_id, usize::MAX).await?;
+    let messages = crate::store::expand_branch_with_process_messages(&all_messages, &branch);
     // Capture the prior context BEFORE clear_chat_transcript() nulls it, so we
     // can preserve its discovered tools & skills across the transcript reload.
     let prev_context = state.chat_context.clone();
@@ -1002,7 +1072,7 @@ pub async fn load_chat_session_ui(
             let body =
                 crate::agent::context::strip_reasoning_summary_marker(&msg.content).to_string();
             let idx = state.chat_lines.len();
-            state.push_chat_line(chat_message_display_line(msg));
+            state.push_chat_line_at(chat_message_display_line(msg), msg.ts);
             state.record_chat_tool_output(idx, body);
             if let Some(original) = &msg.reasoning_original {
                 state.record_chat_reasoning_original(idx, original.clone());
@@ -1021,20 +1091,21 @@ pub async fn load_chat_session_ui(
                 && !crate::agent::context::is_tool_user_question_pending_transcript(&msg.content)
                 && !msg.content.contains("awaiting approval")
             {
-                state.push_chat_line(chat_tool_start_display_line(msg));
+                state.push_chat_line_at(chat_tool_start_display_line(msg), msg.ts);
             }
             let idx = state.chat_lines.len();
-            state.push_chat_line(chat_message_display_line(msg));
+            state.push_chat_line_at(chat_message_display_line(msg), msg.ts);
             state.record_chat_tool_output(idx, msg.content.clone());
         } else {
             let idx = state.chat_lines.len();
-            state.push_chat_line(chat_message_display_line(msg));
+            state.push_chat_line_at(chat_message_display_line(msg), msg.ts);
             if msg.role == ChatRole::Assistant {
                 state.chat_assistant_ids.insert(idx, msg.id);
             }
         }
     }
     state.chat_scroll_from_bottom = 0;
+    state.chat_older_messages_available = older_available;
     state.rehydrate_chat_pending_approval();
     state.rehydrate_chat_pending_user_question();
 
@@ -1214,6 +1285,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: Some("pr_get_diff".into()),
             tool_calls_json: None,
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,
@@ -1241,6 +1313,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: Some("pr_get_diff".into()),
             tool_calls_json: None,
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,
@@ -1261,6 +1334,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: Some("skill_load".into()),
             tool_calls_json: Some(r#"{"name":"pr-review"}"#.into()),
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,
@@ -1285,6 +1359,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: None,
             tool_calls_json: None,
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,
@@ -1326,6 +1401,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: None,
             tool_calls_json: None,
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,
@@ -1338,6 +1414,7 @@ diff --git a/x.go b/x.go\n\
             ts: Utc::now(),
             tool_name: None,
             tool_calls_json: None,
+            tool_call_id: None,
             reasoning_original: None,
             parent_message_id: None,
             branch_index: None,
@@ -1405,6 +1482,274 @@ repos: [acme/widget]
         assert!(ctx.skill_blocks[0].always);
     }
 
+    /// Inactive regenerate branches must not flip `chat_older_messages_available`
+    /// when the active branch itself fits in the load limit.
+    #[tokio::test]
+    async fn load_chat_session_ui_older_flag_ignores_inactive_branches() {
+        use crate::store::sqlite::SqliteStore;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let store =
+            Arc::new(SqliteStore::open(dir.path().join("test.db"), false).expect("open store"))
+                as Arc<dyn crate::store::Store>;
+
+        let mut session = store
+            .create_chat_session(Some("branch-test"), None)
+            .await
+            .expect("create session");
+        let sid = session.id;
+
+        let user = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            role: ChatRole::User,
+            content: "q".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+            tool_call_id: None,
+            reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
+        };
+        let stale = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            role: ChatRole::Assistant,
+            content: "old answer".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+            tool_call_id: None,
+            reasoning_original: None,
+            parent_message_id: Some(user.id),
+            branch_index: Some(0),
+        };
+        let active = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            role: ChatRole::Assistant,
+            content: "new answer".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+            tool_call_id: None,
+            reasoning_original: None,
+            parent_message_id: Some(user.id),
+            branch_index: Some(1),
+        };
+        store.append_chat_message(&user).await.expect("user");
+        store.append_chat_message(&stale).await.expect("stale");
+        store.append_chat_message(&active).await.expect("active");
+        session.active_leaf_message_id = Some(active.id);
+        store.update_chat_session(&session).await.expect("leaf");
+
+        let mut state = AppState::new(
+            serde_yaml::from_str(
+                r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+chat: { enabled: true }
+storage: { backend: json, path: ./data }
+"#,
+            )
+            .expect("parse config"),
+            "coworker.yaml".into(),
+        );
+
+        // Limit far above active-branch size; store still has the inactive sibling.
+        load_chat_session_ui_with_limit(&mut state, store.as_ref(), sid, 300)
+            .await
+            .expect("load");
+        assert!(
+            !state.chat_older_messages_available,
+            "inactive branch messages must not set older-available"
+        );
+    }
+
+    /// Final answers parent to the user for regenerate; process rows are siblings.
+    /// Session reload must still rebuild tool/reasoning transcript lines.
+    #[tokio::test]
+    async fn load_chat_session_ui_includes_process_siblings() {
+        use crate::store::sqlite::SqliteStore;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let store =
+            Arc::new(SqliteStore::open(dir.path().join("test.db"), false).expect("open store"))
+                as Arc<dyn crate::store::Store>;
+
+        let mut session = store
+            .create_chat_session(Some("process-reload"), None)
+            .await
+            .expect("create session");
+        let sid = session.id;
+
+        let user = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            role: ChatRole::User,
+            content: "analyze commits".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+            tool_call_id: None,
+            reasoning_original: None,
+            parent_message_id: None,
+            branch_index: None,
+        };
+        let reasoning = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            role: ChatRole::Reasoning,
+            content: "[agent reasoning summary] Checking the repo.".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+            tool_call_id: None,
+            reasoning_original: Some("raw thought".into()),
+            parent_message_id: Some(user.id),
+            branch_index: None,
+        };
+        let tool = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            role: ChatRole::Tool,
+            content: "ok: listed files".into(),
+            ts: Utc::now(),
+            tool_name: Some("bash_run".into()),
+            tool_calls_json: Some(r#"{"command":"ls"}"#.into()),
+            tool_call_id: None,
+            reasoning_original: None,
+            parent_message_id: Some(reasoning.id),
+            branch_index: None,
+        };
+        let answer = ChatMessage {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            role: ChatRole::Assistant,
+            content: "Here are the commits.".into(),
+            ts: Utc::now(),
+            tool_name: None,
+            tool_calls_json: None,
+            tool_call_id: None,
+            reasoning_original: None,
+            parent_message_id: Some(user.id),
+            branch_index: Some(0),
+        };
+        for msg in [&user, &reasoning, &tool, &answer] {
+            store.append_chat_message(msg).await.expect("append");
+        }
+        session.active_leaf_message_id = Some(answer.id);
+        store.update_chat_session(&session).await.expect("leaf");
+
+        let mut state = AppState::new(
+            serde_yaml::from_str(
+                r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+chat: { enabled: true }
+storage: { backend: json, path: ./data }
+"#,
+            )
+            .expect("parse config"),
+            "coworker.yaml".into(),
+        );
+
+        load_chat_session_ui_with_limit(&mut state, store.as_ref(), sid, 300)
+            .await
+            .expect("load");
+
+        let joined = state.chat_lines.join("\n");
+        assert!(
+            joined.contains("you> analyze commits"),
+            "user line missing: {joined}"
+        );
+        assert!(
+            joined.contains("… reasoning:"),
+            "reasoning line missing: {joined}"
+        );
+        assert!(
+            joined.contains("bash_run"),
+            "tool line missing: {joined}"
+        );
+        assert!(
+            joined.contains("assistant> Here are the commits."),
+            "answer line missing: {joined}"
+        );
+        assert!(
+            !state.chat_tool_outputs.is_empty(),
+            "tool/reasoning outputs should be keyed for expand"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_chat_session_ui_older_flag_when_active_branch_truncated() {
+        use crate::store::sqlite::SqliteStore;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let store =
+            Arc::new(SqliteStore::open(dir.path().join("test.db"), false).expect("open store"))
+                as Arc<dyn crate::store::Store>;
+
+        let session = store
+            .create_chat_session(Some("long-branch"), None)
+            .await
+            .expect("create session");
+        let sid = session.id;
+        let mut parent: Option<Uuid> = None;
+        for i in 0..6 {
+            let id = Uuid::new_v4();
+            let msg = ChatMessage {
+                id,
+                session_id: sid,
+                role: if i % 2 == 0 {
+                    ChatRole::User
+                } else {
+                    ChatRole::Assistant
+                },
+                content: format!("line-{i}"),
+                ts: Utc::now(),
+                tool_name: None,
+                tool_calls_json: None,
+                tool_call_id: None,
+                reasoning_original: None,
+                parent_message_id: parent,
+                branch_index: None,
+            };
+            store.append_chat_message(&msg).await.expect("append");
+            parent = Some(id);
+        }
+
+        let mut state = AppState::new(
+            serde_yaml::from_str(
+                r#"
+llm: { base_url: http://localhost:11434/v1, model: m, context_limit: 64000 }
+chat: { enabled: true }
+storage: { backend: json, path: ./data }
+"#,
+            )
+            .expect("parse config"),
+            "coworker.yaml".into(),
+        );
+
+        load_chat_session_ui_with_limit(&mut state, store.as_ref(), sid, 3)
+            .await
+            .expect("load");
+        assert!(
+            state.chat_older_messages_available,
+            "active branch longer than limit must set older-available"
+        );
+        assert!(
+            state.chat_lines.len() <= 3,
+            "loaded lines should respect limit, got {}",
+            state.chat_lines.len()
+        );
+    }
+
     /// Cold session switch (no prior context) seeds skill names from the
     /// session's persisted runtime_state.loaded_skills so the Skills section
     /// isn't empty before the first chat turn.
@@ -1439,6 +1784,7 @@ repos: [acme/widget]
                 ts: Utc::now(),
                 tool_name: None,
                 tool_calls_json: None,
+                tool_call_id: None,
                 reasoning_original: None,
                 parent_message_id: None,
                 branch_index: None,

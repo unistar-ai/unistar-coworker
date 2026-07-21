@@ -1,8 +1,5 @@
-# Deploy template — copied into the runtime workdir by scripts/package.sh.
-# Personal local config — do not commit files containing real API keys.
-#
-# Reference tier: 25B+ (e.g. gemma4:26b-a4b, qwen3.6:27b). GitHub below is optional.
-
+# Active LLM preset — switch in Web UI Config tab or edit this / the sidecar
+# `coworker.llm-profile` (written by the UI; gitignored under `.coworker/`).
 llm_profile: ollama-local
 
 llm:
@@ -10,20 +7,19 @@ llm:
     base_url: http://127.0.0.1:11434/v1
     model: gemma4:26b-a4b-it-qat
     context_limit: 64000
+    max_thinking_tokens: 4096
+    api_key: ollama
   qwen-27b:
     base_url: http://127.0.0.1:11434/v1
     model: qwen3.6:27b
     context_limit: 64000
+    max_thinking_tokens: 4096
+    api_key: ollama
   deepseek:
     base_url: https://api.deepseek.com/v1
     model: deepseek-chat
     context_limit: 128000
     api_key: ${DEEPSEEK_API_KEY}
-
-# --- Optional GitHub (uncomment when using harness tools) ---
-# github:
-#   gh_command: gh
-#   env: {}
 
 chat:
   workspace: .
@@ -33,7 +29,8 @@ web:
   bind: 127.0.0.1:8787
 
 storage:
-  backend: json
-  path: ./data
+  backend: sqlite
+  path: .coworker/data/coworker.db
+  wal: true
 
 theme: light

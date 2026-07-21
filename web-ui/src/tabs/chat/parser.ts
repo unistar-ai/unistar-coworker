@@ -77,6 +77,7 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   glob: { icon: "📁", label: "Glob" },
   skill_search: { icon: "📚", label: "Skill search" },
   skill_load: { icon: "📚", label: "Load skill" },
+  ask_user: { icon: "❓", label: "向用户提问" },
   tool_search: { icon: "🔎", label: "Tool search" },
   tool_call: { icon: "⚡", label: "Tool call" },
   pr_get_diff: { icon: "⎇", label: "PR diff" },
@@ -121,6 +122,7 @@ export function toolSourceLabel(
       "web_browser",
       "skill_load",
       "skill_search",
+      "ask_user",
     ].includes(toolName)
   ) {
     return { source: "local", detail: toolName };
@@ -153,19 +155,48 @@ export interface ArgPair {
 
 export function parseToolArgsString(args: string | null | undefined): ArgPair[] {
   if (!args?.trim()) return [];
+  const s = args.trim();
+  // Split only on `, key=` boundaries so values may contain commas
+  // (e.g. bash `command=jq '{a:1, b:2}'`).
+  const re = /(^|,\s*)([A-Za-z_][\w]*)=/g;
+  const matches: { key: string; valueStart: number; sepStart: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s)) !== null) {
+    matches.push({
+      key: m[2],
+      sepStart: m.index,
+      valueStart: m.index + m[0].length,
+    });
+  }
+  if (matches.length === 0) {
+    return [{ key: s, value: "" }];
+  }
   const out: ArgPair[] = [];
-  for (const part of args.split(",")) {
-    const t = part.trim();
-    if (!t) continue;
-    const eq = t.indexOf("=");
-    if (eq > 0) {
-      out.push({ key: t.slice(0, eq).trim(), value: t.slice(eq + 1).trim() });
-    } else {
-      out.push({ key: t, value: "" });
-    }
+  for (let i = 0; i < matches.length; i++) {
+    const end = i + 1 < matches.length ? matches[i + 1].sepStart : s.length;
+    out.push({
+      key: matches[i].key,
+      value: s.slice(matches[i].valueStart, end).trim(),
+    });
   }
   return out;
 }
+
+const LONG_ARG_KEYS = new Set([
+  "command",
+  "cmd",
+  "code",
+  "script",
+  "content",
+  "body",
+  "query",
+  "pattern",
+  "prompt",
+  "text",
+  "message",
+  "diff",
+  "patch",
+]);
 
 function truncateMiddle(s: string, max: number): string {
   if (s.length <= max) return s;
@@ -183,7 +214,13 @@ export function formatToolArgValue(key: string, value: string): string {
     return value;
   }
   if (k === "repo") return truncateMiddle(value, 28);
+  if (LONG_ARG_KEYS.has(k)) return truncateMiddle(value, 120);
   return truncateMiddle(value, 20);
+}
+
+/** True when this arg should render as a monospace block, not a chip. */
+export function isLongToolArgKey(key: string): boolean {
+  return LONG_ARG_KEYS.has(key.toLowerCase());
 }
 
 // --- Block summarization (mirrors legacy) ---
@@ -662,6 +699,267 @@ export function buildChatBlocks(
   originals: Record<string, string> = {},
 ): ChatBlock[] {
   return mergeConsecutiveToolGroups(buildMessageBlocks(lines, outputs, originals));
+}
+
+/** One agent turn: optional user message + process steps + final answer. */
+export interface AgentTurn {
+  key: string;
+  user?: ChatBlock;
+  process: ChatBlock[];
+  answer?: ChatBlock;
+}
+
+export type ChatHistoryItem =
+  | { type: "turn"; turn: AgentTurn }
+  | { type: "block"; block: ChatBlock };
+
+function isUserBlock(block: ChatBlock): boolean {
+  return block.type === "message" && block.message?.role === "you";
+}
+
+function isAssistantBlock(block: ChatBlock): boolean {
+  return (
+    block.type === "message" &&
+    (block.message?.role === "assistant" || block.message?.role === "error")
+  );
+}
+
+function isProcessBlock(block: ChatBlock): boolean {
+  return (
+    block.type === "reasoning" ||
+    block.type === "tool-group" ||
+    block.type === "tool-batch"
+  );
+}
+
+function isStandaloneBlock(block: ChatBlock): boolean {
+  return (
+    block.type === "message" &&
+    (block.message?.role === "system" || block.message?.role === "meta")
+  );
+}
+
+/** True when a later assistant in the same turn should be treated as interim (not final). */
+function assistantIsInterim(blocks: ChatBlock[], index: number): boolean {
+  for (let j = index + 1; j < blocks.length; j++) {
+    const next = blocks[j];
+    if (isUserBlock(next) || isStandaloneBlock(next)) return false;
+    if (isProcessBlock(next) || isAssistantBlock(next)) return true;
+  }
+  return false;
+}
+
+function collectAgentSegment(
+  blocks: ChatBlock[],
+  start: number,
+): { process: ChatBlock[]; answer?: ChatBlock; next: number } {
+  const process: ChatBlock[] = [];
+  let answer: ChatBlock | undefined;
+  let i = start;
+  while (i < blocks.length) {
+    const b = blocks[i];
+    if (isUserBlock(b) || isStandaloneBlock(b)) break;
+    if (isAssistantBlock(b)) {
+      if (assistantIsInterim(blocks, i)) {
+        process.push(b);
+        i++;
+      } else {
+        answer = b;
+        i++;
+      }
+    } else if (isProcessBlock(b)) {
+      process.push(b);
+      i++;
+    } else {
+      break;
+    }
+  }
+  return { process, answer, next: i };
+}
+
+/** Group flat blocks into user messages + agent turn cards (Phase 1 layout). */
+export function groupIntoTurns(blocks: ChatBlock[]): ChatHistoryItem[] {
+  const items: ChatHistoryItem[] = [];
+  let i = 0;
+  let turnKey = 0;
+
+  const pushTurn = (
+    user: ChatBlock | undefined,
+    process: ChatBlock[],
+    answer: ChatBlock | undefined,
+  ) => {
+    if (!user && process.length === 0 && !answer) return;
+    items.push({
+      type: "turn",
+      turn: {
+        key: `turn-${turnKey++}`,
+        user,
+        process,
+        answer,
+      },
+    });
+  };
+
+  while (i < blocks.length) {
+    const block = blocks[i];
+    if (isStandaloneBlock(block)) {
+      items.push({ type: "block", block });
+      i++;
+      continue;
+    }
+    if (isUserBlock(block)) {
+      const user = block;
+      i++;
+      const seg = collectAgentSegment(blocks, i);
+      pushTurn(user, seg.process, seg.answer);
+      i = seg.next;
+      continue;
+    }
+    const seg = collectAgentSegment(blocks, i);
+    if (seg.process.length > 0 || seg.answer) {
+      pushTurn(undefined, seg.process, seg.answer);
+    }
+    i = seg.next > i ? seg.next : i + 1;
+  }
+  return items;
+}
+
+/**
+ * While a turn is in flight, LiveZone owns the agent process/answer.
+ * Keep only the user message of the trailing incomplete turn in history so
+ * the stream reads as one continuous conversation (no duplicated process UI).
+ */
+export function trimInFlightHistoryItems(
+  items: ChatHistoryItem[],
+  chatBusy: boolean,
+): ChatHistoryItem[] {
+  if (!chatBusy || items.length === 0) return items;
+  const last = items[items.length - 1];
+  if (last.type !== "turn") return items;
+
+  // Trailing agent-only fragment (process without final answer) → drop; LiveZone shows it.
+  if (!last.turn.user && !last.turn.answer) {
+    return items.slice(0, -1);
+  }
+
+  // Current user turn still running → keep user, clear process/answer for LiveZone.
+  if (last.turn.user && !last.turn.answer) {
+    if (last.turn.process.length === 0) return items;
+    return [
+      ...items.slice(0, -1),
+      {
+        type: "turn",
+        turn: {
+          ...last.turn,
+          process: [],
+          answer: undefined,
+        },
+      },
+    ];
+  }
+
+  return items;
+}
+
+/** Trailing user turn with no answer yet — LiveZone should nest in the same chat-turn. */
+export function isInFlightUserTurn(item: ChatHistoryItem): boolean {
+  return (
+    item.type === "turn" &&
+    !!item.turn.user &&
+    !item.turn.answer &&
+    item.turn.process.length === 0
+  );
+}
+
+export interface TurnProcessStats {
+  tools: number;
+  thoughts: number;
+}
+
+export function turnProcessDurationMs(process: ChatBlock[]): number | null {
+  let total = 0;
+  let found = false;
+  for (const b of process) {
+    const groups =
+      b.type === "tool-batch"
+        ? b.groups ?? []
+        : b.type === "tool-group" && b.group
+          ? [b.group]
+          : [];
+    for (const g of groups) {
+      const ms = Number.parseInt(String(g.ms ?? "").trim(), 10);
+      if (Number.isFinite(ms) && ms >= 0) {
+        total += ms;
+        found = true;
+      }
+    }
+  }
+  return found ? total : null;
+}
+
+export function formatDurationMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rem = Math.round(seconds % 60);
+  return rem > 0 ? `${minutes}m ${rem}s` : `${minutes}m`;
+}
+
+export function turnProcessStats(process: ChatBlock[]): TurnProcessStats {
+  let tools = 0;
+  let thoughts = 0;
+  for (const b of process) {
+    if (b.type === "reasoning") {
+      thoughts++;
+    } else if (b.type === "tool-group") {
+      tools++;
+    } else if (b.type === "tool-batch") {
+      tools += b.groups?.length ?? 1;
+    } else if (b.type === "message") {
+      thoughts++;
+    }
+  }
+  return { tools, thoughts };
+}
+
+export function formatTurnProcessSummary(
+  stats: TurnProcessStats,
+  durationMs?: number | null,
+  failedTools = 0,
+): string {
+  const parts: string[] = [];
+  if (stats.tools > 0) {
+    if (failedTools > 0) {
+      parts.push(`${stats.tools} 次工具调用 · ${failedTools} 失败`);
+    } else {
+      parts.push(`${stats.tools} 次工具调用`);
+    }
+  }
+  if (stats.thoughts > 0) {
+    parts.push(`${stats.thoughts} 次思考`);
+  }
+  if (durationMs != null && durationMs > 0) {
+    parts.push(formatDurationMs(durationMs));
+  }
+  return parts.join(" · ");
+}
+
+/** Count tool groups that ended in error (for summary line). */
+export function countFailedToolGroups(process: ChatBlock[]): number {
+  let n = 0;
+  for (const b of process) {
+    const groups =
+      b.type === "tool-batch"
+        ? b.groups ?? []
+        : b.type === "tool-group" && b.group
+          ? [b.group]
+          : [];
+    for (const g of groups) {
+      if (g.status === "err") n++;
+    }
+  }
+  return n;
 }
 
 export interface MessageStats {

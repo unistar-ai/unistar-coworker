@@ -10,7 +10,8 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::agent::chat_loop::{
-    append_message, canonical_tool_args, emit_progress, format_tool_args_short, is_mutating_tool,
+    append_message, append_tool_result_message, canonical_tool_args, emit_progress,
+    format_tool_args_short, is_mutating_tool,
     push_native_assistant_tool_calls, ChatProgress, PreparedToolCall, ToolCallSummary,
     ToolExecRecord, ToolRoundState,
 };
@@ -310,14 +311,13 @@ pub(crate) async fn fulfill_duplicate_readonly_tool(
             tool_name: prep.name.clone(),
             output: ctx.clone(),
         });
-        append_message(
+        append_tool_result_message(
             round.store,
             round.session_id,
-            ChatRole::Tool,
             &ctx,
-            Some(&prep.name),
-            Some(prep.args.to_string()),
-            None,
+            &prep.name,
+            prep.args.to_string(),
+            Some(prep.id.as_str()),
         )
         .await?;
         round.llm_messages.push(LlmTurnMessage::tool_result_with_id(

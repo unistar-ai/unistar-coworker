@@ -18,6 +18,6 @@ web:
 
 storage:
   backend: json
-  path: ./data
+  path: .coworker/data
 
 theme: dark

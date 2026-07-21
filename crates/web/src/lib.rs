@@ -1,4 +1,5 @@
 pub mod snapshot;
+mod turn_parts;
 mod ui;
 
 /// Doctor status for the React Web UI assets.
@@ -31,7 +32,8 @@ use uuid::Uuid;
 
 use coworker_core::agent::chat_loop::ChatProgress;
 use coworker_core::app::{
-    apply_event, export_chat_transcript_markdown, load_chat_session_ui, spawn_approval_decision,
+    apply_event, export_chat_transcript_markdown, load_chat_session_ui,
+    load_chat_session_ui_with_limit, spawn_approval_decision,
     AppEvent, SharedState, Tab,
 };
 use coworker_core::engine::Engine;
@@ -90,6 +92,7 @@ pub(crate) fn build_router(runtime: Arc<WebRuntime>, auth_token: Option<String>)
         .route("/api/chat/cancel", post(api_chat_cancel))
         .route("/api/chat/clear", post(api_chat_clear))
         .route("/api/chat/regenerate", post(api_chat_regenerate))
+        .route("/api/chat/load-older", post(api_chat_load_older))
         .route("/api/chat/sessions", get(api_list_chat_sessions))
         .route("/api/chat/sessions/new", post(api_new_chat_session))
         .route("/api/chat/sessions/{id}", post(api_load_chat_session))
@@ -477,11 +480,10 @@ struct ChatSessionItem {
 async fn api_list_chat_sessions(
     State(rt): State<Arc<WebRuntime>>,
 ) -> std::result::Result<Json<Vec<ChatSessionItem>>, StatusCode> {
-    let sessions = rt
-        .store
-        .list_chat_sessions(30)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let sessions = rt.store.list_chat_sessions(30).await.map_err(|e| {
+        tracing::error!("list_chat_sessions failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(Json(
         sessions
             .into_iter()
@@ -515,6 +517,34 @@ async fn api_load_chat_session(
             return StatusCode::NOT_FOUND;
         }
         s.status = format!("loaded session {id}");
+    }
+    publish_snapshot(&rt.state, &rt.snap_tx).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn api_chat_load_older(State(rt): State<Arc<WebRuntime>>) -> StatusCode {
+    let sid = {
+        let s = rt.state.read().await;
+        if s.chat_busy {
+            return StatusCode::CONFLICT;
+        }
+        if !s.chat_older_messages_available && !s.chat_lines_truncated {
+            return StatusCode::NO_CONTENT;
+        }
+        s.chat_session_id
+    };
+    let Some(sid) = sid else {
+        return StatusCode::BAD_REQUEST;
+    };
+    {
+        let mut s = rt.state.write().await;
+        if load_chat_session_ui_with_limit(&mut s, rt.store.as_ref(), sid, usize::MAX)
+            .await
+            .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        s.status = "loaded older messages".into();
     }
     publish_snapshot(&rt.state, &rt.snap_tx).await;
     StatusCode::NO_CONTENT

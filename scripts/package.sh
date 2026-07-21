@@ -4,6 +4,10 @@ set -euo pipefail
 # Package unistar-coworker: build web-ui + release binary, assemble deploy tree.
 # Same layout for local workdir and GitHub Release archives.
 #
+# Layout (Claude-style project agent dir):
+#   <output>/unistar-coworker          # binary
+#   <output>/.coworker/                # config, skills, data, docs
+#
 # Usage (from repo root):
 #   ./scripts/package.sh
 #
@@ -16,7 +20,7 @@ set -euo pipefail
 #
 # Env (optional):
 #   START_AGENT_WORKDIR=path        output tree (default: ../workdir, or dist/… when versioning)
-#   START_AGENT_DATA_BACKUP=path    temp backup while rebuilding (preserves data/)
+#   START_AGENT_DATA_BACKUP=path    temp backup while rebuilding (preserves .coworker/data/)
 #   START_AGENT_PROFILE=release|dev default release
 #   START_AGENT_SKIP_BUILD=1        skip cargo (still assembles tree; set by parent launcher)
 #   PACKAGE_VERSION=…               with PACKAGE_TRIPLE → tar to dist/
@@ -28,6 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PARENT_DIR="$(cd "$REPO_ROOT/.." && pwd)"
 COWORKER_DIR="$REPO_ROOT"
+BUILD_HELPERS="$SCRIPT_DIR/build-helpers.sh"
 TEMPLATE="$REPO_ROOT/packaging/workdir-template"
 DATA_BACKUP="${START_AGENT_DATA_BACKUP:-$PARENT_DIR/.data-backup}"
 BINARY=""  # set by build_binary()
@@ -44,6 +49,8 @@ if [ -n "$PACKAGE_VERSION" ] && [ -n "$PACKAGE_TRIPLE" ]; then
 else
   WORKDIR="${START_AGENT_WORKDIR:-$PARENT_DIR/workdir}"
 fi
+
+AGENT_HOME="$WORKDIR/.coworker"
 
 # ── Guards ────────────────────────────────────────────────────────────────
 
@@ -62,21 +69,40 @@ log()  { printf '==> %s\n' "$*"; }
 skip() { printf '    %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 
-any_newer_than() {
-  local ref="$1"
-  shift
-  [ -n "$(find "$@" -type f -newer "$ref" -print -quit 2>/dev/null)" ]
+[ -f "$BUILD_HELPERS" ] || { echo "error: build helpers not found at $BUILD_HELPERS" >&2; exit 1; }
+# shellcheck source=build-helpers.sh
+source "$BUILD_HELPERS"
+
+# Prefer `.coworker/coworker.yaml`, fall back to legacy flat path.
+find_existing_config() {
+  if [ -f "$AGENT_HOME/coworker.yaml" ]; then
+    echo "$AGENT_HOME/coworker.yaml"
+  elif [ -f "$WORKDIR/coworker.yaml" ]; then
+    echo "$WORKDIR/coworker.yaml"
+  fi
 }
 
-binary_release_path() {
-  case "$START_AGENT_PROFILE" in
-    dev)     echo "target/debug/unistar-coworker" ;;
-    release) echo "target/release/unistar-coworker" ;;
-    *)
-      echo "error: START_AGENT_PROFILE must be 'dev' or 'release' (got '$START_AGENT_PROFILE')" >&2
-      exit 1
-      ;;
-  esac
+# Prefer `.coworker/data`, fall back to legacy flat `data/`.
+find_existing_data_dir() {
+  if [ -d "$AGENT_HOME/data" ]; then
+    echo "$AGENT_HOME/data"
+  elif [ -d "$WORKDIR/data" ]; then
+    echo "$WORKDIR/data"
+  fi
+}
+
+# Rewrite legacy `./data…` storage paths to `.coworker/data…` when migrating.
+normalize_storage_path_in_config() {
+  local cfg="$1"
+  [ -f "$cfg" ] || return 0
+  if grep -qE '^\s*path:\s*\./data' "$cfg" 2>/dev/null; then
+    # BSD/GNU sed portable in-place via temp file
+    local tmp
+    tmp="$(mktemp)"
+    sed -E 's|^([[:space:]]*path:[[:space:]]*)\./data|\1.coworker/data|' "$cfg" > "$tmp"
+    mv "$tmp" "$cfg"
+    skip "normalized storage.path → .coworker/data in preserved config"
+  fi
 }
 
 # ── Steps ─────────────────────────────────────────────────────────────────
@@ -107,7 +133,7 @@ build_web_ui() {
 }
 
 build_binary() {
-  BINARY="$COWORKER_DIR/$(binary_release_path)"
+  BINARY="$(binary_release_abs)"
   local -a cargo_args=(build --features embed-web-ui -p unistar-coworker)
   case "$START_AGENT_PROFILE" in
     release) cargo_args=(build --release --features embed-web-ui -p unistar-coworker) ;;
@@ -116,6 +142,11 @@ build_binary() {
   if [ "$START_AGENT_SKIP_BUILD" = 1 ]; then
     [ -f "$BINARY" ] || { echo "error: START_AGENT_SKIP_BUILD=1 but $BINARY missing" >&2; exit 1; }
     skip "START_AGENT_SKIP_BUILD=1; using $BINARY"
+    return 0
+  fi
+
+  if ! binary_needs_rebuild; then
+    skip "cargo inputs unchanged; using $BINARY"
     return 0
   fi
 
@@ -128,29 +159,64 @@ build_binary() {
 }
 
 assemble_tree() {
-  log "assemble package tree at $WORKDIR"
+  log "assemble package tree at $WORKDIR (agent home: .coworker/)"
 
-  if [ -d "$WORKDIR/data" ]; then
+  local config_backup=""
+  local existing_config
+  existing_config="$(find_existing_config)"
+  if [ -n "$existing_config" ]; then
+    config_backup="$(mktemp)"
+    cp "$existing_config" "$config_backup"
+  fi
+
+  # Preserve llm-profile sidecar next to the active config when present.
+  local profile_backup=""
+  local existing_profile=""
+  if [ -f "$AGENT_HOME/coworker.llm-profile" ]; then
+    existing_profile="$AGENT_HOME/coworker.llm-profile"
+  elif [ -f "$WORKDIR/coworker.llm-profile" ]; then
+    existing_profile="$WORKDIR/coworker.llm-profile"
+  fi
+  if [ -n "$existing_profile" ]; then
+    profile_backup="$(mktemp)"
+    cp "$existing_profile" "$profile_backup"
+  fi
+
+  local existing_data
+  existing_data="$(find_existing_data_dir)"
+  if [ -n "$existing_data" ]; then
     rm -rf "$DATA_BACKUP"
-    mv "$WORKDIR/data" "$DATA_BACKUP"
+    mv "$existing_data" "$DATA_BACKUP"
   fi
 
   rm -rf "$WORKDIR"
-  mkdir -p "$WORKDIR"
+  mkdir -p "$AGENT_HOME"
 
   cp "$BINARY" "$WORKDIR/unistar-coworker"
-  cp -R "$COWORKER_DIR/skills" "$WORKDIR/skills"
-  cp -R "$TEMPLATE" "$WORKDIR/template"
-  cp "$TEMPLATE/coworker.yaml" "$WORKDIR/coworker.yaml"
-  cp "$TEMPLATE/AGENTS.md" "$WORKDIR/AGENTS.md"
-  cp "$REPO_ROOT/coworker.example.yaml" "$WORKDIR/"
-  cp "$REPO_ROOT/coworker.minimal.yaml" "$WORKDIR/"
-  cp "$REPO_ROOT/README.md" "$WORKDIR/"
-  cp "$REPO_ROOT/QUICKSTART.md" "$WORKDIR/"
-  cp "$REPO_ROOT/QUICKSTART_CN.md" "$WORKDIR/"
+  cp -R "$COWORKER_DIR/skills" "$AGENT_HOME/skills"
+  cp -R "$TEMPLATE" "$AGENT_HOME/template"
+  if [ -n "$config_backup" ] && [ -f "$config_backup" ]; then
+    cp "$config_backup" "$AGENT_HOME/coworker.yaml"
+    rm -f "$config_backup"
+    normalize_storage_path_in_config "$AGENT_HOME/coworker.yaml"
+    skip "preserved existing coworker.yaml under .coworker/"
+  else
+    cp "$TEMPLATE/coworker.yaml" "$AGENT_HOME/coworker.yaml"
+  fi
+  if [ -n "$profile_backup" ] && [ -f "$profile_backup" ]; then
+    cp "$profile_backup" "$AGENT_HOME/coworker.llm-profile"
+    rm -f "$profile_backup"
+    skip "preserved coworker.llm-profile under .coworker/"
+  fi
+  cp "$TEMPLATE/AGENTS.md" "$AGENT_HOME/AGENTS.md"
+  cp "$REPO_ROOT/coworker.example.yaml" "$AGENT_HOME/"
+  cp "$REPO_ROOT/coworker.minimal.yaml" "$AGENT_HOME/"
+  cp "$REPO_ROOT/README.md" "$AGENT_HOME/"
+  cp "$REPO_ROOT/QUICKSTART.md" "$AGENT_HOME/"
+  cp "$REPO_ROOT/QUICKSTART_CN.md" "$AGENT_HOME/"
 
   if [ -d "$DATA_BACKUP" ]; then
-    mv "$DATA_BACKUP" "$WORKDIR/data"
+    mv "$DATA_BACKUP" "$AGENT_HOME/data"
   fi
 }
 
@@ -170,8 +236,9 @@ write_release_archive() {
 }
 
 cleanup() {
-  if [ -d "$DATA_BACKUP" ] && [ -d "$WORKDIR" ] && [ ! -d "$WORKDIR/data" ]; then
-    mv "$DATA_BACKUP" "$WORKDIR/data" 2>/dev/null || true
+  if [ -d "$DATA_BACKUP" ] && [ -d "$WORKDIR" ] && [ ! -d "$AGENT_HOME/data" ]; then
+    mkdir -p "$AGENT_HOME"
+    mv "$DATA_BACKUP" "$AGENT_HOME/data" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT

@@ -430,14 +430,37 @@ Failed logs (this page only):\n{logs}"
         schema: &serde_json::Value,
         max_tokens: u32,
     ) -> Result<String> {
-        self.review_code_snippet_json(
-            prompt_template,
-            payload,
-            schema,
-            max_tokens,
-            "LLM offline — cannot judge chat turn completion",
-        )
-        .await
+        if !self.is_online() {
+            return Err(CoworkerError::Other(anyhow::anyhow!(
+                "LLM offline — cannot judge chat turn completion"
+            )));
+        }
+        let _permit = self
+            .concurrency
+            .acquire()
+            .await
+            .map_err(|e| CoworkerError::Other(anyhow::anyhow!("llm concurrency: {e}")))?;
+
+        let user_content = format!("{}\n\n{}", prompt_template.trim_end(), payload);
+        let messages = serde_json::json!([{"role": "user", "content": user_content}]);
+        let think_override = Some(false);
+        let tokens = max_tokens.clamp(64, 512);
+
+        let structured = self.chat_openai_structured(&messages, schema, tokens).await;
+        if let Ok(content) = &structured {
+            if !content.trim().is_empty() {
+                return Ok(content.clone());
+            }
+        }
+        let plain = self
+            .chat_plain_messages(&messages, tokens, think_override)
+            .await;
+        if let Ok(content) = &plain {
+            if !content.trim().is_empty() {
+                return Ok(content.clone());
+            }
+        }
+        plain.or(structured)
     }
 
     async fn review_code_snippet_json(

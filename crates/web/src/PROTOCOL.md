@@ -34,7 +34,11 @@ Fields (see [`snapshot.rs`](./snapshot.rs) `WebSnapshot` for the authoritative l
 | `chat_session_id` | string? | current session UUID |
 | `chat_lines` | string[] | transcript lines |
 | `chat_tool_outputs` | map<string,string> | line index → tool output body (expand in UI) |
+| `chat_assistant_ids` | map<string,string> | line index → assistant UUID (regenerate) |
 | `chat_history_revision` | u64 | bumps on history change |
+| `chat_turn_parts` | object[]? | in-flight turn process parts (`null` when idle) |
+| `chat_history_turn_parts` | map<string, object[]> | completed-turn process parts keyed by `you>` line index |
+| `chat_older_available` | bool | older messages in store or lines truncated |
 | `chat_context_revision` | u64 | bumps on context change |
 | `chat_streaming` | string? | in-progress assistant text |
 | `chat_reasoning` | string? | in-progress reasoning text |
@@ -96,7 +100,11 @@ is not truncated).
 | `chat_session_id` | string? |
 | `chat_lines` | string[] |
 | `chat_tool_outputs` | map<string,string> | truncated to 8k chars per body |
+| `chat_assistant_ids` | map<string,string> |
 | `chat_history_revision` | u64 |
+| `chat_turn_parts` | object[]? |
+| `chat_history_turn_parts` | map<string, object[]> |
+| `chat_older_available` | bool |
 | `chat_context_revision` | u64 |
 | `chat_streaming` | string? |
 | `chat_reasoning` | string? |

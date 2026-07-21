@@ -270,7 +270,7 @@ Meta：`tool_search`、`tool_list`、`tool_describe`、`tool_call`、`resource_r
 
 ## 配置
 
-从 [coworker.example.yaml](./coworker.example.yaml) 复制。加载路径：当前目录或 `~/.config/unistar-coworker/coworker.yaml`（均已 gitignore）。
+从 [coworker.example.yaml](./coworker.example.yaml) 复制。加载路径：优先 `.coworker/coworker.yaml`，其次当前目录 `coworker.yaml`（均已 gitignore）。
 
 ```yaml
 github:
@@ -330,7 +330,7 @@ policy:
 ```yaml
 storage:
   backend: sqlite
-  path: ./data/coworker.db
+  path: .coworker/data/coworker.db
 ```
 
 从已有 JSON 迁移：
@@ -567,7 +567,7 @@ unistar-coworker/
 ├── docs/RPC.md              # JSONL rpc 协议
 ├── packaging/
 │   ├── README.md            # 打包说明
-│   └── workdir-template/    # 部署种子（coworker.yaml），复制到运行时 workdir
+│   └── workdir-template/    # 部署种子（coworker.yaml），复制到运行时 .coworker/
 ├── scripts/
 │   └── package.sh           # 构建 web-ui + 二进制、刷新 workdir（打包）
 ├── skills/                  # 技巧 skill（SKILL.md）+ _base/TOOLS.md SSOT

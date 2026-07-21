@@ -77,11 +77,14 @@ pub async fn run_checks_with_extras(
     let config_path_label = config_override
         .as_ref()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "coworker.yaml (cwd or .coworker/)".into());
+        .unwrap_or_else(|| "coworker.yaml (.coworker/ or cwd)".into());
     let config_path_for_raw = config_override.clone().or_else(|| {
-        [PathBuf::from("coworker.yaml"), PathBuf::from(".coworker/coworker.yaml")]
-            .into_iter()
-            .find(|p| p.exists())
+        [
+            PathBuf::from(".coworker/coworker.yaml"),
+            PathBuf::from("coworker.yaml"),
+        ]
+        .into_iter()
+        .find(|p| p.exists())
     });
     let cfg = match &loaded {
         Ok(c) => {

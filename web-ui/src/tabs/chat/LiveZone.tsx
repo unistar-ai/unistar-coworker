@@ -1,13 +1,30 @@
-import { useDeferredValue } from "react";
+import { useDeferredValue, useMemo } from "react";
 import { useStore } from "../../store/wsStore";
 import Markdown from "../../components/Markdown";
-import ReasoningCard from "../../components/ReasoningCard";
 import { splitStreaming } from "./streamSplit";
-import { toolMeta } from "./parser";
-import { BookOpen, Sparkles, Zap } from "lucide-react";
+import MessageTurnFrame from "./MessageTurnFrame";
+import { useTrailingAnswerRelease } from "./useTrailingAnswerRelease";
+import {
+  BookOpen,
+  MessageSquare,
+  Wrench,
+  Zap,
+} from "lucide-react";
+import { partsProcessStats } from "./messageParts";
+import { partsToDisplaySteps } from "./partDisplay";
+import {
+  decorateLiveDisplaySteps,
+  isLiveProcessActive,
+  liveHasProcessPanel,
+  resolveLiveProcessParts,
+  type LiveTransportState,
+} from "./liveParts";
+import { resolveLiveHeaderCandidate, useStableLiveHeader } from "./liveHeader";
+import TurnProcessPanel from "./TurnProcessPanel";
+import { BlockRenderer } from "./ChatHistory";
+import { useLiveTurnElapsed } from "./useLiveTurnElapsed";
 
-/** Raw live fields — use for mount/visibility decisions (no deferred lag). */
-function useLiveVisibility() {
+function useLiveVisibility(): LiveTransportState & { chatBusy: boolean } {
   const chatBusy = useStore((s) => s.chat_busy);
   const streaming = useStore((s) => s.chat_streaming);
   const reasoning = useStore((s) => s.chat_reasoning);
@@ -16,6 +33,7 @@ function useLiveVisibility() {
   const toolPending = useStore((s) => s.chat_tool_pending);
   const compressing = useStore((s) => s.chat_reasoning_compressing);
   const activityFlow = useStore((s) => s.chat_activity_flow);
+  const turnPhase = useStore((s) => s.chat_turn_phase);
   return {
     chatBusy,
     streaming,
@@ -25,10 +43,10 @@ function useLiveVisibility() {
     toolPending,
     compressing,
     activityFlow,
+    turnPhase,
   };
 }
 
-/** Deferred streaming/reasoning for smoother in-turn rendering only. */
 function useLiveDisplayState() {
   const raw = useLiveVisibility();
   const streaming = useDeferredValue(raw.streaming);
@@ -36,137 +54,177 @@ function useLiveDisplayState() {
   return { ...raw, streaming, reasoning };
 }
 
-export function useLiveZoneActive() {
-  // Live chrome only while a chat turn is in flight — avoids stale deferred
-  // streaming/reasoning keeping the zone mounted after chat_busy goes false.
-  return useStore((s) => s.chat_busy);
-}
-
-export default function LiveZone() {
-  const chatBusy = useStore((s) => s.chat_busy);
-  const {
-    streaming,
-    reasoning,
-    toolRunning,
-    toolRunningDetail,
-    toolPending,
-    compressing,
-    activityFlow,
-  } = useLiveDisplayState();
-
-  const mcpServers = useStore((s) => s.mcp_servers);
-  if (!chatBusy) return null;
-  const mcpPrefixes = mcpServers.map((s) => ({
-    id: s.id,
-    prefix: s.prefix || `${s.id}_`,
-  }));
-  const runningName = toolRunning || toolPending || "";
-  const runningMeta = runningName ? toolMeta(runningName, mcpPrefixes) : null;
-
+function LiveExtraPreview({
+  live,
+  showHeldAnswer,
+  streaming,
+}: {
+  live: LiveTransportState;
+  showHeldAnswer: boolean;
+  streaming: string | null;
+}) {
   return (
-    <div className="live-zone has-activity" aria-live="polite">
-      <div className="activity-stack">
-        {/* Running tool */}
-        {(toolRunning || toolPending) && (
-          <div className="tool-card status-running live-tool is-collapsed">
-            <div className="tool-card-header tool-card-header-static">
-              <span className="tool-card-icon" aria-hidden="true">
-                {runningMeta?.icon ?? (toolRunning ? "→" : "⏳")}
-              </span>
-              <div className="tool-card-title-wrap">
-                <div className="tool-card-title-row">
-                  <span className="tool-card-title">
-                    {runningMeta?.label ?? runningName}
-                  </span>
-                  {runningMeta && runningMeta.label !== runningName && (
-                    <span className="tool-card-fn">{runningName}</span>
-                  )}
-                </div>
-                {toolRunningDetail && (
-                  <span className="tool-card-arg-line">{toolRunningDetail}</span>
-                )}
-              </div>
-              <div className="tool-card-trail">
-                <span className="tool-status-pill status-running">
-                  {toolRunning ? "Running" : "Queued"}
-                </span>
-                <span className="tool-spinner" aria-hidden="true" />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Activity flow */}
-        {activityFlow && (
-          <div className="activity-flow">
-            <div className="activity-flow-head">
-              <span className="activity-icon">
-                {activityFlow.kind === "Skill" ? <BookOpen size={14} aria-hidden="true" /> : <Zap size={14} aria-hidden="true" />}
-              </span>
-              <span className="activity-title">
-                {activityFlow.kind === "Skill" ? "Skill" : "Activity"}
-              </span>
-            </div>
-            <div className="activity-flow-body">{activityFlow.text}</div>
-          </div>
-        )}
-
-        {/* Summarizing */}
-        {compressing && (
-          <div className="activity-thinking activity-summarizing">
-            <span className="tool-spinner" />
-            <span className="activity-title">Summarizing context…</span>
-          </div>
-        )}
-
-        {/* Reasoning (live) — hidden once assistant streaming starts (legacy). */}
-        {reasoning && !streaming && <ReasoningCard text={reasoning} live />}
-
-        {/* Streaming reply — split into a stable Markdown prefix and an
-            unstable plain-text tail so partial formatting is visible without
-            the jitter from unclosed code fences / tables re-parsing on every
-            token. The cursor lives at the end of the unstable tail. */}
-        {streaming && <StreamingReply text={streaming} />}
-
-        {/* Thinking (no other activity) */}
-        {!streaming &&
-          !reasoning &&
-          !toolRunning &&
-          !toolPending &&
-          !compressing &&
-          !activityFlow && (
-            <div className="activity-thinking">
-              <span className="tool-spinner" />
-              <span className="activity-title">Thinking…</span>
-            </div>
-          )}
-      </div>
-    </div>
+    <>
+      {live.activityFlow && (
+        <div className="chat-process-preview-row kind-tool is-live">
+          <span className="chat-process-preview-icon" aria-hidden="true">
+            {live.activityFlow.kind === "Skill" ? (
+              <BookOpen size={15} strokeWidth={2} />
+            ) : (
+              <Zap size={15} strokeWidth={2} />
+            )}
+          </span>
+          <span className="chat-process-preview-text">
+            <span className="chat-process-preview-title">
+              {live.activityFlow.kind === "Skill" ? "技能" : "活动"}
+            </span>
+            <span className="chat-process-preview-subtitle">{live.activityFlow.text}</span>
+          </span>
+        </div>
+      )}
+      {live.compressing && (
+        <div className="chat-process-preview-row kind-thought is-live">
+          <span className="chat-process-preview-icon" aria-hidden="true">
+            <Wrench size={15} strokeWidth={2} />
+          </span>
+          <span className="chat-process-preview-title">压缩上下文</span>
+          <span className="tool-spinner" aria-hidden="true" />
+        </div>
+      )}
+      {showHeldAnswer && streaming && (
+        <div className="chat-process-preview-row kind-answer is-live">
+          <span className="chat-process-preview-icon" aria-hidden="true">
+            <MessageSquare size={15} strokeWidth={2} />
+          </span>
+          <span className="chat-process-preview-text">
+            <span className="chat-process-preview-title">生成回复</span>
+            <span className="chat-process-preview-subtitle reasoning-live">
+              {streaming.split("\n").slice(-2).join("\n")}
+            </span>
+          </span>
+          <span className="chat-process-preview-status status-running">
+            <span className="tool-spinner" aria-hidden="true" />
+            等待释放
+          </span>
+        </div>
+      )}
+    </>
   );
 }
 
-/** Streaming reply: stable Markdown prefix + unstable plain-text tail. The
- * split prevents unclosed code fences / tables from swallowing the freshly
- * typed text and avoids re-parsing the whole stream on every token (jitter). */
+export default function LiveZone() {
+  const chatLines = useStore((s) => s.chat_lines);
+  const outputs = useStore((s) => s.chat_tool_outputs);
+  const reasoningOriginals = useStore((s) => s.chat_reasoning_originals);
+  const wsTurnParts = useStore((s) => s.chat_turn_parts);
+  const mcpServers = useStore((s) => s.mcp_servers);
+  const live = useLiveDisplayState();
+  const { chatBusy, streaming, reasoning, toolRunning, toolPending, compressing, activityFlow } =
+    live;
+  const elapsedMs = useLiveTurnElapsed(chatBusy);
+
+  const mcpPrefixes = useMemo(
+    () => mcpServers.map((s) => ({ id: s.id, prefix: s.prefix || `${s.id}_` })),
+    [mcpServers],
+  );
+
+  const processParts = useMemo(
+    () => resolveLiveProcessParts(wsTurnParts, chatLines, outputs, reasoningOriginals, live),
+    [wsTurnParts, chatLines, outputs, reasoningOriginals, live],
+  );
+
+  const steps = useMemo(() => {
+    const base = partsToDisplaySteps(processParts, mcpPrefixes);
+    return decorateLiveDisplaySteps(base, live);
+  }, [processParts, mcpPrefixes, live]);
+
+  const stats = useMemo(() => partsProcessStats(processParts), [processParts]);
+  const hasActiveProcess = isLiveProcessActive(processParts, live);
+  const headerCandidate = useMemo(
+    () =>
+      resolveLiveHeaderCandidate(
+        processParts,
+        live,
+        elapsedMs,
+        mcpPrefixes,
+        !hasActiveProcess,
+      ),
+    [processParts, live, elapsedMs, mcpPrefixes, hasActiveProcess],
+  );
+  const stableHeader = useStableLiveHeader(headerCandidate, hasActiveProcess);
+  const hasProcess = liveHasProcessPanel(processParts, live);
+
+  const showStreamingAnswer = useTrailingAnswerRelease(hasActiveProcess, streaming, chatBusy);
+  const thinkingOnly =
+    !streaming &&
+    !reasoning &&
+    !toolRunning &&
+    !toolPending &&
+    !compressing &&
+    !activityFlow &&
+    !hasActiveProcess;
+
+  if (!chatBusy) return null;
+
+  const renderBlock = (props: Parameters<typeof BlockRenderer>[0]) => (
+    <BlockRenderer {...props} />
+  );
+
+  return (
+    <article className="chat-agent-turn live-zone" aria-live="polite" aria-busy={chatBusy || undefined}>
+      <MessageTurnFrame role="agent" name="助手">
+        {hasProcess && (
+          <TurnProcessPanel
+            steps={steps}
+            summary={stableHeader.text}
+            summaryShimmer={stableHeader.shimmer}
+            stats={stats}
+            mcpPrefixes={mcpPrefixes}
+            renderBlock={renderBlock}
+            defaultCollapsed
+            variant="live"
+            isLiveProgress={hasActiveProcess || chatBusy}
+            extraExpanded={
+              <LiveExtraPreview
+                live={live}
+                showHeldAnswer={!showStreamingAnswer}
+                streaming={streaming}
+              />
+            }
+          />
+        )}
+
+        {showStreamingAnswer && streaming && <StreamingReply text={streaming} />}
+
+        {thinkingOnly && (
+          <div className="chat-live-thinking activity-thinking">
+            <span className="tool-spinner" aria-hidden="true" />
+            <span className="activity-title">思考中…</span>
+          </div>
+        )}
+      </MessageTurnFrame>
+    </article>
+  );
+}
+
 function StreamingReply({ text }: { text: string }) {
   const { stable, unstable } = splitStreaming(text);
   return (
-    <div className="activity-streaming">
-      <div className="activity-streaming-head">
-        <span className="activity-icon"><Sparkles size={14} aria-hidden="true" /></span>
-        <span className="activity-title">Assistant</span>
-      </div>
-      <div className="activity-streaming-body is-streaming" aria-hidden="true">
-        {stable && <Markdown>{stable}</Markdown>}
-        {unstable && (
-          <div className="streaming-tail">
-            {stable && <span className="streaming-tail-br" />}
-            <span className="streaming-plain">{unstable}</span>
-            <span className="reasoning-cursor" aria-hidden="true" />
-          </div>
-        )}
-        {!unstable && <span className="reasoning-cursor" aria-hidden="true" />}
-      </div>
+    <div className="message-turn-body-inner chat-streaming-reply">
+      {stable && (
+        <Markdown variant="turn" streaming={false}>
+          {stable}
+        </Markdown>
+      )}
+      {unstable ? (
+        <div className="streaming-tail">
+          {stable && <span className="streaming-tail-br" />}
+          <span className="chat-turn-plain streaming-plain">{unstable}</span>
+          <span className="reasoning-cursor" aria-hidden="true" />
+        </div>
+      ) : (
+        stable && <span className="reasoning-cursor" aria-hidden="true" />
+      )}
     </div>
   );
 }

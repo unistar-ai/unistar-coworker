@@ -5,10 +5,10 @@ use super::terminal::{emit_json, table, use_color_stdout};
 
 pub(crate) async fn run_catalog_list(root: &str, leaf: &str, cmd: CatalogCmd) -> Result<()> {
     use coworker_core::engine::{load_markdown_spec, load_skill_with_base};
-    use std::path::Path;
+    use coworker_core::repo::resolve_repo_path;
 
     let CatalogCmd::List { json } = cmd;
-    let root_path = Path::new(root);
+    let root_path = resolve_repo_path(root);
     if !root_path.is_dir() {
         if json {
             emit_json(serde_json::json!([]));
@@ -17,7 +17,7 @@ pub(crate) async fn run_catalog_list(root: &str, leaf: &str, cmd: CatalogCmd) ->
         }
         return Ok(());
     }
-    let mut entries: Vec<_> = std::fs::read_dir(root_path)?
+    let mut entries: Vec<_> = std::fs::read_dir(&root_path)?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .collect();

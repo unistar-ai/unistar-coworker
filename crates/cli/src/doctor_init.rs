@@ -124,8 +124,8 @@ fn resolve_config_path(config_override: Option<&PathBuf>) -> Option<PathBuf> {
         return Some(p.clone());
     }
     [
-        PathBuf::from("coworker.yaml"),
         PathBuf::from(".coworker/coworker.yaml"),
+        PathBuf::from("coworker.yaml"),
     ]
     .into_iter()
     .find(|path| path.exists())
@@ -158,13 +158,19 @@ pub(crate) async fn run_init(
 ) -> Result<()> {
     let target = path
         .or(config_override)
-        .unwrap_or_else(|| PathBuf::from("coworker.yaml"));
+        .unwrap_or_else(|| PathBuf::from(".coworker/coworker.yaml"));
     if target.exists() && !force {
         eprintln!(
             "{} already exists — use --force to overwrite",
             target.display()
         );
         return Ok(());
+    }
+
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
 
     let use_interactive = interactive && io::stdin().is_terminal() && io::stdout().is_terminal();

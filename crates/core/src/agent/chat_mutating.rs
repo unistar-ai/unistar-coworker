@@ -20,10 +20,10 @@ use crate::github::GithubHarness;
 use crate::llm::chat::ChatAgentStep;
 use crate::llm::LlmTurnMessage;
 use crate::mcp::McpPool;
-use crate::store::{Approval, ApprovalKind, ApprovalStatus, ChatRole, Store};
+use crate::store::{Approval, ApprovalKind, ApprovalStatus, Store};
 
 use crate::agent::chat_loop::{
-    append_message, emit_context_snapshot, emit_progress, fork_parent_for_session,
+    append_tool_result_message, emit_context_snapshot, emit_progress, fork_parent_for_session,
     persist_native_assistant_tool_call_parented, record_session_file_edit, sanitize_repo_string,
     store_update_session_runtime, ChatProgress, PreparedToolCall, ToolCallSummary,
 };
@@ -100,14 +100,13 @@ pub(crate) async fn handle_mutating_tool_call(
             tool_name,
             body.clone(),
         ));
-        append_message(
+        append_tool_result_message(
             ctx.store,
             ctx.session_id,
-            ChatRole::Tool,
             &body,
-            Some(tool_name),
-            Some(tool_args.to_string()),
-            None,
+            tool_name,
+            tool_args.to_string(),
+            Some(call.id.as_str()),
         )
         .await?;
         return Ok(MutatingToolOutcome::Continue);
@@ -131,16 +130,20 @@ pub(crate) async fn handle_mutating_tool_call(
     });
     let pending_body = format!("Mutating tool awaiting approval. {}", queued.summary);
     let body = format_tool_approval_pending_message(tool_name, tool_args, queued.id, &pending_body);
-    append_message(
+    append_tool_result_message(
         ctx.store,
         ctx.session_id,
-        ChatRole::Tool,
         &body,
-        Some(tool_name),
-        Some(tool_args.to_string()),
-        None,
+        tool_name,
+        tool_args.to_string(),
+        Some(call.id.as_str()),
     )
     .await?;
+    ctx.llm_messages.push(LlmTurnMessage::tool_result_with_id(
+        Some(call.id.clone()),
+        tool_name,
+        body,
+    ));
     emit_context_snapshot(
         ctx.progress,
         ctx.llm_messages,
