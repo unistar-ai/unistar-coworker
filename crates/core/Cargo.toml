@@ -30,7 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2"
 uuid = { version = "1", features = ["serde", "v4"] }
 chromiumoxide = { version = "0.9", default-features = true, optional = true }
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }
