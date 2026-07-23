@@ -30,16 +30,34 @@ pub fn approval_kind_for_review_gated_tool(tool_name: &str) -> Option<ApprovalKi
 }
 
 pub fn format_review_rejection_description(tool_name: &str, review: &BashCommandReview) -> String {
-    let issues = review
+    let mut issue_parts: Vec<String> = review
         .critical_issues
         .iter()
         .filter_map(format_issue_line)
-        .collect::<Vec<_>>()
-        .join("; ");
-    let issues = if issues.is_empty() {
-        format!("reason={}", review.reason_code)
+        .collect();
+
+    if issue_parts.is_empty() {
+        for issue in &review.critical_issues {
+            if let Some(line) = format_issue_fallback(issue) {
+                issue_parts.push(line);
+            }
+        }
+    }
+
+    for suggestion in &review.suggestions {
+        let t = suggestion.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !issue_parts.iter().any(|p| p == t) {
+            issue_parts.push(t.to_string());
+        }
+    }
+
+    let issues = if issue_parts.is_empty() {
+        rejection_summary_fallback(review)
     } else {
-        issues
+        issue_parts.join("; ")
     };
     format!("Chat: {tool_name} — LLM safety review REJECT ({issues})")
 }
@@ -47,13 +65,96 @@ pub fn format_review_rejection_description(tool_name: &str, review: &BashCommand
 fn format_issue_line(issue: &BashCriticalIssue) -> Option<String> {
     let desc = issue.description.trim();
     if desc.is_empty() {
-        let rt = issue.risk_type.trim();
-        if rt.is_empty() {
-            None
-        } else {
-            Some(rt.to_string())
-        }
-    } else {
+        return None;
+    }
+    let rt = issue.risk_type.trim();
+    if rt.is_empty() {
         Some(desc.to_string())
+    } else if desc.to_ascii_lowercase().contains(&rt.to_ascii_lowercase()) {
+        Some(desc.to_string())
+    } else {
+        Some(format!("{rt}: {desc}"))
+    }
+}
+
+fn format_issue_fallback(issue: &BashCriticalIssue) -> Option<String> {
+    let rt = issue.risk_type.trim();
+    let snip = issue.code_snippet.trim();
+    if !rt.is_empty() && !snip.is_empty() {
+        return Some(format!("{rt}: {snip}"));
+    }
+    if !rt.is_empty() {
+        return Some(rt.to_string());
+    }
+    if !snip.is_empty() {
+        return Some(snip.to_string());
+    }
+    None
+}
+
+fn rejection_summary_fallback(review: &BashCommandReview) -> String {
+    let rc = review.reason_code.trim();
+    if rc.eq_ignore_ascii_case("RISK_FOUND") {
+        return "Automated safety check flagged risks — review the command above before approving."
+            .to_string();
+    }
+    if rc.eq_ignore_ascii_case("SUCCESS") {
+        return "Review returned REJECT — verify the payload before approving.".to_string();
+    }
+    if rc.is_empty() || looks_like_shell_payload(rc) {
+        return "Automated safety check rejected this action — see the command/payload above."
+            .to_string();
+    }
+    format!("Review note: {rc}")
+}
+
+fn looks_like_shell_payload(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() > 72 {
+        return true;
+    }
+    let lower = s.to_ascii_lowercase();
+    lower.starts_with("gh ")
+        || lower.starts_with("export ")
+        || lower.starts_with("curl ")
+        || lower.starts_with("sudo ")
+        || lower.contains(" && ")
+        || lower.contains('|')
+        || lower.contains("${")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejection_description_uses_issue_text() {
+        let review = BashCommandReview {
+            verdict: "REJECT".into(),
+            reason_code: "RISK_FOUND".into(),
+            critical_issues: vec![BashCriticalIssue {
+                line_number: 1,
+                code_snippet: "rm -rf".into(),
+                risk_type: "HIGH_RISK_COMMAND".into(),
+                description: "Destructive delete".into(),
+            }],
+            suggestions: vec![],
+        };
+        let d = format_review_rejection_description("bash_run", &review);
+        assert!(d.contains("Destructive delete"));
+        assert!(!d.contains("reason="));
+    }
+
+    #[test]
+    fn rejection_description_avoids_echoing_command_as_reason() {
+        let review = BashCommandReview {
+            verdict: "REJECT".into(),
+            reason_code: "gh api repos/foo -q '.name'".into(),
+            critical_issues: vec![],
+            suggestions: vec![],
+        };
+        let d = format_review_rejection_description("bash_run", &review);
+        assert!(!d.contains("reason=gh"));
+        assert!(d.contains("see the command"));
     }
 }

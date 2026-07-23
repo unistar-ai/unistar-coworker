@@ -156,6 +156,22 @@ export interface ArgPair {
 export function parseToolArgsString(args: string | null | undefined): ArgPair[] {
   if (!args?.trim()) return [];
   const s = args.trim();
+  if (s.startsWith("{")) {
+    try {
+      const obj = JSON.parse(s) as Record<string, unknown>;
+      return Object.entries(obj).map(([key, value]) => ({
+        key,
+        value:
+          typeof value === "string"
+            ? value
+            : value === null || value === undefined
+              ? ""
+              : JSON.stringify(value, null, 2),
+      }));
+    } catch {
+      /* fall through to key=value line */
+    }
+  }
   // Split only on `, key=` boundaries so values may contain commas
   // (e.g. bash `command=jq '{a:1, b:2}'`).
   const re = /(^|,\s*)([A-Za-z_][\w]*)=/g;

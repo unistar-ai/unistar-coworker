@@ -8,6 +8,7 @@ import {
   parseApprovalDescription,
   buildApprovalPayloadBlocks,
 } from "./parser";
+import ApprovalReason from "./ApprovalReason";
 
 export default function ApprovalModal() {
   const dialog = useStore((s) => s.approval_dialog);
@@ -29,6 +30,7 @@ function ModalInner({ dialog }: { dialog: ApprovalDialog }) {
     Number(dialog.approve_arm_ms_remaining) || 0,
   );
   const [armed, setArmed] = useState<boolean>(dialog.approve_armed);
+  const [denyReason, setDenyReason] = useState("");
   const lastIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -36,6 +38,7 @@ function ModalInner({ dialog }: { dialog: ApprovalDialog }) {
       lastIdRef.current = dialog.id;
       setArmMsLeft(Number(dialog.approve_arm_ms_remaining) || 0);
       setArmed(dialog.approve_armed);
+      setDenyReason("");
     }
   }, [dialog.id, dialog.approve_armed, dialog.approve_arm_ms_remaining]);
 
@@ -61,7 +64,10 @@ function ModalInner({ dialog }: { dialog: ApprovalDialog }) {
   };
   const onDeny = () => {
     if (dialog.deciding) return;
-    void apiPost(`/api/approvals/${dialog.id}`, { approve: false });
+    void apiPost(`/api/approvals/${dialog.id}`, {
+      approve: false,
+      decision_reason: denyReason.trim() || undefined,
+    });
   };
 
   const okLabel = armed
@@ -148,17 +154,7 @@ function ModalInner({ dialog }: { dialog: ApprovalDialog }) {
                   </div>
                 </div>
               )}
-              {parsed.issues.length > 1 ? (
-                <ul className="approval-issues">
-                  {parsed.issues.map((issue, i) => (
-                    <li key={i}>{issue}</li>
-                  ))}
-                </ul>
-              ) : (
-                parsed.summary && (
-                  <div className="approval-summary">{parsed.summary}</div>
-                )
-              )}
+              <ApprovalReason parsed={parsed} />
             </div>
 
             {dialog.deciding ? (
@@ -170,6 +166,15 @@ function ModalInner({ dialog }: { dialog: ApprovalDialog }) {
                     ? "Deny is recommended when safety review rejected the action."
                     : "Mutating action — approve only if you trust this operation."}
                 </div>
+                <label className="approval-deny-reason">
+                  <span>Reason for denial (optional)</span>
+                  <textarea
+                    value={denyReason}
+                    onChange={(e) => setDenyReason(e.target.value)}
+                    placeholder="Explain what should change before retrying"
+                    rows={2}
+                  />
+                </label>
                 <div className="approval-btn-row">
                   <button
                     type="button"

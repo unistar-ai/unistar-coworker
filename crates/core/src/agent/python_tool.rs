@@ -163,7 +163,16 @@ async fn review_code(llm: &LlmClient, code: &str) -> Result<BashCommandReview> {
     let raw = llm
         .review_python_code_json(&retry_prompt, code, &schema, PYTHON_REVIEW_MAX_TOKENS)
         .await?;
-    parse_bash_review_response_for_tool(&raw, PYTHON_RUN_TOOL)
+    match parse_bash_review_response_for_tool(&raw, PYTHON_RUN_TOOL) {
+        Ok(review) => Ok(review),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "python_run review JSON still unparseable after retry; escalating as REJECT for human approval"
+            );
+            Ok(crate::agent::bash_tool::review_gate_unparseable_as_reject(&raw))
+        }
+    }
 }
 
 fn validate_code(code: &str) -> Result<()> {

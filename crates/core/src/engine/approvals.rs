@@ -8,7 +8,7 @@ use crate::agent::bash_tool::BASH_RUN_TOOL;
 use crate::agent::file_tools;
 use crate::agent::python_tool;
 use crate::app::append_audit;
-use crate::config::{BashToolConfig, PythonToolConfig};
+use crate::config::Config;
 use crate::error::{CoworkerError, Result};
 use crate::github::helpers::{gh_tool, mcp_text_indicates_failure};
 use crate::github::GithubHarness;
@@ -19,13 +19,15 @@ pub async fn process_decision(
     store: Arc<dyn Store>,
     github: Arc<GithubHarness>,
     mcp: Arc<McpPool>,
+    config: &Config,
     id: &Uuid,
     approve: bool,
+    decision_reason: Option<&str>,
 ) -> Result<String> {
     let item = store.get_pending_approval(id).await?;
 
     if !approve {
-        store.decide_approval(id, false).await?;
+        store.decide_approval(id, false, decision_reason).await?;
         append_audit(
             store.as_ref(),
             "info",
@@ -36,7 +38,10 @@ pub async fn process_decision(
         if item.kind == ApprovalKind::Backport {
             mark_backport_status(store.as_ref(), &item, BackportStatus::Skipped).await?;
         }
-        return Ok("denied".into());
+        return Ok(match decision_reason.map(str::trim).filter(|reason| !reason.is_empty()) {
+            Some(reason) => format!("denied: {reason}"),
+            None => "denied".into(),
+        });
     }
 
     let exec_result = match item.kind {
@@ -46,14 +51,14 @@ pub async fn process_decision(
         ApprovalKind::IssueAddLabel => execute_issue_add_label(github.as_ref(), &item).await,
         ApprovalKind::WriteFile => execute_file_mutation(&item, file_tools::WRITE_FILE).await,
         ApprovalKind::EditFile => execute_file_mutation(&item, file_tools::EDIT_FILE).await,
-        ApprovalKind::BashRun => execute_bash_run_approval(&item).await,
-        ApprovalKind::PythonRun => execute_python_run_approval(&item).await,
+        ApprovalKind::BashRun => execute_bash_run_approval(&item, config).await,
+        ApprovalKind::PythonRun => execute_python_run_approval(&item, config).await,
         ApprovalKind::McpTool => execute_mcp_tool(mcp.as_ref(), &item).await,
     };
 
     match exec_result {
         Ok(detail) => {
-            store.decide_approval(id, true).await?;
+            store.decide_approval(id, true, None).await?;
             if item.kind == ApprovalKind::Backport {
                 mark_backport_status(store.as_ref(), &item, BackportStatus::Created).await?;
             }
@@ -224,19 +229,24 @@ async fn execute_file_mutation(item: &crate::store::Approval, tool_name: &str) -
     Ok(format!("{tool_name} approved: {output}"))
 }
 
-async fn execute_bash_run_approval(item: &crate::store::Approval) -> Result<String> {
+async fn execute_bash_run_approval(
+    item: &crate::store::Approval,
+    config: &Config,
+) -> Result<String> {
     let args = approval_args_json(item, BASH_RUN_TOOL)?;
     let workspace = std::path::PathBuf::from(&item.repo);
-    let config = BashToolConfig::default();
-    let output = bash_tool::execute_bash_approved(&config, &workspace, &args).await?;
+    let output = bash_tool::execute_bash_approved(&config.chat.bash, &workspace, &args).await?;
     Ok(format!("bash_run approved: {output}"))
 }
 
-async fn execute_python_run_approval(item: &crate::store::Approval) -> Result<String> {
+async fn execute_python_run_approval(
+    item: &crate::store::Approval,
+    config: &Config,
+) -> Result<String> {
     let args = approval_args_json(item, python_tool::PYTHON_RUN_TOOL)?;
     let workspace = std::path::PathBuf::from(&item.repo);
-    let config = PythonToolConfig::default();
-    let output = python_tool::execute_python_approved(&config, &workspace, &args).await?;
+    let output =
+        python_tool::execute_python_approved(&config.chat.python, &workspace, &args).await?;
     Ok(format!("python_run approved: {output}"))
 }
 

@@ -1,12 +1,18 @@
 //! Skill registry: lazy loading, skill catalog in system prompt, and skill_load for chat.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
-#[cfg(test)]
 use crate::agent::chat_discovery;
 use crate::error::Result;
 
 use super::skill::{load_prompt, load_skills, SkillSpec};
+
+const INTENT_KEYWORD_SCORE: i32 = 10;
+const INTENT_PHRASE_SCORE: i32 = 14;
+const INTENT_BONUS_SCORE: i32 = 6;
+const INTENT_THRESHOLD: i32 = 8;
+const DEFAULT_INTENT_PENALTY: i32 = 6;
 
 /// All technique skills available to a chat session.
 #[derive(Debug, Clone)]
@@ -53,12 +59,36 @@ impl SkillRegistry {
         self.skills.iter().find(|s| skill_key(s) == want)
     }
 
-    /// Skills to inject into the system prompt (`always_load` only when lazy; full set in native mode).
-    pub fn select_for_message(&self, _message: &str, lazy: bool) -> Vec<SkillSpec> {
+    /// Lazy chat: `always_load` skills plus intent-matched techniques for this user message.
+    pub fn select_for_message(&self, message: &str, lazy: bool) -> Vec<SkillSpec> {
         if lazy {
-            return self.always_load_skills();
+            return self.select_lazy_skills(message);
         }
         self.skills.clone()
+    }
+
+    /// Same as lazy [`select_for_message`](Self::select_for_message) (tests / diagnostics).
+    pub fn select_for_message_by_intent(&self, message: &str) -> Vec<SkillSpec> {
+        self.select_lazy_skills(message)
+    }
+
+    fn select_lazy_skills(&self, message: &str) -> Vec<SkillSpec> {
+        let lower = message.trim().to_ascii_lowercase();
+        let mut selected = self.always_load_skills();
+        if lower.is_empty() {
+            return selected;
+        }
+        for skill in &self.skills {
+            if skill.always_load {
+                continue;
+            }
+            if skill_intent_score(skill, &lower) >= INTENT_THRESHOLD
+                && !selected.iter().any(|s| s.name == skill.name)
+            {
+                selected.push(skill.clone());
+            }
+        }
+        selected
     }
 
     /// Skills with `always: true` in frontmatter — injected under ## Techniques in lazy chat.
@@ -88,29 +118,6 @@ impl SkillRegistry {
             }
         }
         lines.join("\n")
-    }
-
-    /// Intent-based skill pick for unit tests.
-    #[cfg(test)]
-    pub fn select_for_message_by_intent(&self, message: &str) -> Vec<SkillSpec> {
-        let lower = message.to_ascii_lowercase();
-        let mut selected: Vec<SkillSpec> = self
-            .skills
-            .iter()
-            .filter(|s| s.always_load)
-            .cloned()
-            .collect();
-        for skill in &self.skills {
-            if skill.always_load {
-                continue;
-            }
-            if skill_intent_score(skill, &lower) >= INTENT_THRESHOLD
-                && !selected.iter().any(|s| s.name == skill.name)
-            {
-                selected.push(skill.clone());
-            }
-        }
-        selected
     }
 
     /// Union of `tools[]` from the given skills (deduped, catalog order preserved).
@@ -165,18 +172,6 @@ fn trim_desc(desc: &str) -> &str {
     desc.trim()
 }
 
-#[cfg(test)]
-const INTENT_KEYWORD_SCORE: i32 = 10;
-#[cfg(test)]
-const INTENT_PHRASE_SCORE: i32 = 14;
-#[cfg(test)]
-const INTENT_BONUS_SCORE: i32 = 6;
-#[cfg(test)]
-const INTENT_THRESHOLD: i32 = 8;
-#[cfg(test)]
-const DEFAULT_INTENT_PENALTY: i32 = 6;
-
-#[cfg(test)]
 fn skill_intent_score(skill: &SkillSpec, lower: &str) -> i32 {
     if skill.intent_keywords.is_empty()
         && skill.intent_phrases.is_empty()
@@ -187,7 +182,6 @@ fn skill_intent_score(skill: &SkillSpec, lower: &str) -> i32 {
     score_from_intent_metadata(skill, lower)
 }
 
-#[cfg(test)]
 fn score_from_intent_metadata(skill: &SkillSpec, lower: &str) -> i32 {
     let mut score = 0i32;
     for kw in &skill.intent_keywords {
@@ -234,13 +228,65 @@ fn score_from_intent_metadata(skill: &SkillSpec, lower: &str) -> i32 {
     score
 }
 
-#[cfg(test)]
 fn generic_intent_score(lower: &str) -> i32 {
     if lower.len() < 8 {
         0
     } else {
         4
     }
+}
+
+/// Harness nudge when the model runs `gh` via `bash_run` without loading **gh-cli**.
+pub fn nudge_if_gh_bash_without_gh_cli_skill(
+    bash_commands: impl IntoIterator<Item = impl AsRef<str>>,
+    loaded_skills: &HashSet<String>,
+) -> Option<String> {
+    if loaded_skills
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("gh-cli"))
+    {
+        return None;
+    }
+    for cmd in bash_commands {
+        if bash_command_uses_gh_cli(cmd.as_ref()) {
+            return Some(
+                "This turn uses the GitHub CLI (`gh`) via **bash_run**, but **gh-cli** is not \
+loaded. Call **skill_load** with `name: \"gh-cli\"` first (or use harness **pr_*** / **ci_*** \
+tools when their schemas are available). Follow gh-cli for auth checks, `--json`, and \
+non-interactive flags (`GH_PROMPT_DISABLED=1`)."
+                    .into(),
+            );
+        }
+    }
+    None
+}
+
+fn bash_command_uses_gh_cli(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line == "gh" || line.starts_with("gh ") || line.contains(" gh ") {
+            return true;
+        }
+        if line.starts_with("gh\t") {
+            return true;
+        }
+        for sep in ["&&", "||", "|", ";"] {
+            for part in line.split(sep) {
+                let part = part.trim();
+                if part == "gh" || part.starts_with("gh ") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -313,11 +359,13 @@ mod tests {
     }
 
     #[test]
-    fn lazy_select_returns_always_load_only() {
+    fn lazy_select_includes_intent_matched_skills() {
         let reg = sample_registry();
         let picked = reg.select_for_message("Why is CI failing on PR #42?", true);
-        assert_eq!(picked.len(), 1);
-        assert_eq!(picked[0].name, "general-agent-tone");
+        let names: Vec<_> = picked.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"general-agent-tone"));
+        assert!(names.contains(&"ci-triage"));
+        assert!(!names.contains(&"pr-merge"));
     }
 
     #[test]

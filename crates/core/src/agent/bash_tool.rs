@@ -217,7 +217,20 @@ async fn review_command(llm: &LlmClient, command: &str) -> Result<BashCommandRev
     let raw = llm
         .review_bash_command_json(&retry_prompt, command, &schema, BASH_REVIEW_MAX_TOKENS)
         .await?;
-    parse_bash_review_response_for_tool(&raw, BASH_RUN_TOOL)
+    match parse_bash_review_response_for_tool(&raw, BASH_RUN_TOOL) {
+        Ok(review) => Ok(review),
+        Err(e) => {
+            // Fail closed: unparseable gate output must not run the command, and must
+            // escalate to human approval (not a hard BASH_REVIEW_GATE tool failure).
+            // Review models often break JSON by embedding the command (quotes/`{`) in
+            // code_snippet while still emitting verdict=REJECT.
+            tracing::warn!(
+                error = %e,
+                "bash_run review JSON still unparseable after retry; escalating as REJECT for human approval"
+            );
+            Ok(review_gate_unparseable_as_reject(&raw))
+        }
+    }
 }
 
 pub fn parse_bash_review_response_for_tool(
@@ -229,11 +242,150 @@ pub fn parse_bash_review_response_for_tool(
             return Ok(review);
         }
     }
+    // Salvage truncated / quote-broken JSON when verdict is still visible.
+    if let Some(review) = salvage_partial_review_json(content) {
+        return Ok(review);
+    }
     let trimmed = content.trim();
     Err(CoworkerError::Workflow(
         review_gate_parse_envelope(tool_name, &truncate_chars(trimmed, 400))
             .format_tool_error_body(),
     ))
+}
+
+/// When review JSON cannot be parsed, treat as REJECT so chat queues human approval.
+pub fn review_gate_unparseable_as_reject(raw: &str) -> BashCommandReview {
+    if let Some(review) = salvage_partial_review_json(raw) {
+        if !review.is_approved() {
+            return review;
+        }
+    }
+    let fragment = truncate_chars(raw.trim(), 220);
+    let saw_reject = raw.to_ascii_lowercase().contains("\"verdict\"")
+        && raw.to_ascii_lowercase().contains("reject");
+    let description = if saw_reject {
+        format!(
+            "Safety review returned REJECT but JSON was incomplete/invalid. Fragment: {fragment}"
+        )
+    } else {
+        format!(
+            "Safety review JSON was unparseable; escalated for human approval. Fragment: {fragment}"
+        )
+    };
+    BashCommandReview {
+        verdict: "REJECT".into(),
+        reason_code: "RISK_FOUND".into(),
+        critical_issues: vec![BashCriticalIssue {
+            line_number: 1,
+            code_snippet: String::new(),
+            risk_type: "SECURITY_VULNERABILITY".into(),
+            description,
+        }],
+        suggestions: vec![
+            "Confirm the command/payload carefully before approving.".into(),
+            "If unsafe, deny and ask for a simpler command.".into(),
+        ],
+    }
+}
+
+/// Best-effort recovery when the model embeds unescaped quotes/`{` inside code_snippet.
+fn salvage_partial_review_json(content: &str) -> Option<BashCommandReview> {
+    let lower = content.to_ascii_lowercase();
+    let verdict = if lower.contains("\"verdict\"") && regex_field_is(&lower, "verdict", "reject") {
+        "REJECT"
+    } else if lower.contains("\"verdict\"") && regex_field_is(&lower, "verdict", "approve") {
+        "APPROVE"
+    } else {
+        return None;
+    };
+    // Never salvage APPROVE from broken JSON — only REJECT (fail closed).
+    if verdict == "APPROVE" {
+        return None;
+    }
+    let reason_code = if regex_field_is(&lower, "reason_code", "success") {
+        "SUCCESS"
+    } else {
+        "RISK_FOUND"
+    };
+    let description = extract_json_string_field(content, "description")
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            "Safety review rejected this action (JSON body was truncated or invalid)."
+                .to_string()
+        });
+    let risk_type = extract_json_string_field(content, "risk_type")
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "SECURITY_VULNERABILITY".into());
+    Some(BashCommandReview {
+        verdict: verdict.into(),
+        reason_code: reason_code.into(),
+        critical_issues: vec![BashCriticalIssue {
+            line_number: 1,
+            code_snippet: String::new(),
+            risk_type,
+            description,
+        }],
+        suggestions: vec![
+            "Confirm carefully before approving — review JSON was incomplete.".into(),
+        ],
+    })
+}
+
+fn regex_field_is(lower: &str, field: &str, value: &str) -> bool {
+    let a = format!("\"{field}\"\\s*:\\s*\"{value}\"");
+    let b = format!("\"{field}\":\"{value}\"");
+    // lower is already ascii-lowercased; values we check are lowercase.
+    lower.contains(&format!("\"{field}\": \"{value}\""))
+        || lower.contains(&format!("\"{field}\":\"{value}\""))
+        || {
+            // Allow optional whitespace variants without pulling in the regex crate.
+            let _ = (a, b);
+            let needle = format!("\"{field}\"");
+            let Some(idx) = lower.find(&needle) else {
+                return false;
+            };
+            let after = &lower[idx + needle.len()..];
+            let after = after.trim_start_matches(|c: char| c.is_whitespace() || c == ':');
+            after.starts_with(&format!("\"{value}\""))
+        }
+}
+
+fn extract_json_string_field(text: &str, field: &str) -> Option<String> {
+    let key = format!("\"{field}\"");
+    let mut search = text;
+    while let Some(idx) = search.find(&key) {
+        let after_key = &search[idx + key.len()..];
+        let after_colon = after_key.trim_start();
+        let after_colon = after_colon.strip_prefix(':')?.trim_start();
+        if !after_colon.starts_with('"') {
+            search = &search[idx + key.len()..];
+            continue;
+        }
+        let body = &after_colon[1..];
+        let mut out = String::new();
+        let mut chars = body.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some('r') => out.push('\r'),
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    Some(other) => out.push(other),
+                    None => break,
+                },
+                '"' => return Some(out),
+                other => out.push(other),
+            }
+        }
+        // Unclosed string — still return what we have (common when snippet truncates).
+        if !out.is_empty() {
+            return Some(out);
+        }
+        search = &search[idx + key.len()..];
+    }
+    None
 }
 
 /// Collect likely review JSON blobs from noisy LLM output (fences, reasoning, echoed code).
@@ -656,6 +808,23 @@ params = {"per_page": 5}
 Looks safe."#;
         let review = parse_bash_review_response_for_tool(raw, BASH_RUN_TOOL).unwrap();
         assert!(review.is_approved());
+    }
+
+    #[test]
+    fn salvage_truncated_reject_json_with_embedded_jq_braces() {
+        // Real failure mode: model puts the command (with quotes/`{`) into code_snippet
+        // and truncates the JSON — previously became hard BASH_REVIEW_GATE.
+        let raw = r#"{"verdict": "REJECT", "reason_code": "RISK_FOUND", "critical_issues": [{"line_number": 1, "code_snippet": "gh api repos/unistar-ai/unistar-coworker/commits/aad2a1a --jq '.files[] | {filename: .filename, additions: .additions, deletions: .deletions, status: .status}' 2>&1"#;
+        let review = parse_bash_review_response_for_tool(raw, BASH_RUN_TOOL).unwrap();
+        assert!(!review.is_approved());
+        assert_eq!(review.reason_code, "RISK_FOUND");
+    }
+
+    #[test]
+    fn unparseable_noise_escalates_as_reject_not_approve() {
+        let review = review_gate_unparseable_as_reject("not json at all");
+        assert!(!review.is_approved());
+        assert!(!review.critical_issues.is_empty());
     }
 
     #[test]

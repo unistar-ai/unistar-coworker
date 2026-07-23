@@ -27,24 +27,16 @@ export default function ConfigTab() {
   };
 
   return (
-    <div className="ops-master-detail">
-      <aside className="ops-master-pane">
-        <nav className="config-nav" aria-label="配置分区">
-          <a href="#cfg-path">路径</a>
-          <a href="#cfg-llm">LLM</a>
-          <a href="#cfg-connect">连接</a>
-          <a href="#cfg-mcp">MCP</a>
-        </nav>
-      </aside>
-      <div className="ops-detail-pane panel">
-      <div className="config-section" id="cfg-path">
+    <div className="config-page">
+      <div className="config-section">
         <div className="config-section-title">Config path</div>
-        <code className="config-mono">
-          {configPath || "(unknown)"}
-        </code>
+        <code className="config-mono">{configPath || "(unknown)"}</code>
+        <p className="config-muted config-llm-hint">
+          Active <code className="config-mono">coworker.yaml</code> for this workdir.
+        </p>
       </div>
 
-      <div className="config-section" id="cfg-llm">
+      <div className="config-section">
         <div className="config-section-title">LLM</div>
         {llmProfiles.length > 0 ? (
           <>
@@ -76,16 +68,14 @@ export default function ConfigTab() {
           </>
         ) : (
           <div className="config-muted config-llm-hint">
-            Add named endpoints under <code>llm</code> in coworker.yaml to enable
-            quick switching.
+            Add named endpoints under <code>llm</code> in coworker.yaml to enable quick
+            switching.
           </div>
         )}
-        <code className="config-mono config-llm-model">
-          {llmModel || "(unset)"}
-        </code>
+        <code className="config-mono config-llm-model">{llmModel || "(unset)"}</code>
       </div>
 
-      <div className="config-section" id="cfg-connect">
+      <div className="config-section">
         <div className="config-section-title">Connectivity</div>
         <ProbeRow
           label="GitHub"
@@ -104,7 +94,7 @@ export default function ConfigTab() {
         </button>
       </div>
 
-      <div className="config-section" id="cfg-mcp">
+      <div className="config-section">
         <div className="config-section-title">MCP servers</div>
         {mcpServers.length === 0 ? (
           <div className="config-muted">none configured</div>
@@ -113,9 +103,7 @@ export default function ConfigTab() {
             {mcpServers.map((s) => (
               <div key={s.id} className="config-mcp-card">
                 <div className="ctx-chip-row">
-                  <span
-                    className={`config-probe-dot ${s.connected ? "ok" : "dead"}`}
-                  />
+                  <span className={`config-probe-dot ${s.connected ? "ok" : "dead"}`} />
                   <span className="config-mono">{s.id}</span>
                   {s.tool_count > 0 && (
                     <span className="config-muted">{s.tool_count} tools</span>
@@ -124,11 +112,7 @@ export default function ConfigTab() {
                     <span className="config-muted">{s.last_rpc_ms}ms</span>
                   )}
                 </div>
-                {s.last_error && (
-                  <div className="config-mcp-error">
-                    {s.last_error}
-                  </div>
-                )}
+                {s.last_error && <div className="config-mcp-error">{s.last_error}</div>}
               </div>
             ))}
           </div>
@@ -174,7 +158,6 @@ export default function ConfigTab() {
             TUI uses Enter to send and Shift+Enter for newline (opposite of Web).
           </div>
         </div>
-      </div>
       </div>
     </div>
   );

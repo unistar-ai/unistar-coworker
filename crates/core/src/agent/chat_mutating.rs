@@ -120,6 +120,7 @@ pub(crate) async fn handle_mutating_tool_call(
             tool_name: queued.tool_name.clone(),
             tool_args_json: tool_args.to_string(),
             description: queued.description.clone(),
+            tool_call_id: call.id.clone(),
         },
     );
     ctx.tool_calls.push(ToolCallSummary {
@@ -187,6 +188,7 @@ pub(crate) async fn queue_review_fallback_approval(
         status: ApprovalStatus::Pending,
         created_at: Utc::now(),
         decided_at: None,
+        decision_reason: None,
         comment_body: Some(args_json),
         issue_number: None,
         label: None,
@@ -247,6 +249,7 @@ pub(crate) async fn queue_mutating_approval(
             status: ApprovalStatus::Pending,
             created_at: Utc::now(),
             decided_at: None,
+            decision_reason: None,
             comment_body: Some(payload),
             issue_number: None,
             label: None,
@@ -409,6 +412,7 @@ pub(crate) async fn queue_mutating_approval(
         status: ApprovalStatus::Pending,
         created_at: Utc::now(),
         decided_at: None,
+        decision_reason: None,
         comment_body: payload.or(comment_body),
         issue_number,
         label,
@@ -458,8 +462,10 @@ pub(crate) async fn maybe_auto_approve_mutations(
         Arc::clone(store),
         Arc::clone(github),
         Arc::clone(mcp),
+        config,
         &queued.id,
         true,
+        None,
     )
     .await
     {

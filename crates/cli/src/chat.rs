@@ -97,7 +97,7 @@ pub(crate) async fn run_chat_cli(
                     std::process::exit(exit_codes::EXIT_APPROVAL);
                 }
                 let detail = engine
-                    .decide_approval(&pa.approval_id, true)
+                    .decide_approval(&pa.approval_id, true, None)
                     .await
                     .unwrap_or_else(|e| {
                         eprintln!("approval error: {e}");
@@ -111,6 +111,7 @@ pub(crate) async fn run_chat_cli(
                     detail,
                     tool_name: pa.tool_name.clone(),
                     tool_args,
+                    tool_call_id: pa.tool_call_id.clone(),
                 };
                 let (r, s, p, _) = run_turn_with_progress(
                     &engine,
@@ -352,6 +353,7 @@ pub(crate) struct PendingApproval {
     pub(crate) tool_name: String,
     pub(crate) tool_args_json: String,
     pub(crate) description: String,
+    pub(crate) tool_call_id: String,
 }
 
 #[derive(Clone)]
@@ -518,6 +520,7 @@ where
                             tool_name,
                             tool_args_json,
                             description,
+                            tool_call_id,
                         } => {
                             *pending.lock().expect("pending mutex") = Some(PendingApproval {
                                 approval_id,
@@ -525,6 +528,7 @@ where
                                 tool_name,
                                 tool_args_json,
                                 description,
+                                tool_call_id,
                             });
                         }
                         ChatProgress::UserQuestionQueued {
@@ -552,7 +556,7 @@ where
                         }
                         // P1-3: render tool calls as a distinct block (stderr),
                         // separating them visually from the streamed reply.
-                        ChatProgress::ToolStart { name, args_short } if !json => {
+                        ChatProgress::ToolStart { name, args_short, .. } if !json => {
                             clear_inplace!();
                             eprintln!(
                                 "{}",
@@ -748,7 +752,7 @@ async fn run_repl_turn(
             coworker_core::agent::redact::redact_json_str(&pa.tool_args_json)
         );
         let approve = prompt_yes_no(rl).await;
-        let detail = match engine.decide_approval(&pa.approval_id, approve).await {
+        let detail = match engine.decide_approval(&pa.approval_id, approve, None).await {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("approval error: {e}");
@@ -763,6 +767,7 @@ async fn run_repl_turn(
             detail,
             tool_name: pa.tool_name.clone(),
             tool_args,
+            tool_call_id: pa.tool_call_id.clone(),
         };
         let (r, s, p, pq) = run_turn_with_progress(
             engine,

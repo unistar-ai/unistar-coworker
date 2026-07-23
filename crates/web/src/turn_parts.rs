@@ -62,6 +62,11 @@ fn build_process_parts_for_range(s: &AppState, start: usize, end: usize) -> Vec<
         .iter()
         .map(|(k, v)| (*k, v.as_str()))
         .collect();
+    let tool_args: HashMap<usize, &str> = s
+        .chat_tool_args
+        .iter()
+        .map(|(k, v)| (*k, v.as_str()))
+        .collect();
     let originals: HashMap<usize, &str> = s
         .chat_reasoning_originals
         .iter()
@@ -114,7 +119,7 @@ fn build_process_parts_for_range(s: &AppState, start: usize, end: usize) -> Vec<
             steps.push(parse_tool_line(start + i, l, &outputs, &originals));
             i += 1;
         }
-        push_step_parts(&mut parts, steps);
+        push_step_parts(&mut parts, steps, &tool_args);
     }
 
     parts
@@ -312,7 +317,11 @@ fn split_tool_done(body: &str) -> (String, Option<String>, Option<String>) {
     (name, args, ms)
 }
 
-fn push_step_parts(parts: &mut Vec<Value>, steps: Vec<ToolStepLine>) {
+fn push_step_parts(
+    parts: &mut Vec<Value>,
+    steps: Vec<ToolStepLine>,
+    tool_args: &HashMap<usize, &str>,
+) {
     if steps.is_empty() {
         return;
     }
@@ -349,9 +358,9 @@ fn push_step_parts(parts: &mut Vec<Value>, steps: Vec<ToolStepLine>) {
                 }) {
                     pending[pos].push(step.clone());
                     let finished = pending.remove(pos);
-                    parts.push(tool_part_from_group(&finished));
+                    parts.push(tool_part_from_group(&finished, tool_args));
                 } else {
-                    parts.push(tool_part_from_group(&[step]));
+                    parts.push(tool_part_from_group(&[step], tool_args));
                 }
             }
             StepKind::Interim => {
@@ -368,13 +377,13 @@ fn push_step_parts(parts: &mut Vec<Value>, steps: Vec<ToolStepLine>) {
                 if let Some(last) = pending.last_mut() {
                     last.push(step);
                 } else {
-                    parts.push(tool_part_from_group(&[step]));
+                    parts.push(tool_part_from_group(&[step], tool_args));
                 }
             }
         }
     }
     for group in pending {
-        parts.push(tool_part_from_group(&group));
+        parts.push(tool_part_from_group(&group, tool_args));
     }
 }
 
@@ -400,7 +409,7 @@ fn text_part(index: usize, role: &str, text: &str) -> Value {
     })
 }
 
-fn tool_part_from_group(group: &[ToolStepLine]) -> Value {
+fn tool_part_from_group(group: &[ToolStepLine], tool_args: &HashMap<usize, &str>) -> Value {
     let index = group.first().map(|s| s.index).unwrap_or(0);
     let start = group.iter().find(|s| s.kind == StepKind::Start);
     let done = group.iter().find(|s| s.kind == StepKind::Done);
@@ -420,9 +429,13 @@ fn tool_part_from_group(group: &[ToolStepLine]) -> Value {
         "neutral"
     };
     let ms = done.and_then(|s| s.ms.clone());
-    let args = done
-        .and_then(|s| s.args.clone())
-        .or_else(|| start.and_then(|s| s.args.clone()));
+    let args = start
+        .and_then(|s| tool_args.get(&s.index).copied())
+        .map(pretty_tool_args_json)
+        .or_else(|| {
+            done.and_then(|s| s.args.clone())
+                .or_else(|| start.and_then(|s| s.args.clone()))
+        });
     let block_key = format!("tool-{index}-{tool_name}");
     let steps: Vec<Value> = group
         .iter()
@@ -476,6 +489,13 @@ fn tool_step_json(step: &ToolStepLine) -> Value {
         v["original"] = json!(original);
     }
     v
+}
+
+fn pretty_tool_args_json(raw: &str) -> String {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| raw.to_string())
 }
 
 #[cfg(test)]

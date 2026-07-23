@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo } from "react";
+import { useMemo } from "react";
 import { useStore } from "../../store/wsStore";
 import Markdown from "../../components/Markdown";
 import { splitStreaming } from "./streamSplit";
@@ -48,21 +48,10 @@ function useLiveVisibility(): LiveTransportState & { chatBusy: boolean } {
 }
 
 function useLiveDisplayState() {
-  const raw = useLiveVisibility();
-  const streaming = useDeferredValue(raw.streaming);
-  const reasoning = useDeferredValue(raw.reasoning);
-  return { ...raw, streaming, reasoning };
+  return useLiveVisibility();
 }
 
-function LiveExtraPreview({
-  live,
-  showHeldAnswer,
-  streaming,
-}: {
-  live: LiveTransportState;
-  showHeldAnswer: boolean;
-  streaming: string | null;
-}) {
+function LiveExtraPreview({ live }: { live: LiveTransportState }) {
   return (
     <>
       {live.activityFlow && (
@@ -96,21 +85,18 @@ function LiveExtraPreview({
           <span className="tool-spinner" aria-hidden="true" />
         </div>
       )}
-      {showHeldAnswer && streaming && (
-        <div className="chat-process-preview-row kind-answer is-live">
+      {live.reasoning && !live.streaming && (
+        <div className="chat-process-preview-row kind-thought is-live">
           <span className="chat-process-preview-icon" aria-hidden="true">
             <MessageSquare size={15} strokeWidth={2} />
           </span>
           <span className="chat-process-preview-text">
-            <span className="chat-process-preview-title">生成回复</span>
+            <span className="chat-process-preview-title">思考中</span>
             <span className="chat-process-preview-subtitle reasoning-live">
-              {streaming.split("\n").slice(-2).join("\n")}
+              {live.reasoning.split("\n").slice(-3).join("\n")}
             </span>
           </span>
-          <span className="chat-process-preview-status status-running">
-            <span className="tool-spinner" aria-hidden="true" />
-            等待释放
-          </span>
+          <span className="tool-spinner" aria-hidden="true" />
         </div>
       )}
     </>
@@ -189,17 +175,18 @@ export default function LiveZone() {
             defaultCollapsed
             variant="live"
             isLiveProgress={hasActiveProcess || chatBusy}
-            extraExpanded={
-              <LiveExtraPreview
-                live={live}
-                showHeldAnswer={!showStreamingAnswer}
-                streaming={streaming}
-              />
-            }
+            extraExpanded={<LiveExtraPreview live={live} />}
           />
         )}
 
         {showStreamingAnswer && streaming && <StreamingReply text={streaming} />}
+
+        {!streaming && reasoning && (
+          <div className="message-turn-body-inner chat-streaming-reasoning" aria-live="polite">
+            <span className="chat-turn-plain streaming-plain reasoning-live">{reasoning}</span>
+            <span className="reasoning-cursor" aria-hidden="true" />
+          </div>
+        )}
 
         {thinkingOnly && (
           <div className="chat-live-thinking activity-thinking">

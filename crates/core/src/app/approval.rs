@@ -12,6 +12,7 @@ pub async fn spawn_approval_decision(
     engine: &Arc<Engine>,
     id: Uuid,
     approve: bool,
+    decision_reason: Option<String>,
 ) {
     if approve {
         let armed = {
@@ -49,7 +50,9 @@ pub async fn spawn_approval_decision(
                 .cloned()
         };
 
-        let result = engine.decide_approval(&id, approve).await;
+        let result = engine
+            .decide_approval(&id, approve, decision_reason.as_deref())
+            .await;
         let mut s = state.write().await;
         s.finish_approval_decision(id);
         s.close_approval_dialog();
@@ -73,10 +76,15 @@ pub async fn spawn_approval_decision(
                         detail: msg,
                         tool_name: pending.tool_name,
                         tool_args,
+                        tool_call_id: pending.tool_call_id,
                     };
                     let session_id = pending.session_id;
                     drop(s);
-                    let _ = engine.resume_chat_after_approval(session_id, resume).await;
+                    if let Err(e) = engine.resume_chat_after_approval(session_id, resume).await {
+                        let mut s = state.write().await;
+                        s.push_log("error", format!("chat resume after approval failed: {e}"));
+                        s.status = format!("approval completed, but chat resume failed: {e}");
+                    }
                 }
             }
             Err(e) => {
@@ -94,10 +102,15 @@ pub async fn spawn_approval_decision(
                         detail: detail.clone(),
                         tool_name: pending.tool_name,
                         tool_args,
+                        tool_call_id: pending.tool_call_id,
                     };
                     let session_id = pending.session_id;
                     drop(s);
-                    let _ = engine.resume_chat_after_approval(session_id, resume).await;
+                    if let Err(e) = engine.resume_chat_after_approval(session_id, resume).await {
+                        let mut s = state.write().await;
+                        s.push_log("error", format!("chat resume after approval failed: {e}"));
+                        s.status = format!("approval failed; chat resume also failed: {e}");
+                    }
                 }
             }
         }

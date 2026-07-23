@@ -334,6 +334,7 @@ mod tests {
             status: crate::store::ApprovalStatus::Pending,
             created_at: Utc::now(),
             decided_at: None,
+            decision_reason: None,
             comment_body: None,
             issue_number: None,
             label: None,

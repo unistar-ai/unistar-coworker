@@ -387,6 +387,7 @@ async fn api_approval_history_returns_decided_items() {
         status: ApprovalStatus::Pending,
         created_at: Utc::now(),
         decided_at: None,
+        decision_reason: None,
         comment_body: Some(r#"{"command":"ls -la"}"#.into()),
         issue_number: None,
         label: None,
@@ -398,7 +399,7 @@ async fn api_approval_history_returns_decided_items() {
         .expect("push approval");
     runtime
         .store
-        .decide_approval(&approval.id, true)
+        .decide_approval(&approval.id, true, None)
         .await
         .expect("decide approval");
 
@@ -411,5 +412,50 @@ async fn api_approval_history_returns_decided_items() {
     assert_eq!(items[0]["id"], approval.id.to_string());
     assert_eq!(items[0]["status"], "Approved");
     assert_eq!(items[0]["kind"], "BashRun");
+    assert!(items[0]["decided_at"].is_string());
+    assert!(items[0]["decision_reason"].is_null());
+}
+
+#[tokio::test]
+async fn api_approval_history_includes_denial_reason() {
+    use chrono::Utc;
+
+    let runtime = test_runtime().await;
+    let approval = Approval {
+        id: uuid::Uuid::new_v4(),
+        kind: ApprovalKind::IssueAddLabel,
+        repo: "acme/widget".into(),
+        pr_number: None,
+        run_id: None,
+        target_branch: None,
+        incident_id: None,
+        description: "Chat: add label `x` to issue #1 (acme/widget)".into(),
+        status: ApprovalStatus::Pending,
+        created_at: Utc::now(),
+        decided_at: None,
+        decision_reason: None,
+        comment_body: None,
+        issue_number: Some(1),
+        label: Some("x".into()),
+    };
+    runtime
+        .store
+        .push_approval(&approval)
+        .await
+        .expect("push approval");
+    runtime
+        .store
+        .decide_approval(&approval.id, false, Some("wrong label"))
+        .await
+        .expect("deny approval");
+
+    let app = test_app(Arc::clone(&runtime), None);
+    let (status, json) = get_json(app, "/api/approvals/history?limit=10", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let items = json.as_array().expect("history array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["status"], "Denied");
+    assert_eq!(items[0]["decision_reason"], "wrong label");
     assert!(items[0]["decided_at"].is_string());
 }

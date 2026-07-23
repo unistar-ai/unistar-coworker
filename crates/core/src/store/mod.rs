@@ -22,7 +22,12 @@ use sqlite::SqliteStore;
 pub trait Store: Send + Sync {
     async fn push_approval(&self, item: &Approval) -> Result<()>;
     async fn get_pending_approval(&self, id: &Uuid) -> Result<Approval>;
-    async fn decide_approval(&self, id: &Uuid, approve: bool) -> Result<()>;
+    async fn decide_approval(
+        &self,
+        id: &Uuid,
+        approve: bool,
+        decision_reason: Option<&str>,
+    ) -> Result<()>;
     async fn list_pending_approvals(&self) -> Result<Vec<Approval>>;
     async fn list_approval_history(&self, limit: usize) -> Result<Vec<Approval>>;
 

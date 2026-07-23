@@ -362,7 +362,7 @@ async fn api_chat(State(rt): State<Arc<WebRuntime>>, Json(body): Json<ChatBody>)
             s.approval_dialog.as_ref().map(|d| d.id)
         };
         if let Some(id) = id {
-            spawn_approval_decision(&rt.state, &rt.engine, id, approve).await;
+            spawn_approval_decision(&rt.state, &rt.engine, id, approve, None).await;
             publish_snapshot(&rt.state, &rt.snap_tx).await;
         }
         return StatusCode::NO_CONTENT;
@@ -670,6 +670,8 @@ struct ExportQuery {
 #[derive(Deserialize)]
 struct ApprovalBody {
     approve: bool,
+    #[serde(default)]
+    decision_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -689,6 +691,7 @@ fn approval_to_json(a: &coworker_core::store::Approval) -> Value {
         "description": a.description,
         "created_at": a.created_at.to_rfc3339(),
         "decided_at": a.decided_at.map(|t| t.to_rfc3339()),
+        "decision_reason": a.decision_reason,
         "repo": a.repo,
         "pr_number": a.pr_number,
         "run_id": a.run_id,
@@ -718,7 +721,14 @@ async fn api_approval(
     Path(id): Path<Uuid>,
     Json(body): Json<ApprovalBody>,
 ) -> StatusCode {
-    spawn_approval_decision(&rt.state, &rt.engine, id, body.approve).await;
+    spawn_approval_decision(
+        &rt.state,
+        &rt.engine,
+        id,
+        body.approve,
+        body.decision_reason,
+    )
+    .await;
     publish_snapshot(&rt.state, &rt.snap_tx).await;
     StatusCode::ACCEPTED
 }

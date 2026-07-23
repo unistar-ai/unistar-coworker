@@ -111,6 +111,7 @@ pub(crate) async fn execute_readonly_tools_parallel(
                     ChatProgress::ToolStart {
                         name: call.name.clone(),
                         args_short,
+                        tool_args_json: serde_json::to_string(&call.args).unwrap_or_default(),
                     },
                 );
             }

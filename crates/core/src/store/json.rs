@@ -108,7 +108,12 @@ impl Store for JsonStore {
             .ok_or_else(|| CoworkerError::Store(format!("approval {id} not found")))
     }
 
-    async fn decide_approval(&self, id: &Uuid, approve: bool) -> Result<()> {
+    async fn decide_approval(
+        &self,
+        id: &Uuid,
+        approve: bool,
+        decision_reason: Option<&str>,
+    ) -> Result<()> {
         let pending_path = self.root.join("approvals/pending.json");
         let mut pending: Vec<Approval> = if pending_path.exists() {
             read_json(&pending_path)?
@@ -126,6 +131,10 @@ impl Store for JsonStore {
             ApprovalStatus::Denied
         };
         item.decided_at = Some(Utc::now());
+        item.decision_reason = decision_reason
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_string);
         Self::write_json(&pending_path, &pending)?;
         Self::append_jsonl(&self.root.join("approvals/history.jsonl"), &item)
     }
@@ -400,6 +409,7 @@ mod tests {
             status: ApprovalStatus::Pending,
             created_at: Utc::now() - chrono::Duration::hours(2),
             decided_at: None,
+            decision_reason: None,
             comment_body: Some(r#"{"command":"ls"}"#.into()),
             issue_number: None,
             label: None,
@@ -416,14 +426,18 @@ mod tests {
             status: ApprovalStatus::Pending,
             created_at: Utc::now(),
             decided_at: None,
+            decision_reason: None,
             comment_body: Some(r#"{"path":"a.txt","content":"x"}"#.into()),
             issue_number: None,
             label: None,
         };
         store.push_approval(&older).await.unwrap();
         store.push_approval(&newer).await.unwrap();
-        store.decide_approval(&older.id, false).await.unwrap();
-        store.decide_approval(&newer.id, true).await.unwrap();
+        store
+            .decide_approval(&older.id, false, Some("not needed"))
+            .await
+            .unwrap();
+        store.decide_approval(&newer.id, true, None).await.unwrap();
 
         let history = store.list_approval_history(10).await.unwrap();
         assert_eq!(history.len(), 2);
@@ -431,6 +445,7 @@ mod tests {
         assert_eq!(history[0].status, ApprovalStatus::Approved);
         assert_eq!(history[1].id, older.id);
         assert_eq!(history[1].status, ApprovalStatus::Denied);
+        assert_eq!(history[1].decision_reason.as_deref(), Some("not needed"));
     }
 
     #[tokio::test]

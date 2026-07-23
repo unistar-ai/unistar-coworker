@@ -5,6 +5,9 @@ description: >-
   Actions workflows/runs, releases, secrets, `gh api`, auth, and repo context —
   including when the user gives a GitHub URL, asks to create/review/merge a PR,
   rerun CI, inspect checks, or troubleshoot `gh` failures.
+intent_keywords: [github, gh, pull request, github.com, workflow, dependabot, actions]
+intent_phrases: [gh pr, gh api, gh run, gh issue, gh repo, gh auth]
+intent_bonus_keywords: ["/pull/", "#"]
 ---
 
 # GitHub CLI (`gh`)

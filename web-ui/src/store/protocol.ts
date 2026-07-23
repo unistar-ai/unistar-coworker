@@ -87,6 +87,7 @@ export interface ApprovalRow {
   kind: string;
   description: string;
   created_at: string;
+  decision_reason: string | null;
   repo: string | null;
   pr_number: number | null;
   run_id: number | null;

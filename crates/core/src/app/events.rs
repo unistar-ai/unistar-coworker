@@ -69,7 +69,11 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                 ChatProgress::ContextSnapshot(snapshot) => {
                     s.set_chat_context(snapshot.clone());
                 }
-                ChatProgress::ToolStart { name, .. } => {
+                ChatProgress::ToolStart {
+                    name,
+                    tool_args_json,
+                    ..
+                } => {
                     s.set_chat_streaming(None);
                     s.set_chat_tool_pending(None);
                     s.set_chat_reasoning(None);
@@ -78,7 +82,9 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                         s.set_chat_tool_running(None);
                     } else {
                         s.set_chat_tool_running(Some(name.clone()));
+                        let idx = s.chat_lines.len();
                         s.push_chat_line(p.display_line());
+                        s.record_chat_tool_args(idx, tool_args_json.clone());
                     }
                 }
                 ChatProgress::ToolProgress { name, detail }
@@ -109,6 +115,7 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                     tool_name,
                     tool_args_json,
                     description,
+                    tool_call_id,
                 } => {
                     s.set_chat_streaming(None);
                     s.set_chat_tool_pending(None);
@@ -122,6 +129,7 @@ pub async fn apply_event(state: &SharedState, ev: AppEvent) {
                         session_id: *session_id,
                         tool_name: tool_name.clone(),
                         tool_args_json: tool_args_json.clone(),
+                        tool_call_id: tool_call_id.clone(),
                         line_index: idx,
                     }));
                     if !s.config.chat.auto_approve_mutations {

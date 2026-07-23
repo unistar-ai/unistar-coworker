@@ -104,15 +104,32 @@ pub fn llm_messages_to_openai_api_value(messages: &[LlmTurnMessage]) -> Value {
 
 fn openai_api_message(m: &LlmTurnMessage) -> Value {
     let mut obj = serde_json::Map::new();
-    obj.insert("role".into(), Value::String(m.role.to_string()));
 
     if m.role == "tool" {
-        obj.insert("content".into(), Value::String(m.content.clone()));
-        if let Some(id) = &m.tool_call_id {
-            obj.insert("tool_call_id".into(), Value::String(id.clone()));
+        // Providers require `tool_call_id` on role:tool. Orphan tool turns without an
+        // id are rewritten as user transcripts so the request stays valid.
+        match m.tool_call_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => {
+                obj.insert("role".into(), Value::String("tool".into()));
+                obj.insert("content".into(), Value::String(m.content.clone()));
+                obj.insert("tool_call_id".into(), Value::String(id.to_string()));
+                return Value::Object(obj);
+            }
+            None => {
+                let label = m.tool_name.as_deref().unwrap_or("tool");
+                let content = if m.content.trim_start().starts_with("tool_") {
+                    m.content.clone()
+                } else {
+                    format!("tool_result({label}):\n{}", m.content)
+                };
+                obj.insert("role".into(), Value::String("user".into()));
+                obj.insert("content".into(), Value::String(content));
+                return Value::Object(obj);
+            }
         }
-        return Value::Object(obj);
     }
+
+    obj.insert("role".into(), Value::String(m.role.to_string()));
 
     if let Some(calls) = &m.tool_calls {
         if m.content.trim().is_empty() {
@@ -587,6 +604,22 @@ mod tests {
         assert_eq!(v[0]["role"], "tool");
         assert_eq!(v[0]["tool_call_id"], "call_1");
         assert!(v[0].get("tool_name").is_none());
+    }
+
+    #[test]
+    fn openai_api_tool_result_without_id_rewrites_as_user() {
+        let msgs = vec![LlmTurnMessage::tool_result_with_id(
+            None,
+            "bash_run",
+            "tool_error(bash_run):\n\nApproval denied: denied",
+        )];
+        let v = llm_messages_to_openai_api_value(&msgs);
+        assert_eq!(v[0]["role"], "user");
+        assert!(v[0].get("tool_call_id").is_none());
+        assert!(v[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Approval denied"));
     }
 
     #[test]

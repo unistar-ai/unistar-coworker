@@ -18,6 +18,77 @@ pub struct SqliteStore {
     path: PathBuf,
 }
 
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::store::{ApprovalKind, ApprovalStatus};
+
+    #[tokio::test]
+    async fn approval_decision_persists_timestamp_and_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("store.db"), false).unwrap();
+        let approval = Approval {
+            id: Uuid::new_v4(),
+            kind: ApprovalKind::BashRun,
+            repo: "/workspace".into(),
+            pr_number: None,
+            run_id: None,
+            target_branch: None,
+            incident_id: None,
+            description: "run command".into(),
+            status: ApprovalStatus::Pending,
+            created_at: Utc::now(),
+            decided_at: None,
+            decision_reason: None,
+            comment_body: Some(r#"{"command":"echo ok"}"#.into()),
+            issue_number: None,
+            label: None,
+        };
+        store.push_approval(&approval).await.unwrap();
+        store
+            .decide_approval(&approval.id, false, Some("wrong target"))
+            .await
+            .unwrap();
+
+        let history = store.list_approval_history(10).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, ApprovalStatus::Denied);
+        assert!(history[0].decided_at.is_some());
+        assert!(history[0].decided_at.unwrap() >= history[0].created_at);
+        assert_eq!(history[0].decision_reason.as_deref(), Some("wrong target"));
+
+        // Blank / whitespace reasons must not be persisted.
+        let other = Approval {
+            id: Uuid::new_v4(),
+            kind: ApprovalKind::PythonRun,
+            repo: "/workspace".into(),
+            pr_number: None,
+            run_id: None,
+            target_branch: None,
+            incident_id: None,
+            description: "run py".into(),
+            status: ApprovalStatus::Pending,
+            created_at: Utc::now(),
+            decided_at: None,
+            decision_reason: None,
+            comment_body: Some(r#"{"code":"print(1)"}"#.into()),
+            issue_number: None,
+            label: None,
+        };
+        store.push_approval(&other).await.unwrap();
+        store
+            .decide_approval(&other.id, false, Some("   "))
+            .await
+            .unwrap();
+        let history = store.list_approval_history(10).await.unwrap();
+        let blank = history.iter().find(|a| a.id == other.id).unwrap();
+        assert!(blank.decision_reason.is_none());
+        assert!(blank.decided_at.is_some());
+    }
+}
+
 impl SqliteStore {
     pub fn open(path: PathBuf, wal: bool) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -107,13 +178,37 @@ impl Store for SqliteStore {
         })
     }
 
-    async fn decide_approval(&self, id: &Uuid, approve: bool) -> Result<()> {
+    async fn decide_approval(
+        &self,
+        id: &Uuid,
+        approve: bool,
+        decision_reason: Option<&str>,
+    ) -> Result<()> {
         let id = *id;
+        let decision_reason = decision_reason
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_string);
         self.with_conn(move |conn| {
             let status = if approve { "approved" } else { "denied" };
+            let payload: String = conn
+                .query_row(
+                    "SELECT payload_json FROM approvals WHERE id = ?1 AND status = 'pending'",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(|_| CoworkerError::Store(format!("approval {id} not found")))?;
+            let mut item: Approval = serde_json::from_str(&payload)?;
+            item.status = if approve {
+                ApprovalStatus::Approved
+            } else {
+                ApprovalStatus::Denied
+            };
+            item.decided_at = Some(Utc::now());
+            item.decision_reason = decision_reason;
             conn.execute(
-                "UPDATE approvals SET status = ?1 WHERE id = ?2",
-                params![status, id.to_string()],
+                "UPDATE approvals SET payload_json = ?1, status = ?2 WHERE id = ?3",
+                params![serde_json::to_string(&item)?, status, id.to_string()],
             )?;
             Ok(())
         })

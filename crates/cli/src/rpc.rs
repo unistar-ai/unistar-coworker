@@ -146,7 +146,7 @@ async fn run_rpc_turn(
                 break;
             }
             let detail = engine
-                .decide_approval(&pa.approval_id, true)
+                .decide_approval(&pa.approval_id, true, None)
                 .await
                 .unwrap_or_default();
             let tool_args =
@@ -157,6 +157,7 @@ async fn run_rpc_turn(
                 detail,
                 tool_name: pa.tool_name.clone(),
                 tool_args,
+                tool_call_id: pa.tool_call_id.clone(),
             };
             let (r, _s, p, _) = run_turn_with_progress(
                 engine,
@@ -217,7 +218,7 @@ fn rpc_progress_json(p: &coworker_core::agent::chat_loop::ChatProgress) -> Optio
         ChatProgress::TurnThinking { turn, elapsed_secs } => {
             serde_json::json!({"stage": "thinking", "turn": turn, "elapsed_secs": elapsed_secs})
         }
-        ChatProgress::ToolStart { name, args_short } => {
+        ChatProgress::ToolStart { name, args_short, .. } => {
             serde_json::json!({"stage": "tool_start", "name": name, "args": args_short})
         }
         ChatProgress::ToolDone {

@@ -1,54 +1,38 @@
 import { useEffect, useState } from "react";
 
-/** Matches Cherry `MessagePartsRenderer` trailing result hold. */
+/** Matches Cherry `MessagePartsRenderer` trailing result hold (history turns only). */
 export const TRAILING_RESULT_RELEASE_DELAY_MS = 2000;
 
 /**
- * Whether the streaming answer body should render below the process fold.
- * During active process, answer is held; after process ends, wait 2s if tools/reasoning ran.
+ * Whether the streaming answer body should render in the live zone.
+ * Show tokens as soon as `chat_streaming` updates — do not wait for tools/reasoning to finish.
  */
 export function shouldShowStreamingAnswer(
-  processActive: boolean,
+  _processActive: boolean,
   streaming: string | null | undefined,
-  released: boolean,
-  hadProcess: boolean,
+  _released: boolean,
+  _hadProcess: boolean,
 ): boolean {
-  if (!streaming) return false;
-  if (processActive) return false;
-  if (!hadProcess) return true;
-  return released;
+  return Boolean(streaming?.length);
 }
 
+/** @deprecated Release delay only applied when streaming without visible body; kept for API stability. */
 export function useTrailingAnswerRelease(
   processActive: boolean,
   streaming: string | null | undefined,
   turnActive: boolean,
 ): boolean {
-  const hasStreaming = Boolean(streaming);
+  const hasStreaming = Boolean(streaming?.length);
   const [hadProcess, setHadProcess] = useState(false);
-  const [released, setReleased] = useState(true);
 
   useEffect(() => {
     if (processActive) setHadProcess(true);
   }, [processActive]);
 
   useEffect(() => {
-    if (!turnActive) {
-      setHadProcess(false);
-      setReleased(true);
-      return;
-    }
-    if (processActive || !hasStreaming) {
-      setReleased(false);
-      return;
-    }
-    if (!hadProcess) {
-      setReleased(true);
-      return;
-    }
-    const timer = window.setTimeout(() => setReleased(true), TRAILING_RESULT_RELEASE_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [turnActive, processActive, hasStreaming, hadProcess]);
+    if (!turnActive) setHadProcess(false);
+  }, [turnActive]);
 
-  return shouldShowStreamingAnswer(processActive, streaming, released, hadProcess);
+  if (!turnActive || !hasStreaming) return false;
+  return shouldShowStreamingAnswer(processActive, streaming, true, hadProcess);
 }

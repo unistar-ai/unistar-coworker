@@ -8,6 +8,7 @@ import {
   parseApprovalDescription,
   type ParsedApprovalDescription,
 } from "./parser";
+import ApprovalReason from "./ApprovalReason";
 import Skeleton from "../../components/Skeleton";
 import EmptyState from "../../components/EmptyState";
 import { Hand, History, AlertTriangle, Check, Ban } from "lucide-react";
@@ -18,6 +19,7 @@ interface HistoryItem {
   description: string;
   created_at: string;
   decided_at: string | null;
+  decision_reason: string | null;
   repo: string | null;
   pr_number: number | null;
   run_id: number | null;
@@ -258,6 +260,12 @@ function HistoryItemBody({ item }: { item: HistoryItem }) {
       </div>
       <ApprovalPayload blocks={payloadBlocks} />
       <ApprovalDetail parsed={parsed} />
+      {item.decision_reason && (
+        <div className="approval-payload-block approval-reason-block">
+          <div className="approval-payload-label">Reason for denial</div>
+          <div className="approval-summary">{item.decision_reason}</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -272,6 +280,7 @@ function ApprovalCard({
   const toolName = approvalKindToToolName(row.kind);
   const parsed = parseApprovalDescription(row.description, toolName);
   const rejectRecommended = parsed.verdict === "REJECT";
+  const [denyReason, setDenyReason] = useState("");
   const toolArgsJson =
     chatPending && chatPending.id === row.id
       ? chatPending.tool_args_json
@@ -293,11 +302,25 @@ function ApprovalCard({
       <ApprovalPayload blocks={payloadBlocks} />
       <ApprovalDetail parsed={parsed} />
       <div className="approval-actions">
+        <label className="approval-deny-reason">
+          <span>Reason for denial (optional)</span>
+          <textarea
+            value={denyReason}
+            onChange={(e) => setDenyReason(e.target.value)}
+            placeholder="Explain what should change before retrying"
+            rows={2}
+          />
+        </label>
         <div className="approval-btn-row">
           <button
             type="button"
             className={`btn ${rejectRecommended ? "btn-primary" : "btn-danger"}`}
-            onClick={() => void apiPost(`/api/approvals/${row.id}`, { approve: false })}
+            onClick={() =>
+              void apiPost(`/api/approvals/${row.id}`, {
+                approve: false,
+                decision_reason: denyReason.trim() || undefined,
+              })
+            }
           >
             Deny
           </button>
@@ -352,15 +375,7 @@ function ApprovalDetail({ parsed }: { parsed: ParsedApprovalDescription }) {
           </div>
         </div>
       )}
-      {parsed.issues.length > 1 ? (
-        <ul className="approval-issues">
-          {parsed.issues.map((issue, i) => (
-            <li key={i}>{issue}</li>
-          ))}
-        </ul>
-      ) : (
-        parsed.summary && <div className="approval-summary">{parsed.summary}</div>
-      )}
+      <ApprovalReason parsed={parsed} />
     </div>
   );
 }

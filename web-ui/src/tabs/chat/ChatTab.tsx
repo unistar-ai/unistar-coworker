@@ -6,7 +6,6 @@ import ChatHistory from "./ChatHistory";
 import ContextPanel from "./ContextPanel";
 import SessionPicker from "./SessionPicker";
 import { useChatUiStore } from "../../store/chatUiStore";
-import ContextWindowMeter from "../../components/ContextWindowMeter";
 import { PanelRightOpen, Search, Download, Trash2, ChevronUp, ChevronDown, ArrowDown, MessageSquareOff, MessageSquare, MessageCircleQuestion, Rows3 } from "lucide-react";
 import { HistoryCoverageGap } from "./TranscriptMarkers";
 import {
@@ -255,7 +254,6 @@ export default function ChatTab() {
             {countLabel && (
               <span className="messages-count">{countLabel}</span>
             )}
-            <ContextWindowMeter className="messages-ctx-meter" />
             <div className="messages-header-actions">
               <button
                 type="button"

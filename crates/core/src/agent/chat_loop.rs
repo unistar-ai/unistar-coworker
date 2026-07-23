@@ -27,10 +27,10 @@ use crate::agent::chat_stream::persist_interim_assistant_message;
 use crate::agent::context::{
     estimate_message_tokens, estimate_tools_tokens, format_tool_approval_pending_message,
     format_tool_context_message, format_tool_user_question_pending_message,
-    format_tools_for_context_panel, history_token_budget, is_tool_user_question_pending_transcript,
-    message_budget_for_tools, pack_session_history_with_llm, repair_native_tool_call_pairs,
-    skill_body_for_context_panel, tool_names_from_definitions, trim_llm_messages_with_llm,
-    trim_system_content, truncate_chars,
+    format_tools_for_context_panel, history_token_budget, is_tool_approval_pending_transcript,
+    is_tool_user_question_pending_transcript, message_budget_for_tools,
+    pack_session_history_with_llm, repair_native_tool_call_pairs, skill_body_for_context_panel,
+    tool_names_from_definitions, trim_llm_messages_with_llm, trim_system_content, truncate_chars,
 };
 use crate::agent::file_tools;
 use crate::agent::hooks::{HookRunner, TurnContext};
@@ -146,6 +146,8 @@ pub enum ChatProgress {
     ToolStart {
         name: String,
         args_short: String,
+        /// Full tool args JSON for Web UI (display line stays short).
+        tool_args_json: String,
     },
     /// Heartbeat while a readonly MCP tool is in flight (elapsed / paging hint).
     ToolProgress {
@@ -170,6 +172,8 @@ pub enum ChatProgress {
         tool_name: String,
         tool_args_json: String,
         description: String,
+        /// Native `tool_calls[].id` so deny/approve resume keeps OpenAI pairing.
+        tool_call_id: String,
     },
     /// Mutating tool auto-approved or resolved without the TUI popup.
     ApprovalResolved {
@@ -363,7 +367,7 @@ impl ChatProgress {
             Self::AssistantPartial { .. } | Self::ReasoningPartial { .. } => String::new(),
             Self::ToolPending { .. } => String::new(),
             Self::ToolProgress { .. } => String::new(),
-            Self::ToolStart { name, args_short } => {
+            Self::ToolStart { name, args_short, .. } => {
                 if args_short.is_empty() {
                     format!("  → {name}")
                 } else {
@@ -740,6 +744,8 @@ pub struct ResumeChatAfterApproval {
     pub detail: String,
     pub tool_name: String,
     pub tool_args: Value,
+    /// Native API id matching the assistant `tool_calls[].id` for this tool.
+    pub tool_call_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1061,6 +1067,7 @@ pub async fn run_chat_turn(
     let tool_catalog = tool_catalog::ToolCatalog::new();
     let mut discovery_state =
         ChatDiscoveryState::with_bootstrap(user_task, skill_registry, &prompt_bundle.skills);
+    ChatDiscoveryState::apply_github_pr_bootstrap(&mut discovery_state, user_task);
     discovery_state.rehydrate_from_tool_history(&history);
     for tool in crate::engine::SkillRegistry::collect_tool_refs(&prompt_bundle.skills) {
         discovery_state
@@ -1602,6 +1609,37 @@ from tool results already in context.";
                     continue;
                 }
 
+                let gh_bash_cmds: Vec<&str> = prepared
+                    .iter()
+                    .filter_map(|call| {
+                        if call.name != "bash_run" {
+                            return None;
+                        }
+                        call.args.get("command").and_then(|v| v.as_str())
+                    })
+                    .collect();
+                if let Some(nudge) = {
+                    let state = discovery.lock().await;
+                    crate::engine::skill_routing::nudge_if_gh_bash_without_gh_cli_skill(
+                        gh_bash_cmds,
+                        &state.loaded_skills,
+                    )
+                } {
+                    if harness_retry_or_stop(
+                        &mut harness_corrections,
+                        &progress,
+                        store.as_ref(),
+                        &session.id,
+                        &nudge,
+                        &mut llm_messages,
+                    )
+                    .await?
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 let batch_size = prepared.len() as u32;
                 if max_tools > 0 && tools_used.saturating_add(batch_size) > max_tools {
                     let nudge = "Tool budget exhausted — reply with your best answer \
@@ -1786,6 +1824,7 @@ from tool results already in context.";
                     .await?;
                     let mut turn_awaiting_approval = false;
                     let mut turn_awaiting_user = false;
+                    let mut persisted_assistant_for_pause = false;
                     for outcome in outcomes {
                         if let Some(pause) = outcome.awaiting_user.clone() {
                             queue_ask_user_pause(
@@ -1820,6 +1859,8 @@ from tool results already in context.";
                                 &progress,
                                 &mut llm_messages,
                                 &mut tool_calls,
+                                &step,
+                                &mut persisted_assistant_for_pause,
                                 id,
                                 name,
                                 args,
@@ -2134,6 +2175,7 @@ async fn apply_approval_resolution(
         detail,
         tool_name,
         tool_args,
+        tool_call_id,
     } = resume;
 
     if *approved && file_tools::is_mutating_file_tool(tool_name) {
@@ -2149,33 +2191,89 @@ async fn apply_approval_resolution(
     let ctx = format_tool_context_message(tool_name, tool_args, *approved, &body);
     let marker = format!("approval_id={approval_id}");
     let history = store.list_chat_messages(session_id, 10_000).await?;
-    if let Some(msg) = history
-        .iter()
-        .rev()
-        .find(|m| m.role == ChatRole::Tool && m.content.contains(&marker))
-    {
-        let mut updated = msg.clone();
-        updated.content = ctx.clone();
-        updated.ts = Utc::now();
-        store.update_chat_message(&updated).await?;
-    }
 
-    if let Some(msg) = llm_messages
-        .iter_mut()
-        .rev()
-        .find(|m| m.role == "tool" && m.content.contains(&marker))
-    {
-        msg.content = ctx.clone();
-    } else {
-        let call_id = llm_messages.iter().rev().find_map(|m| {
+    let mut resolved_call_id = tool_call_id.clone();
+    if resolved_call_id.is_empty() {
+        if let Some(id) = history.iter().rev().find_map(|m| {
+            if m.role != ChatRole::Tool {
+                return None;
+            }
+            if m.content.contains(&marker)
+                || (m.tool_name.as_deref() == Some(tool_name.as_str())
+                    && (is_tool_approval_pending_transcript(&m.content)
+                        || m.content.contains("Approval denied:")
+                        || m.content.contains("Approved:")))
+            {
+                return m.tool_call_id.clone();
+            }
+            None
+        }) {
+            resolved_call_id = id;
+        }
+    }
+    if resolved_call_id.is_empty() {
+        if let Some(id) = llm_messages.iter().rev().find_map(|m| {
             m.tool_calls
                 .as_ref()?
                 .iter()
                 .find(|c| c.name == *tool_name)
                 .map(|c| c.id.clone())
-        });
-        llm_messages.push(LlmTurnMessage::tool_result_with_id(call_id, tool_name, ctx));
+        }) {
+            resolved_call_id = id;
+        }
     }
+
+    if let Some(msg) = history
+        .iter()
+        .rev()
+        .find(|m| m.role == ChatRole::Tool && m.content.contains(&marker))
+        .cloned()
+        .or_else(|| {
+            if resolved_call_id.is_empty() {
+                return None;
+            }
+            history.iter().rev().find(|m| {
+                m.role == ChatRole::Tool && m.tool_call_id.as_deref() == Some(resolved_call_id.as_str())
+            }).cloned()
+        })
+    {
+        let mut updated = msg;
+        updated.content = ctx.clone();
+        if updated.tool_call_id.is_none() && !resolved_call_id.is_empty() {
+            updated.tool_call_id = Some(resolved_call_id.clone());
+        }
+        updated.ts = Utc::now();
+        store.update_chat_message(&updated).await?;
+    }
+
+    ensure_assistant_tool_call_carrier(llm_messages, &resolved_call_id, tool_name, tool_args);
+
+    let existing = llm_messages.iter_mut().rev().find(|m| {
+        m.role == "tool"
+            && (m.content.contains(&marker)
+                || (!resolved_call_id.is_empty()
+                    && m.tool_call_id.as_deref() == Some(resolved_call_id.as_str()))
+                || (m.tool_name.as_deref() == Some(tool_name.as_str())
+                    && is_tool_approval_pending_transcript(&m.content)))
+    });
+    if let Some(msg) = existing {
+        msg.content = ctx.clone();
+        if msg.tool_call_id.is_none() && !resolved_call_id.is_empty() {
+            msg.tool_call_id = Some(resolved_call_id.clone());
+        }
+        msg.tool_name = Some(tool_name.clone());
+    } else {
+        let insert_at = tool_result_insert_index(llm_messages, &resolved_call_id);
+        llm_messages.insert(
+            insert_at,
+            LlmTurnMessage::tool_result_with_id(
+                (!resolved_call_id.is_empty()).then(|| resolved_call_id.clone()),
+                tool_name,
+                ctx,
+            ),
+        );
+    }
+    repair_native_tool_call_pairs(llm_messages);
 
     emit_progress(
         progress,
@@ -2196,6 +2294,50 @@ async fn apply_approval_resolution(
         );
     }
     Ok(())
+}
+
+/// Legacy / review-gate pauses sometimes stored only the tool result. Inject a
+/// matching assistant `tool_calls` carrier so providers accept the resume turn.
+fn ensure_assistant_tool_call_carrier(
+    messages: &mut Vec<LlmTurnMessage>,
+    tool_call_id: &str,
+    tool_name: &str,
+    tool_args: &Value,
+) {
+    if tool_call_id.is_empty() {
+        return;
+    }
+    let has_carrier = messages.iter().any(|m| {
+        m.role == "assistant"
+            && m.tool_calls
+                .as_ref()
+                .is_some_and(|calls| calls.iter().any(|c| c.id == tool_call_id))
+    });
+    if has_carrier {
+        return;
+    }
+    let insert_at = messages
+        .iter()
+        .position(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(tool_call_id))
+        .or_else(|| {
+            messages.iter().position(|m| {
+                m.role == "tool"
+                    && m.tool_name.as_deref() == Some(tool_name)
+                    && is_tool_approval_pending_transcript(&m.content)
+            })
+        })
+        .unwrap_or(messages.len());
+    messages.insert(
+        insert_at,
+        LlmTurnMessage::assistant_tool_call(
+            String::new(),
+            vec![LlmToolCall {
+                id: tool_call_id.to_string(),
+                name: tool_name.to_string(),
+                arguments: tool_args.clone(),
+            }],
+        ),
+    );
 }
 
 async fn apply_user_answer_resolution(
@@ -3097,6 +3239,8 @@ async fn handle_llm_review_rejection(
     progress: &Option<broadcast::Sender<AppEvent>>,
     llm_messages: &mut Vec<LlmTurnMessage>,
     tool_calls: &mut Vec<ToolCallSummary>,
+    step: &ChatAgentStep,
+    persisted_assistant: &mut bool,
     call_id: &str,
     tool_name: &str,
     tool_args: &Value,
@@ -3154,6 +3298,10 @@ async fn handle_llm_review_rejection(
         );
         return Ok(LlmReviewRejectionOutcome::AutoApproved { detail });
     }
+    if !*persisted_assistant {
+        persist_native_assistant_tool_call_step(store, session_id, step).await?;
+        *persisted_assistant = true;
+    }
     emit_progress(
         progress,
         ChatProgress::ApprovalQueued {
@@ -3162,6 +3310,7 @@ async fn handle_llm_review_rejection(
             tool_name: queued.tool_name.clone(),
             tool_args_json: tool_args.to_string(),
             description: queued.description.clone(),
+            tool_call_id: call_id.to_string(),
         },
     );
     tool_calls.push(ToolCallSummary {
@@ -3679,6 +3828,7 @@ mod tests {
         let start = ChatProgress::ToolStart {
             name: "pr_get_overview".into(),
             args_short: "repo=acme/widget, pr=1".into(),
+            tool_args_json: r#"{"repo":"acme/widget","pr":1}"#.into(),
         };
         assert_eq!(
             start.display_line(),
@@ -3891,6 +4041,56 @@ mod tests {
         assert_eq!(
             duplicate_tool_block_reason(records.get(&fp)),
             Some(DuplicateToolBlock::AlreadySucceeded)
+        );
+    }
+
+    #[test]
+    fn approval_deny_resume_injects_carrier_when_assistant_tool_calls_missing() {
+        // Mirrors the bug: review-gate pause stored only the tool row, so pack
+        // demoted it / resume pushed role:tool without tool_call_id → HTTP 400.
+        let call_id = "call_00_deny_resume";
+        let args = json!({"command": "git push --force origin main"});
+        let pending = format_tool_approval_pending_message(
+            "bash_run",
+            &args,
+            Uuid::nil(),
+            "LLM safety review rejected this action; awaiting human approval.",
+        );
+        let mut messages = vec![
+            LlmTurnMessage::new("user", "run force push"),
+            LlmTurnMessage::tool_result_with_id(
+                Some(call_id.into()),
+                "bash_run",
+                pending,
+            ),
+        ];
+        ensure_assistant_tool_call_carrier(&mut messages, call_id, "bash_run", &args);
+        let denied = format_tool_context_message(
+            "bash_run",
+            &args,
+            false,
+            "Approval denied: denied",
+        );
+        if let Some(msg) = messages.iter_mut().rev().find(|m| m.role == "tool") {
+            msg.content = denied;
+        }
+        repair_native_tool_call_pairs(&mut messages);
+
+        let api = crate::llm::chat::llm_messages_to_openai_api_value(&messages);
+        let tool_msgs: Vec<_> = api
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert_eq!(tool_msgs[0]["tool_call_id"], call_id);
+        assert!(
+            api.as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["role"] == "assistant" && m.get("tool_calls").is_some()),
+            "assistant tool_calls carrier required after deny resume"
         );
     }
 }

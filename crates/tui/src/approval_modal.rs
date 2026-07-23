@@ -321,10 +321,10 @@ pub async fn handle_approval_modal_mouse(
                 .is_some_and(|d| d.id == id && d.approve_armed())
         };
         if armed {
-            spawn_approval_decision(state, engine, id, true).await;
+            spawn_approval_decision(state, engine, id, true, None).await;
         }
     } else if layout.deny_button.contains(pos) {
-        spawn_approval_decision(state, engine, id, false).await;
+        spawn_approval_decision(state, engine, id, false, None).await;
     }
 }
 
@@ -375,7 +375,7 @@ pub async fn handle_approval_modal_key(
         }
         Some(ModalAction::Ignore) => false,
         Some(ModalAction::Decide { id, approve }) => {
-            spawn_approval_decision(state, engine, id, approve).await;
+            spawn_approval_decision(state, engine, id, approve, None).await;
             false
         }
     }

@@ -183,6 +183,7 @@ pub fn build_snapshot_from(s: &AppState) -> WebSnapshot {
                 "kind": format!("{:?}", a.kind),
                 "description": a.description,
                 "created_at": a.created_at.to_rfc3339(),
+                "decision_reason": a.decision_reason,
                 "repo": a.repo,
                 "pr_number": a.pr_number,
                 "run_id": a.run_id,

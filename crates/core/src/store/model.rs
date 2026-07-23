@@ -40,6 +40,9 @@ pub struct Approval {
     pub status: ApprovalStatus,
     pub created_at: DateTime<Utc>,
     pub decided_at: Option<DateTime<Utc>>,
+    /// Optional explanation supplied when a human denies this approval.
+    #[serde(default)]
+    pub decision_reason: Option<String>,
     /// Payload for PostComment approvals.
     #[serde(default)]
     pub comment_body: Option<String>,

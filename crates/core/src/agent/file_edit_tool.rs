@@ -5,8 +5,8 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::agent::bash_tool::{
-    bash_review_response_schema, parse_bash_review_response_for_tool, BashCommandReview,
-    REVIEW_JSON_RETRY_SUFFIX,
+    bash_review_response_schema, parse_bash_review_response_for_tool, review_gate_unparseable_as_reject,
+    BashCommandReview, REVIEW_JSON_RETRY_SUFFIX,
 };
 use crate::agent::context::truncate_chars;
 use crate::agent::file_tools::{self, EDIT_FILE, WRITE_FILE};
@@ -135,7 +135,16 @@ async fn review_file_edit(
     let raw = llm
         .review_file_edit_json(&retry_prompt, payload, &schema, FILE_EDIT_REVIEW_MAX_TOKENS)
         .await?;
-    parse_bash_review_response_for_tool(&raw, tool_name)
+    match parse_bash_review_response_for_tool(&raw, tool_name) {
+        Ok(review) => Ok(review),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "{tool_name} review JSON still unparseable after retry; escalating as REJECT for human approval"
+            );
+            Ok(review_gate_unparseable_as_reject(&raw))
+        }
+    }
 }
 
 #[cfg(test)]

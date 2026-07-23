@@ -140,13 +140,21 @@ impl Engine {
         Arc::clone(&self.chat_cancel)
     }
 
-    pub async fn decide_approval(&self, id: &uuid::Uuid, approve: bool) -> Result<String> {
+    pub async fn decide_approval(
+        &self,
+        id: &uuid::Uuid,
+        approve: bool,
+        decision_reason: Option<&str>,
+    ) -> Result<String> {
+        let config = self.config.read().expect("config lock").clone();
         let msg = approvals::process_decision(
             Arc::clone(&self.store),
             Arc::clone(&self.github),
             Arc::clone(&self.mcp),
+            &config,
             id,
             approve,
+            decision_reason,
         )
         .await?;
         self.refresh_store().await?;

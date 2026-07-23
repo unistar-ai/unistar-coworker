@@ -129,6 +129,7 @@ pub struct ChatPendingApproval {
     pub session_id: uuid::Uuid,
     pub tool_name: String,
     pub tool_args_json: String,
+    pub tool_call_id: String,
     pub line_index: usize,
 }
 
@@ -205,6 +206,8 @@ pub struct AppState {
     pub chat_lines: Vec<String>,
     /// Tool output keyed by index in `chat_lines` (for expand-on-o).
     pub chat_tool_outputs: std::collections::HashMap<usize, String>,
+    /// Full tool-call args JSON keyed by the `  → tool(...)` line index in `chat_lines`.
+    pub chat_tool_args: std::collections::HashMap<usize, String>,
     /// Raw (uncompressed) reasoning trace keyed by index in `chat_lines`.
     /// Populated when LLM reasoning compression was applied; the summary is
     /// in `chat_tool_outputs` at the same index. Absent when no compression.
@@ -298,6 +301,7 @@ impl AppState {
             chat_history_pos: None,
             chat_lines: vec![],
             chat_tool_outputs: std::collections::HashMap::new(),
+            chat_tool_args: std::collections::HashMap::new(),
             chat_reasoning_originals: std::collections::HashMap::new(),
             chat_line_times: std::collections::HashMap::new(),
             chat_assistant_ids: std::collections::HashMap::new(),
@@ -390,6 +394,13 @@ impl AppState {
         }
     }
 
+    pub fn record_chat_tool_args(&mut self, line_index: usize, args_json: String) {
+        if !args_json.trim().is_empty() {
+            self.chat_tool_args.insert(line_index, args_json);
+            self.bump_chat_history();
+        }
+    }
+
     /// Record the raw (uncompressed) reasoning trace for a transcript line.
     /// Called when LLM reasoning compression was applied; the summary lives in
     /// `chat_tool_outputs` at the same index.
@@ -432,6 +443,7 @@ impl AppState {
 
     fn reindex_chat_indices(&mut self, drained: usize) {
         self.reindex_chat_tool_outputs(drained);
+        self.reindex_chat_tool_args(drained);
         if let Some(pending) = self.chat_pending_approval.as_mut() {
             if pending.line_index >= drained {
                 pending.line_index -= drained;
@@ -612,6 +624,7 @@ impl AppState {
                     session_id: self.chat_session_id.unwrap_or_else(uuid::Uuid::nil),
                     tool_name,
                     tool_args_json: String::new(),
+                    tool_call_id: String::new(),
                     line_index: i,
                 });
                 return;
@@ -709,6 +722,20 @@ impl AppState {
             .filter_map(|(idx, id)| {
                 if idx >= drained {
                     Some((idx - drained, id))
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+
+    fn reindex_chat_tool_args(&mut self, drained: usize) {
+        self.chat_tool_args = self
+            .chat_tool_args
+            .drain()
+            .filter_map(|(idx, body)| {
+                if idx >= drained {
+                    Some((idx - drained, body))
                 } else {
                     None
                 }
@@ -910,6 +937,7 @@ impl AppState {
     pub fn clear_chat_transcript(&mut self) {
         self.chat_lines.clear();
         self.chat_tool_outputs.clear();
+        self.chat_tool_args.clear();
         self.chat_reasoning_originals.clear();
         self.chat_line_times.clear();
         self.chat_assistant_ids.clear();
@@ -1081,7 +1109,11 @@ pub async fn load_chat_session_ui_with_limit(
                 && !crate::agent::context::is_tool_user_question_pending_transcript(&msg.content)
                 && !msg.content.contains("awaiting approval")
             {
+                let start_idx = state.chat_lines.len();
                 state.push_chat_line_at(chat_tool_start_display_line(msg), msg.ts);
+                if let Some(json) = msg.tool_calls_json.as_deref() {
+                    state.record_chat_tool_args(start_idx, json.to_string());
+                }
             }
             let idx = state.chat_lines.len();
             state.push_chat_line_at(chat_message_display_line(msg), msg.ts);

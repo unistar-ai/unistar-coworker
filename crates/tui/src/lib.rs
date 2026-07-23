@@ -509,7 +509,7 @@ async fn try_decide_approval(state: &SharedState, engine: &Arc<Engine>, approve:
     let Some(id) = id else {
         return;
     };
-    spawn_approval_decision(state, engine, id, approve).await;
+    spawn_approval_decision(state, engine, id, approve, None).await;
 }
 
 async fn try_submit_chat(
@@ -1641,6 +1641,7 @@ mod detail_tests {
             status: ApprovalStatus::Pending,
             created_at: Utc::now(),
             decided_at: None,
+            decision_reason: None,
             comment_body: None,
             issue_number: None,
             label: None,
@@ -1666,6 +1667,7 @@ mod detail_tests {
             status: ApprovalStatus::Pending,
             created_at: Utc::now(),
             decided_at: None,
+            decision_reason: None,
             comment_body: Some("hello".into()),
             issue_number: None,
             label: None,

@@ -19,7 +19,6 @@ pub struct ChatDiscoveryState {
 /// Legacy alias — file basics are in `PRELOAD_NATIVE_TOOLS`; nothing extra to warm at cold start.
 pub const PINNED_WARM_TOOLS: &[&str] = &[];
 
-#[cfg(test)]
 const PR_TASK_WARM_TOOLS: &[&str] = &[
     "pr_get_overview",
     "pr_list_changed_files",
@@ -68,8 +67,7 @@ impl ChatDiscoveryState {
         state
     }
 
-    #[cfg(test)]
-    /// Optional PR-task warmup (not used in lazy chat cold start).
+    /// Warm PR/CI harness tools when the user message looks like a GitHub PR task.
     pub fn apply_github_pr_bootstrap(state: &mut Self, user_message: &str) {
         if !message_looks_like_pr_task(user_message) {
             return;
